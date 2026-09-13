@@ -7,9 +7,9 @@ import type { CapabilityHandler } from '../../src/core/capability/capability.ts'
 
 export function liveSupabase(): SupabaseDatabase | null {
   const url = process.env.SUPABASE_URL;
-  const serverKey = process.env.SUPABASE_SERVER_KEY;
-  if (!url || !serverKey) return null;
-  return createClient(url, serverKey) as unknown as SupabaseDatabase;
+  const secret = process.env.SUPABASE_SECRET_KEY;
+  if (!url || !secret) return null;
+  return createClient(url, secret) as unknown as SupabaseDatabase;
 }
 
 export function liveRuntime(db: SupabaseDatabase, handler?: CapabilityHandler): RuntimeService {
@@ -57,6 +57,14 @@ export async function countLiveRuns(db: SupabaseDatabase, projectId?: string): P
   const q = db.from('runs').select('id').eq('project_id', projectId ?? '');
   const { data } = await (q as unknown as Promise<{ data: Array<Record<string, unknown>> | null }>);
   return Array.isArray(data) ? data.length : 0;
+}
+
+export async function clearLiveRuns(db: SupabaseDatabase, projectId: string): Promise<void> {
+  await db.from('runs').delete().eq('project_id', projectId);
+}
+
+export async function clearLiveMemberships(db: SupabaseDatabase, projectId: string): Promise<void> {
+  await db.from('project_memberships').delete().eq('project_id', projectId);
 }
 
 export type { SupabaseClient };
