@@ -42,10 +42,14 @@ export async function connectProvider(
     return fail('a valid apiKey is required', 'validation');
   }
   try {
+    // Validate the incoming credential with the gateway BEFORE storing it.
+    deps.openRouter.setApiKey(apiKey);
     const probe = await deps.openRouter.validateKey();
     if (!probe) return fail('provider rejected the credential', 'provider');
 
     const config = await deps.storage.saveProviderSecret(providerKey, apiKey, displayName);
+    // Restore the stored (rotated) credential as the gateway's active key.
+    deps.openRouter.setApiKey(apiKey);
     return ok(publicConfig(config));
   } catch (e) {
     return fail(e instanceof Error ? e.message : 'connection failed', 'provider');

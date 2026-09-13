@@ -34,7 +34,7 @@ export interface HttpApiDeps {
 }
 
 const ROUTE = /^\/v1\/projects\/([^/]+)\/runs$/;
-const ADMIN_ROUTE = /^\/v1\/admin\/providers(?:\/([^/]+))?$/;
+const ADMIN_ROUTE = /^\/v1\/admin\/providers(?:\/([^/]+)(?:\/(test|revoke|models))?)?$/;
 
 export function createHttpApi(deps: HttpApiDeps): Server {
   return createServer(async (req, res) => {

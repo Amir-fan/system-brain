@@ -24,7 +24,7 @@ const BASE = 'http://127.0.0.1:8787';
 const log = (...a: unknown[]) => console.log('[closure]', ...a);
 
 async function runChild(port: number, includeTestKey: boolean): Promise<Record<string, string>> {
-  const env = { ...process.env, CLOSURE_PORT: String(port) };
+  const env = { ...process.env, CLOSURE_PORT: String(port), KIP_API_TOKEN: 'closure-token' };
   if (!includeTestKey) delete env.OPENROUTER_TEST_KEY; // child must NOT see the test key
   const child = spawn(process.execPath, ['--env-file=.env.local', '--import', 'tsx', 'scripts/closure-child.ts'], {
     cwd: process.cwd(),
@@ -98,6 +98,7 @@ async function main() {
     // 10-14 child boots fresh server (no test key), runtime resolves from Vault, real inference
     log('child #1: fresh boot, vault-resolved credential, real inference');
     const c1 = await runChild(8790, false); // NO test key
+    log('child#1 raw:', JSON.stringify(c1));
     Object.assign(R, {
       runtime_inference: c1.runtime_inference === 'completed' ? 'PASS' : 'FAIL',
       run_status: c1.run_status,
@@ -114,6 +115,7 @@ async function main() {
     R.revoke_vault = vault2.data === null ? 'PASS' : 'FAIL';
     log('child #2: fresh boot WITHOUT credential; runtime invocation must fail');
     const c2 = await runChild(8791, false); // NO test key, and vault empty
+    log('child#2 raw:', JSON.stringify(c2));
     R.after_revoke_blocked = (c2.runtime_inference === 'blocked' || c2.harness_error) ? 'PASS' : 'FAIL';
     R.no_env_fallback = (c2.runtime_inference === 'blocked' || c2.harness_error) ? 'PASS' : 'FAIL';
 

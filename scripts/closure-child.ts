@@ -10,7 +10,7 @@ import type { SupabaseDatabase } from '../src/platform/supabase/supabase.persist
 
 const emit = (k: string, v: unknown) => console.log(`[res] ${k}=${v}`);
 const PORT = Number(process.env.CLOSURE_PORT ?? 8790);
-const TOKEN = 'closure-token';
+const TOKEN = process.env.KIP_API_TOKEN ?? 'closure-token';
 const BASE = `http://127.0.0.1:${PORT}`;
 
 async function main() {
@@ -28,7 +28,7 @@ async function main() {
   const server = await compose({
     supabaseUrl: process.env.SUPABASE_URL!,
     supabaseSecretKey: process.env.SUPABASE_SECRET_KEY!,
-    tokenActors: new Map([['closure', TOKEN]]),
+    tokenActors: new Map([[TOKEN, 'closure']]),
   });
   await new Promise<void>((r) => server.listen(PORT, () => r()));
 
