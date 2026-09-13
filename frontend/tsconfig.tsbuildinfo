@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/i18n.tsx","./src/main.tsx","./src/contracts/models.ts","./src/data/demo.ts","./src/ui/sidebar.tsx","./src/ui/topbar.tsx","./src/ui/primitives.tsx","./src/views/aiandmodels.tsx","./src/views/modelassignment.tsx","./src/views/providers.tsx","./src/views/recentactivity.tsx","./src/views/usagecosts.tsx","./vite.config.ts"],"version":"5.9.3"}
