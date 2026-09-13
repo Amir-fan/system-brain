@@ -27,10 +27,13 @@ import {
 import type { ProviderStorage } from '../provider/provider.storage.ts';
 import type { ErrorCategory } from '../../core/run/run.ts';
 import type { ApiResult } from './api.types.ts';
+import type { SourceApiDeps } from './source-handler.ts';
+import { handleListSources, handleCreateSource, handleGetSource, handleUpdateSource, handleArchiveSource } from './source-handler.ts';
 
 export interface HttpApiDeps {
   runtime: Pick<import('../../core/runtime/runtime.service.ts').RuntimeService, 'execute'>;
   tokens: TokenActorMap;
+  sources?: SourceApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -38,6 +41,7 @@ export interface HttpApiDeps {
 }
 
 const ROUTE = /^\/v1\/projects\/([^/]+)\/runs$/;
+const SOURCES_RE = /^\/v1\/projects\/([^/]+)\/sources(?:\/([^/]+))?$/;
 const ADMIN_ROUTE = /^\/v1\/admin\/providers(?:\/([^/]+)(?:\/(test|revoke|models))?)?$/;
 
 export function createHttpApi(deps: HttpApiDeps): Server {
@@ -60,6 +64,9 @@ async function handleProject(
   url: string,
   deps: HttpApiDeps,
 ): Promise<void> {
+  if (url.includes('/sources')) {
+    return handleSources(req, res, url, deps);
+  }
   if (req.method !== 'POST') {
     return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
   }
@@ -84,6 +91,48 @@ async function handleProject(
     request: body as never,
   });
   return sendJson(res, result.status, result);
+}
+
+async function handleSources(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.sources) {
+    return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+  }
+  const match = SOURCES_RE.exec(url);
+  if (!match) {
+    return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+  }
+  const projectId = decodeURIComponent(match[1]);
+  const sourceId = match[2] ? decodeURIComponent(match[2]) : undefined;
+  const actor = actorFromToken(bearerFromHeader(req.headers.authorization), deps.tokens);
+  if (!actor) {
+    return sendJson(res, 401, { ok: false, status: 401, error: { category: 'authorization', message: 'authentication required' } });
+  }
+
+  let result: import('./source-handler.ts').SourceApiResult;
+  if (req.method === 'GET' && !sourceId) {
+    result = await handleListSources(deps.sources, projectId, actor);
+  } else if (req.method === 'POST' && !sourceId) {
+    result = await handleCreateSource(deps.sources, projectId, actor, await readJson(req).catch(() => ({})));
+  } else if (req.method === 'GET' && sourceId) {
+    result = await handleGetSource(deps.sources, projectId, actor, sourceId);
+  } else if (req.method === 'PATCH' && sourceId) {
+    result = await handleUpdateSource(deps.sources, projectId, actor, sourceId, await readJson(req).catch(() => ({})));
+  } else if (req.method === 'DELETE' && sourceId) {
+    result = await handleArchiveSource(deps.sources, projectId, actor, sourceId);
+  } else {
+    return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+  }
+  return sendJson(res, result.status, {
+    ok: result.ok,
+    status: result.status,
+    ...('data' in result && result.ok ? { data: result.data } : {}),
+    ...('error' in result && !result.ok ? { error: result.error } : {}),
+  } as ApiResult);
 }
 
 async function handleAdmin(

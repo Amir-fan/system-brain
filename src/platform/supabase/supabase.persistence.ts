@@ -22,6 +22,8 @@ export type SupabaseDatabase = {
   update(values: Record<string, unknown>): SupabaseDatabase;
   delete(): SupabaseDatabase;
   eq(column: string, value: unknown): SupabaseDatabase;
+  neq(column: string, value: unknown): SupabaseDatabase;
+  limit(count: number): Promise<{ data: Array<Record<string, unknown>> | null; error: unknown }>;
   maybeSingle(): Promise<{ data: Record<string, unknown> | null; error: unknown }>;
   rpc(fn: string, args?: Record<string, unknown>): Promise<{ data: unknown; error: { message: string } | null }>;
 };

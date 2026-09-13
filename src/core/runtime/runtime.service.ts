@@ -7,6 +7,7 @@
  * @purpose Executable platform runtime spine: one path from trusted actor to run result.
  */
 
+import { authorizeProject } from '../authorization/project-boundary.ts';
 import type { Actor } from '../authorization/actor.ts';
 import type { CapabilityLookup, CapabilityResult } from '../capability/capability.ts';
 import type { ErrorCategory, RunStatus } from '../run/run.ts';
@@ -53,16 +54,12 @@ export class RuntimeService {
   ) {}
 
   async execute(ctx: ExecuteContext): Promise<ExecuteResult> {
-    const project = await this.persistence.getProject(ctx.projectId);
-    if (!project) {
-      return { error: makeError('not_found', 'project not found', 'PROJECT_NOT_FOUND') };
-    }
-    if (project.status !== 'active') {
-      return { error: makeError('validation', 'project is not active', 'PROJECT_NOT_ACTIVE') };
-    }
-
-    const membership = await this.persistence.getMembership(ctx.projectId, ctx.actor);
-    if (!membership) {
+    // Canonical project-boundary authorization (shared with project-scoped resources).
+    const decision = await authorizeProject(this.persistence, ctx.projectId, ctx.actor, 'write');
+    if (!decision.ok) {
+      const kind = decision.kind;
+      if (kind === 'not_found') return { error: makeError('not_found', 'project not found', 'PROJECT_NOT_FOUND') };
+      if (kind === 'not_active') return { error: makeError('validation', 'project is not active', 'PROJECT_NOT_ACTIVE') };
       return { error: makeError('authorization', 'actor is not a member', 'NOT_AUTHORIZED') };
     }
 

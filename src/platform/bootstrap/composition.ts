@@ -22,6 +22,7 @@ import type { Server } from 'node:http';
 import { createHttpApi } from '../api/http-server.ts';
 import type { TokenActorMap } from '../api/auth.ts';
 import { createProviderStorage } from '../provider/provider.storage.ts';
+import { createSourceStorage } from '../provider/source.storage.ts';
 import {
   createModelAssignmentStorage,
   createModelAssignmentResolver,
@@ -45,6 +46,7 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   const db = createClient(opts.supabaseUrl, opts.supabaseSecretKey) as unknown as SupabaseDatabase;
   const persistence = createSupabaseRuntimePersistence(db);
   const providerStorage = createProviderStorage(db);
+  const sourceStorage = createSourceStorage(db);
   const assignmentStorage = createModelAssignmentStorage(db);
   const assignmentResolver = createModelAssignmentResolver(assignmentStorage);
 
@@ -68,6 +70,7 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   return createHttpApi({
     runtime,
     tokens: opts.tokenActors,
+    sources: { storage: sourceStorage, boundary: persistence },
     admin: {
       storage: providerStorage,
       adminApi: {
