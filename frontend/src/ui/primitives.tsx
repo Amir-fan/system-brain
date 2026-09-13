@@ -53,11 +53,13 @@ export function Button({
   children,
   onClick,
   className = '',
+  disabled = false,
 }: {
   variant?: 'default' | 'primary' | 'ghost' | 'outline';
   children: ReactNode;
   onClick?: () => void;
   className?: string;
+  disabled?: boolean;
 }) {
   const variants = {
     default: 'bg-white text-slate-700 border border-surface-line hover:bg-slate-50',
@@ -69,7 +71,8 @@ export function Button({
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium transition ${variants[variant]} ${className}`}
+      disabled={disabled}
+      className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${variants[variant]} ${className}`}
     >
       {children}
     </button>

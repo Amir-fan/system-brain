@@ -23,6 +23,7 @@ export type SupabaseDatabase = {
   delete(): SupabaseDatabase;
   eq(column: string, value: unknown): SupabaseDatabase;
   maybeSingle(): Promise<{ data: Record<string, unknown> | null; error: unknown }>;
+  rpc(fn: string, args?: Record<string, unknown>): Promise<{ data: unknown; error: { message: string } | null }>;
 };
 
 export interface SupabasePersistenceOptions {

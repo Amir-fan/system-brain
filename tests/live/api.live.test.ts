@@ -55,10 +55,10 @@ before(async () => {
   reg.register('platform.boom', async () => {
     throw new Error('boom');
   });
-  if (process.env.OPENAI_API_KEY) {
-    const { OpenAiGateway } = await import('../../src/platform/model-gateway/openai.gateway.ts');
+  if (process.env.OPENROUTER_API_KEY) {
+    const { OpenRouterGateway } = await import('../../src/platform/model-gateway/openrouter.gateway.ts');
     const { platformAiEcho } = await import('../../src/core/capability/ai-echo.ts');
-    const gw = new OpenAiGateway({ apiKey: process.env.OPENAI_API_KEY, model: process.env.MODEL_NAME ?? 'gpt-4o-mini' });
+    const gw = new OpenRouterGateway({ apiKey: process.env.OPENROUTER_API_KEY, defaultModel: process.env.MODEL_NAME ?? 'openrouter/auto' });
     reg.register('platform.ai-echo', platformAiEcho(gw));
   }
   server = createKipApi({ persistence: createSupabaseRuntimePersistence(db), capabilities: reg, tokens });
@@ -164,7 +164,7 @@ test('live api: cross-project denied', { skip: !hasKey }, async () => {
   assert.equal(await countRuns(projectB), 0);
 });
 
-test('live api: ai-echo persists provider/model/usage metadata on completed run', { skip: !hasKey || !process.env.OPENAI_API_KEY }, async () => {
+test('live api: ai-echo persists provider/model/usage metadata on completed run', { skip: !hasKey || !process.env.OPENROUTER_API_KEY }, async () => {
   await clearRuns(projectA);
   const r = await post(projectA, { capability: 'platform.ai-echo', input: { message: 'Reply with one word: ok' } });
   assert.equal(r.status, 200);

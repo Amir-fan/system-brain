@@ -4,7 +4,7 @@
  * @layer platform
  * @owner platform-api
  * @feature K0-003
- * @purpose Minimal Node-native HTTP listener for the single KIP API endpoint.
+ * @purpose Minimal Node-native HTTP listener for the KIP API (project + admin routes).
  */
 
 import type { Server } from 'node:http';
@@ -12,55 +12,128 @@ import { createServer } from 'node:http';
 import { handleInvoke } from './api-handler.ts';
 import { actorFromToken } from './auth.ts';
 import type { TokenActorMap } from './auth.ts';
+import { isPlatformAdmin, bearerFromHeader } from './admin-auth.ts';
+import type { AdminProviderApiDeps } from './admin-provider.ts';
+import {
+  connectProvider,
+  listProviders,
+  revokeProvider,
+  testConnection,
+  listProviderModels,
+} from './admin-provider.ts';
+import type { ProviderStorage } from '../provider/provider.storage.ts';
 import type { ApiResult } from './api.types.ts';
 
 export interface HttpApiDeps {
   runtime: Pick<import('../../core/runtime/runtime.service.ts').RuntimeService, 'execute'>;
   tokens: TokenActorMap;
+  admin?: {
+    storage: ProviderStorage;
+    adminApi: AdminProviderApiDeps;
+  };
 }
 
 const ROUTE = /^\/v1\/projects\/([^/]+)\/runs$/;
+const ADMIN_ROUTE = /^\/v1\/admin\/providers(?:\/([^/]+))?$/;
 
 export function createHttpApi(deps: HttpApiDeps): Server {
   return createServer(async (req, res) => {
     try {
-      if (req.method !== 'POST') {
-        return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+      const url = req.url ?? '';
+      if (url.startsWith('/v1/admin')) {
+        return handleAdmin(req, res, url, deps);
       }
-      const match = ROUTE.exec(req.url ?? '');
-      if (!match) {
-        return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
-      }
-      const projectId = decodeURIComponent(match[1]);
-      const token = bearerToken(req.headers.authorization);
-      const actor = actorFromToken(token, deps.tokens);
-      if (!actor) {
-        return sendJson(res, 401, { ok: false, status: 401, error: { category: 'authorization', message: 'authentication required' } });
-      }
-
-      let body: unknown;
-      try {
-        body = await readJson(req);
-      } catch {
-        return sendJson(res, 400, { ok: false, status: 400, error: { category: 'validation', message: 'invalid JSON body' } });
-      }
-
-      const result = await handleInvoke(deps.runtime as never, {
-        actor,
-        projectId,
-        request: body as never,
-      });
-      return sendJson(res, result.status, result);
+      return handleProject(req, res, url, deps);
     } catch {
       return sendJson(res, 500, { ok: false, status: 500, error: { category: 'runtime', message: 'internal error' } });
     }
   });
 }
 
-function bearerToken(header: string | undefined): string | undefined {
-  if (!header) return undefined;
-  const m = /^Bearer\s+(.+)$/i.exec(header);
-  return m ? m[1] : undefined;
+async function handleProject(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (req.method !== 'POST') {
+    return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+  }
+  const match = ROUTE.exec(url);
+  if (!match) {
+    return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+  }
+  const projectId = decodeURIComponent(match[1]);
+  const actor = actorFromToken(bearerFromHeader(req.headers.authorization), deps.tokens);
+  if (!actor) {
+    return sendJson(res, 401, { ok: false, status: 401, error: { category: 'authorization', message: 'authentication required' } });
+  }
+  let body: unknown;
+  try {
+    body = await readJson(req);
+  } catch {
+    return sendJson(res, 400, { ok: false, status: 400, error: { category: 'validation', message: 'invalid JSON body' } });
+  }
+  const result = await handleInvoke(deps.runtime as never, {
+    actor,
+    projectId,
+    request: body as never,
+  });
+  return sendJson(res, result.status, result);
+}
+
+async function handleAdmin(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.admin) {
+    return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+  }
+  // Temporary bootstrap admin auth — constant-time check, not logged.
+  const supplied = bearerFromHeader(req.headers.authorization);
+  if (!isPlatformAdmin(supplied)) {
+    return sendJson(res, 401, { ok: false, status: 401, error: { category: 'authorization', message: 'admin authentication required' } });
+  }
+
+  const match = ADMIN_ROUTE.exec(url);
+  if (!match) {
+    return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+  }
+  const providerKey = match[1] ?? 'openrouter';
+  if (providerKey !== 'openrouter') {
+    return sendJson(res, 400, { ok: false, status: 400, error: { category: 'validation', message: 'unknown provider' } });
+  }
+
+  let apiResponse;
+  try {
+    if (req.method === 'GET' && /\/models$/.test(url)) {
+      apiResponse = await listProviderModels(deps.admin.adminApi);
+    } else if (req.method === 'POST' && /\/test$/.test(url)) {
+      apiResponse = await testConnection(deps.admin.adminApi, providerKey);
+    } else if (req.method === 'POST' && /\/revoke$/.test(url)) {
+      apiResponse = await revokeProvider(deps.admin.adminApi, providerKey);
+    } else if (req.method === 'POST' && /\/providers(?:\/[^/]+)?$/.test(url)) {
+      apiResponse = await connectProvider(deps.admin.adminApi, providerKey, await readJson(req).catch(() => ({})));
+    } else if (req.method === 'GET' && /\/providers$/.test(url)) {
+      apiResponse = await listProviders(deps.admin.adminApi);
+    } else {
+      return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+    }
+
+    const status = apiResponse.ok ? 200 : 400;
+    const payload = apiResponse.ok
+      ? { ok: true, data: apiResponse.data }
+      : { ok: false, status, error: { category: apiResponse.error.category, message: apiResponse.error.message } };
+    return sendJson(res, status, payload as ApiResult);
+  } catch (e) {
+    return sendJson(res, 500, {
+      ok: false,
+      status: 500,
+      error: { category: 'runtime', message: 'internal error' },
+    });
+  }
 }
 
 function readJson(req: import('node:http').IncomingMessage): Promise<unknown> {
@@ -86,3 +159,5 @@ function sendJson(res: import('node:http').ServerResponse, status: number, paylo
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(payload));
 }
+
+export { bearerFromHeader };

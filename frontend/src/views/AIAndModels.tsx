@@ -8,6 +8,7 @@ import { UsageCosts } from './UsageCosts';
 import { RecentActivity } from './RecentActivity';
 import {
   demoProviders,
+  viaOpenRouter,
   demoWorkloads,
   modelOptions,
   demoUsageStats,
@@ -74,7 +75,7 @@ export function AIAndModels() {
                   </Button>
                 }
               />
-              <ProviderGrid providers={demoProviders} />
+              <ProviderGrid providers={demoProviders} viaOpenRouter={viaOpenRouter} />
             </Card>
 
             {/* Model Assignment */}
