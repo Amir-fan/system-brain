@@ -20,8 +20,12 @@ import {
   revokeProvider,
   testConnection,
   listProviderModels,
+  listAssignments,
+  putAssignment,
+  deleteAssignment,
 } from './admin-provider.ts';
 import type { ProviderStorage } from '../provider/provider.storage.ts';
+import type { ErrorCategory } from '../../core/run/run.ts';
 import type { ApiResult } from './api.types.ts';
 
 export interface HttpApiDeps {
@@ -97,7 +101,28 @@ async function handleAdmin(
     return sendJson(res, 401, { ok: false, status: 401, error: { category: 'authorization', message: 'admin authentication required' } });
   }
 
-  const match = ADMIN_ROUTE.exec(url);
+  // Model Assignment control-plane routes first (different path shape).
+  if (url.startsWith('/v1/admin/model-assignments')) {
+    const aMatch = /^\/v1\/admin\/model-assignments(?:\/([^/]+))?$/.exec(url);
+    if (!aMatch) {
+      return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+    }
+    const workloadKey = aMatch[1];
+    let apiResponse: { ok: boolean; data?: unknown; error?: { message: string; category: string } };
+    if (req.method === 'GET') {
+      apiResponse = await listAssignments(deps.admin.adminApi);
+    } else if (req.method === 'PUT' && workloadKey) {
+      apiResponse = await putAssignment(deps.admin.adminApi, decodeURIComponent(workloadKey), await readJson(req).catch(() => ({})));
+    } else if (req.method === 'DELETE' && workloadKey) {
+      apiResponse = await deleteAssignment(deps.admin.adminApi, decodeURIComponent(workloadKey));
+    } else {
+      return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+    }
+    return sendResult(res, apiResponse);
+  }
+
+  const ASSIGNMENT_RE = /^\/v1\/admin\/providers(?:\/([^/]+)(?:\/(test|revoke|models))?)?$/;
+  const match = ASSIGNMENT_RE.exec(url);
   if (!match) {
     return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
   }
@@ -121,12 +146,7 @@ async function handleAdmin(
     } else {
       return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
     }
-
-    const status = apiResponse.ok ? 200 : 400;
-    const payload = apiResponse.ok
-      ? { ok: true, data: apiResponse.data }
-      : { ok: false, status, error: { category: apiResponse.error.category, message: apiResponse.error.message } };
-    return sendJson(res, status, payload as ApiResult);
+    return sendResult(res, apiResponse);
   } catch (e) {
     return sendJson(res, 500, {
       ok: false,
@@ -134,6 +154,14 @@ async function handleAdmin(
       error: { category: 'runtime', message: 'internal error' },
     });
   }
+}
+
+function sendResult(res: import('node:http').ServerResponse, apiResponse: { ok: boolean; data?: unknown; error?: { message: string; category: string } }): void {
+  const status = apiResponse.ok ? 200 : 400;
+  const payload: ApiResult = apiResponse.ok
+    ? ({ ok: true, status, data: apiResponse.data } as unknown as ApiResult)
+    : { ok: false, status, error: { category: (apiResponse.error?.category ?? 'runtime') as ErrorCategory, message: apiResponse.error?.message ?? 'error' } };
+  sendJson(res, status, payload);
 }
 
 function readJson(req: import('node:http').IncomingMessage): Promise<unknown> {

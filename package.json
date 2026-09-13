@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node --import tsx --test \"tests/**/*.test.ts\"",
     "test:dev": "node --import tsx --env-file=.env.local --test \"tests/**/*.test.ts\"",
+    "dev:api": "node --env-file=.env.local --import tsx src/boot.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {

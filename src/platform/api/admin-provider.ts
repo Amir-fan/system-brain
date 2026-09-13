@@ -13,11 +13,19 @@
 
 import type { ProviderStorage } from '../provider/provider.storage.ts';
 import type { OpenRouterGateway } from '../model-gateway/openrouter.gateway.ts';
+import type {
+  ModelAssignmentStorage,
+  ModelAssignmentResolver,
+} from '../provider/model-assignment.ts';
+import { isWorkloadKey, ALLOWED_WORKLOADS } from '../provider/model-assignment.ts';
+import type { ModelGatewayOutput } from '../../core/model-gateway/model-gateway.ts';
 import { providerError } from '../../core/model-gateway/gateway-errors.ts';
 
 export interface AdminProviderApiDeps {
   storage: ProviderStorage;
   openRouter: OpenRouterGateway;
+  assignmentStorage?: ModelAssignmentStorage;
+  resolver?: ModelAssignmentResolver;
 }
 
 export type AdminApiResponse =
@@ -99,6 +107,71 @@ export async function listProviderModels(deps: AdminProviderApiDeps): Promise<Ad
     return fail('models request failed', 'provider');
   }
 }
+
+/** Live OpenRouter catalog normalized for the UI (never persisted; no secrets). */
+export async function getModelCatalog(deps: AdminProviderApiDeps): Promise<AdminApiResponse> {
+  try {
+    const secret = await deps.storage.readSecret('openrouter');
+    if (secret) deps.openRouter.setApiKey(secret);
+    const models = await deps.openRouter.listModels();
+    return ok({ count: models.length, models: normalizeCatalog(models) });
+  } catch {
+    return fail('models request failed', 'provider');
+  }
+}
+
+function normalizeCatalog(raw: Array<{ id: string; name?: string; context_length?: number; pricing?: Record<string, unknown> }>): Array<Record<string, unknown>> {
+  return raw.map((m) => ({
+    id: m.id,
+    name: m.name ?? m.id,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Model Assignment admin endpoints (control-plane, platform-level)
+// ---------------------------------------------------------------------------
+
+export async function listAssignments(deps: AdminProviderApiDeps): Promise<AdminApiResponse> {
+  if (!deps.assignmentStorage) return fail('assignment storage not configured', 'runtime');
+  const assignments = await deps.assignmentStorage.list();
+  return ok(assignments.map((a) => ({
+    workloadKey: a.workloadKey,
+    providerKey: a.providerKey,
+    modelId: a.modelId,
+    isActive: a.isActive,
+  })));
+}
+
+export async function putAssignment(
+  deps: AdminProviderApiDeps,
+  workloadKey: string,
+  body: unknown,
+): Promise<AdminApiResponse> {
+  if (!deps.assignmentStorage) return fail('assignment storage not configured', 'runtime');
+  if (!isWorkloadKey(workloadKey)) return fail(`invalid workload '${workloadKey}'`, 'validation');
+  const { modelId } = (body ?? {}) as { modelId?: string };
+  if (!modelId || typeof modelId !== 'string') return fail('modelId is required', 'validation');
+
+  // Validate the selected model against the live OpenRouter catalog.
+  const catalogRes = await getModelCatalog(deps);
+  if (!catalogRes.ok) return catalogRes;
+  const catalog = (catalogRes.data as { models: Array<{ id: string }> }).models;
+  if (!catalog.some((m) => m.id === modelId)) {
+    return fail(`model '${modelId}' is not in the OpenRouter catalog`, 'validation');
+  }
+
+  const assignment = await deps.assignmentStorage.upsert(workloadKey as never, modelId, 'openrouter');
+  return ok({ workloadKey: assignment.workloadKey, providerKey: assignment.providerKey, modelId: assignment.modelId, isActive: assignment.isActive });
+}
+
+export async function deleteAssignment(deps: AdminProviderApiDeps, workloadKey: string): Promise<AdminApiResponse> {
+  if (!deps.assignmentStorage) return fail('assignment storage not configured', 'runtime');
+  if (!isWorkloadKey(workloadKey)) return fail(`invalid workload '${workloadKey}'`, 'validation');
+  await deps.assignmentStorage.remove(workloadKey); // revert to unassigned (no default model)
+  return ok({ workloadKey, assigned: false });
+}
+
+export { ALLOWED_WORKLOADS };
 
 /** Never return the secret — only masked metadata + status. */
 function publicConfig(c: Awaited<ReturnType<ProviderStorage['getProvider']>> & object): unknown {

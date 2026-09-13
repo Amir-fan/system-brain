@@ -88,5 +88,5 @@ test('AI capability through Runtime + fake gateway: run completes with model met
   assert.equal(run.providerKey, 'fake');
   assert.equal(run.modelName, 'fake-mini');
   assert.equal(run.usage?.totalTokens, 8);
-  assert.equal(gateway.lastInput?.model?.profile, 'fast');
+  assert.equal(gateway.lastInput?.model?.profile, 'source_analysis');
 });

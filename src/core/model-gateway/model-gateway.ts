@@ -28,6 +28,8 @@ export interface ModelGatewayInput {
   input: unknown;
   /** Workload intent only — never a hardcoded provider model id. */
   model?: ModelRequirement;
+  /** Optional already-resolved model id (from the control-plane assignment resolver). */
+  modelId?: string;
 }
 
 export interface ModelUsage {

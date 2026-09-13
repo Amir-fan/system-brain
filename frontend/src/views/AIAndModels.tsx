@@ -5,15 +5,11 @@ import { Card, CardHeader, Button } from '../ui/primitives';
 import { ProviderGrid } from './Providers';
 import { ModelAssignment } from './ModelAssignment';
 import { UsageCosts } from './UsageCosts';
-import { RecentActivity } from './RecentActivity';
 import {
   demoProviders,
   viaOpenRouter,
-  demoWorkloads,
-  modelOptions,
   demoUsageStats,
   demoChart,
-  demoActivity,
 } from '../data/demo';
 
 const TABS = [
@@ -78,26 +74,11 @@ export function AIAndModels() {
               <ProviderGrid providers={demoProviders} viaOpenRouter={viaOpenRouter} />
             </Card>
 
-            {/* Model Assignment */}
-            <ModelAssignment
-              assignments={Object.fromEntries(demoWorkloads.map((w) => [w.workloadKey, { model: w.modelId, recommended: w.recommended }])) as Record<
-                import('../contracts/models').WorkloadKey,
-                { model: string; recommended: boolean }
-              >}
-              models={modelOptions}
-              onChange={(_k, _m) => {
-                /* UI-only: persists once wired to backend */
-              }}
-              onSave={() => {
-                /* UI-only */
-              }}
-            />
+            {/* Model Assignment — self-contained, live (loads assignments + catalog) */}
+            <ModelAssignment />
 
             {/* Usage & Costs */}
             <UsageCosts stats={demoUsageStats} chart={demoChart} />
-
-            {/* Recent Activity */}
-            <RecentActivity events={demoActivity} />
           </>
         )}
 

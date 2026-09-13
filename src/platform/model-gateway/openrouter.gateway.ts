@@ -75,7 +75,9 @@ export class OpenRouterGateway implements ModelGateway {
   async generateText(input: ModelGatewayInput): Promise<ModelGatewayOutput> {
     const started = Date.now();
     const message = String((input.input as { message?: unknown } | undefined)?.message ?? '');
-    const model = this.defaultModel;
+    // The control-plane resolver supplies the model id. If none was resolved,
+    // fall back to this adapter's configured default model (the boot default).
+    const model = input.modelId ?? this.defaultModel;
 
     const res = await this.raw('/chat/completions', {
       method: 'POST',

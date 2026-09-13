@@ -40,11 +40,11 @@ export const modelOptions: string[] = [
 ];
 
 export const demoWorkloads: WorkloadModelAssignment[] = [
-  { workloadKey: 'source-analysis', modelId: 'openai/gpt-4o-mini', recommended: true },
-  { workloadKey: 'smart-scan', modelId: 'openai/gpt-4o-mini', recommended: false },
-  { workloadKey: 'chat-assistant', modelId: 'openrouter/auto', recommended: false },
-  { workloadKey: 'embeddings', modelId: 'openai/text-embedding-3-small', recommended: false },
-  { workloadKey: 'summarization', modelId: 'openai/gpt-4o-mini', recommended: false },
+  { workloadKey: 'source_analysis', modelId: 'openai/gpt-4o-mini', recommended: false },
+  { workloadKey: 'chat_assistant', modelId: '', recommended: false },
+  { workloadKey: 'vision_scan', modelId: '', recommended: false },
+  { workloadKey: 'embeddings', modelId: '', recommended: false },
+  { workloadKey: 'summarization', modelId: '', recommended: false },
 ];
 
 export const demoUsageStats: UsageStat[] = [

@@ -13,6 +13,8 @@
  * The OpenRouter provider credential is NOT read from env for normal runtime.
  * It is managed via the Admin Provider API and stored in Supabase Vault; on boot
  * the Model Gateway resolves and loads it from provider_configs + Vault.
+ * Model Assignment is a control-plane concern: capabilities declare a workload and
+ * the ResolvingModelGateway maps it to a model through ModelAssignmentResolver.
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -20,12 +22,17 @@ import type { Server } from 'node:http';
 import { createHttpApi } from '../api/http-server.ts';
 import type { TokenActorMap } from '../api/auth.ts';
 import { createProviderStorage } from '../provider/provider.storage.ts';
+import {
+  createModelAssignmentStorage,
+  createModelAssignmentResolver,
+} from '../provider/model-assignment.ts';
 import { OpenRouterGateway } from '../model-gateway/openrouter.gateway.ts';
+import { ResolvingModelGateway } from '../model-gateway/resolving-gateway.ts';
 import { createSupabaseRuntimePersistence } from '../supabase/supabase.persistence.ts';
 import type { SupabaseDatabase } from '../supabase/supabase.persistence.ts';
 import { RuntimeService } from '../../core/runtime/runtime.service.ts';
 import { MapCapabilityRegistry } from '../../core/capability/capability-registry.ts';
-import { platformAiEcho } from '../../core/capability/ai-echo.ts';
+import { platformAiCompletion } from '../../core/capability/ai-echo.ts';
 
 export interface BootstrapEnv {
   supabaseUrl: string;
@@ -38,24 +45,24 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   const db = createClient(opts.supabaseUrl, opts.supabaseSecretKey) as unknown as SupabaseDatabase;
   const persistence = createSupabaseRuntimePersistence(db);
   const providerStorage = createProviderStorage(db);
+  const assignmentStorage = createModelAssignmentStorage(db);
+  const assignmentResolver = createModelAssignmentResolver(assignmentStorage);
 
   const registry = new MapCapabilityRegistry();
   registry.register('platform.echo', async ({ input }) => input);
 
-  // OpenRouter is the single active provider. No OPENROUTER_API_KEY env needed:
-  // the credential is resolved from provider_configs + Supabase Vault at boot.
+  // OpenRouter is the single active provider (credential resolved from Vault).
   const openRouter = new OpenRouterGateway({
     apiKey: '',
     defaultModel: opts.openRouterModel ?? 'openrouter/auto',
   });
-
-  // Resolve the stored platform provider credential from Vault (if the super
-  // admin has connected OpenRouter). If not yet configured, gateway runs without
-  // a credential until a key is stored via the Admin API.
   const storedKey = await providerStorage.readSecret('openrouter');
   if (storedKey) openRouter.setApiKey(storedKey);
 
-  registry.register('platform.ai-echo', platformAiEcho(openRouter));
+  // Control-plane gateway: resolves workload -> assigned model before the adapter.
+  const gateway = new ResolvingModelGateway(openRouter, assignmentResolver);
+  registry.register('platform.ai-completion', platformAiCompletion(gateway));
+  registry.register('platform.ai-echo', platformAiCompletion(gateway));
 
   const runtime = new RuntimeService(persistence, registry);
   return createHttpApi({
@@ -63,7 +70,12 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     tokens: opts.tokenActors,
     admin: {
       storage: providerStorage,
-      adminApi: { storage: providerStorage, openRouter },
+      adminApi: {
+        storage: providerStorage,
+        assignmentStorage,
+        resolver: assignmentResolver,
+        openRouter,
+      },
     },
   });
 }
