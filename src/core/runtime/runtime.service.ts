@@ -8,7 +8,7 @@
  */
 
 import type { Actor } from '../authorization/actor.ts';
-import type { CapabilityLookup } from '../capability/capability.ts';
+import type { CapabilityLookup, CapabilityResult } from '../capability/capability.ts';
 import type { ErrorCategory, RunStatus } from '../run/run.ts';
 import type { RunError } from './runtime.ts';
 import type { RuntimePersistence, RunRecord } from './runtime.ports.ts';
@@ -31,6 +31,14 @@ export interface ExecuteContext {
 
 function makeError(kind: RunError['kind'], message: string, code: string): RunError {
   return { kind, code, message } as RunError;
+}
+
+function isCapabilityResult(value: unknown): value is CapabilityResult {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    'value' in (value as Record<string, unknown>)
+  );
 }
 
 /**
@@ -84,17 +92,40 @@ export class RuntimeService {
 
   private async complete(run: RunRecord, output: unknown): Promise<RunResult> {
     const completedAt = new Date().toISOString();
-    const patch = { status: 'completed' as RunStatus, completedAt, latencyMs: latency(run.startedAt, completedAt) };
+    const patch: Partial<RunRecord> = {
+      status: 'completed' as RunStatus,
+      completedAt,
+      latencyMs: latency(run.startedAt, completedAt),
+    };
+
+    let value = output;
+    if (isCapabilityResult(output)) {
+      value = output.value;
+      if (output.model) {
+        patch.providerKey = output.model.provider;
+        patch.modelName = output.model.model;
+        patch.usage = output.model.usage;
+      }
+    }
+
     await this.persistence.updateRun(run.id, patch);
     const done: RunRecord = { ...run, ...patch };
     emitLifecycle(done);
-    return { id: run.id, status: 'completed', output };
+    return { id: run.id, status: 'completed', output: value };
   }
 
   private async fail(run: RunRecord, err: unknown): Promise<RunResult> {
     const completedAt = new Date().toISOString();
-    const category: ErrorCategory = 'runtime';
-    const patch = { status: 'failed' as RunStatus, completedAt, latencyMs: latency(run.startedAt, completedAt), errorCategory: category };
+    const category: ErrorCategory =
+      err && typeof err === 'object' && 'kind' in (err as Record<string, unknown>)
+        ? ((err as { kind: ErrorCategory }).kind ?? 'runtime')
+        : 'runtime';
+    const patch = {
+      status: 'failed' as RunStatus,
+      completedAt,
+      latencyMs: latency(run.startedAt, completedAt),
+      errorCategory: category,
+    };
     await this.persistence.updateRun(run.id, patch);
     const done: RunRecord = { ...run, ...patch };
     emitLifecycle(done);

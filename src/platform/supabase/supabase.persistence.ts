@@ -79,6 +79,14 @@ export function createSupabaseRuntimePersistence(db: SupabaseDatabase): RuntimeP
       if (patch.completedAt !== undefined) dbPatch.completed_at = patch.completedAt;
       if (patch.latencyMs !== undefined) dbPatch.latency_ms = patch.latencyMs;
       if (patch.errorCategory !== undefined) dbPatch.error_category = patch.errorCategory;
+      if (patch.providerKey !== undefined) dbPatch.provider_key = patch.providerKey;
+      if (patch.modelName !== undefined) dbPatch.model_name = patch.modelName;
+      if (patch.usage) {
+        if (patch.usage.promptTokens !== undefined) dbPatch.usage_tokens_prompt = patch.usage.promptTokens;
+        if (patch.usage.completionTokens !== undefined) dbPatch.usage_tokens_completion = patch.usage.completionTokens;
+        if (patch.usage.totalTokens !== undefined) dbPatch.usage_tokens_total = patch.usage.totalTokens;
+        if (patch.usage.costUsd !== undefined) dbPatch.usage_cost_usd = patch.usage.costUsd;
+      }
       await db.from('runs').update(dbPatch).eq('id', id);
     },
   };

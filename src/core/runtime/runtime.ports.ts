@@ -21,6 +21,9 @@ export interface RunRecord {
   completedAt?: string;
   latencyMs?: number;
   errorCategory?: ErrorCategory;
+  providerKey?: string;
+  modelName?: string;
+  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number; costUsd?: number };
 }
 
 export interface RuntimePersistence {

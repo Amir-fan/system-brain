@@ -19,6 +19,16 @@ export interface CapabilityInput {
 /** A single capability implementation signature. Registration only, in code. */
 export type CapabilityHandler = (input: CapabilityInput) => Promise<unknown>;
 
+/** Result value a capability may carry alongside run model metadata. */
+export interface CapabilityResult {
+  value: unknown;
+  model?: {
+    provider?: string;
+    model?: string;
+    usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number; costUsd?: number };
+  };
+}
+
 /** K0 registrations are code-based, not DB-backed. No dispatcher in Step 1. */
 export type CapabilityRegistry = Record<CapabilityKey, CapabilityHandler>;
 

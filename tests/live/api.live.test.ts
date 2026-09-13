@@ -55,6 +55,12 @@ before(async () => {
   reg.register('platform.boom', async () => {
     throw new Error('boom');
   });
+  if (process.env.OPENAI_API_KEY) {
+    const { OpenAiGateway } = await import('../../src/platform/model-gateway/openai.gateway.ts');
+    const { platformAiEcho } = await import('../../src/core/capability/ai-echo.ts');
+    const gw = new OpenAiGateway({ apiKey: process.env.OPENAI_API_KEY, model: process.env.MODEL_NAME ?? 'gpt-4o-mini' });
+    reg.register('platform.ai-echo', platformAiEcho(gw));
+  }
   server = createKipApi({ persistence: createSupabaseRuntimePersistence(db), capabilities: reg, tokens });
   await new Promise<void>((res) => server.listen(0, '127.0.0.1', res));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -156,6 +162,22 @@ test('live api: cross-project denied', { skip: !hasKey }, async () => {
   assert.equal(r.status, 403);
   assert.equal(r.json.error.category, 'authorization');
   assert.equal(await countRuns(projectB), 0);
+});
+
+test('live api: ai-echo persists provider/model/usage metadata on completed run', { skip: !hasKey || !process.env.OPENAI_API_KEY }, async () => {
+  await clearRuns(projectA);
+  const r = await post(projectA, { capability: 'platform.ai-echo', input: { message: 'Reply with one word: ok' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true);
+  const q = db.from('runs').select('provider_key, model_name, usage_tokens_total, status, error_category').eq('project_id', projectA);
+  const { data } = await (q as unknown as Promise<{ data: Array<Record<string, unknown>> | null }>);
+  assert.ok(data && data.length === 1);
+  const run = data[0];
+  assert.equal(run.status, 'completed');
+  assert.equal(run.error_category, null);
+  assert.ok(run.provider_key, 'expected provider_key set');
+  assert.ok(run.model_name, 'expected model_name set');
+  assert.ok(Number(run.usage_tokens_total) > 0, 'expected token usage recorded');
 });
 
 test('live api: no raw input/output/secret in runs', { skip: !hasKey }, async () => {
