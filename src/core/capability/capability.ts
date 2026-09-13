@@ -19,13 +19,10 @@ export interface CapabilityInput {
 /** A single capability implementation signature. Registration only, in code. */
 export type CapabilityHandler = (input: CapabilityInput) => Promise<unknown>;
 
-/**
- * K0 registrations are code-based, not DB-backed: a capability is a key whose
- * handler is registered in code. No dispatcher is implemented in K0; Runtime
- * orchestration that resolves a key to an implementation belongs in Step 2.
- *
- * Future path preserved (not implemented): Runtime -> Capability -> Skill
- * Runtime -> Skill. A Skill Runtime registers handlers here without Core
- * knowing Skill internals.
- */
+/** K0 registrations are code-based, not DB-backed. No dispatcher in Step 1. */
 export type CapabilityRegistry = Record<CapabilityKey, CapabilityHandler>;
+
+/** Port a runtime/executor consumes to resolve a capability by key. */
+export interface CapabilityLookup {
+  get(key: CapabilityKey): Promise<CapabilityHandler | undefined>;
+}
