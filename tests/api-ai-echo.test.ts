@@ -5,6 +5,7 @@ import type { Server } from 'node:http';
 import { createHttpApi } from '../src/platform/api/http-server.ts';
 import { RuntimeService } from '../src/core/runtime/runtime.service.ts';
 import { MapCapabilityRegistry } from '../src/core/capability/capability-registry.ts';
+import { StaticTokenAuthenticator } from '../src/platform/api/static-authenticator.ts';
 import { platformAiEcho } from '../src/core/capability/ai-echo.ts';
 import type { ModelGateway, ModelGatewayOutput } from '../src/core/model-gateway/model-gateway.ts';
 import type { RuntimePersistence, RunRecord } from '../src/core/runtime/runtime.ports.ts';
@@ -32,13 +33,14 @@ class Mem implements RuntimePersistence {
 }
 
 const tokens = new Map([['tok-a', 'a1']]);
+const auth0 = new StaticTokenAuthenticator(tokens);
 
 test('api -> runtime -> ai capability (fake gateway): 200 + model metadata persisted', async () => {
   const persistence = new Mem();
   const registry = new MapCapabilityRegistry();
   registry.register('platform.ai-echo', platformAiEcho(new FakeGateway()));
   const runtime = new RuntimeService(persistence, registry);
-  const server: Server = createHttpApi({ runtime, tokens });
+  const server: Server = createHttpApi({ runtime, authenticator: auth0 });
   await new Promise<void>((res) => server.listen(0, '127.0.0.1', res));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 

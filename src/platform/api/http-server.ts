@@ -10,7 +10,6 @@
 import type { Server } from 'node:http';
 import { createServer } from 'node:http';
 import { handleInvoke } from './api-handler.ts';
-import { actorFromToken } from './auth.ts';
 import type { TokenActorMap } from './auth.ts';
 import { isPlatformAdmin, bearerFromHeader } from './admin-auth.ts';
 import type { AdminProviderApiDeps } from './admin-provider.ts';
@@ -29,10 +28,15 @@ import type { ErrorCategory } from '../../core/run/run.ts';
 import type { ApiResult } from './api.types.ts';
 import type { SourceApiDeps } from './source-handler.ts';
 import { handleListSources, handleCreateSource, handleGetSource, handleUpdateSource, handleArchiveSource } from './source-handler.ts';
+import type { ActorAuthenticator } from './actor-authenticator.ts';
+import { UnauthenticatedError } from './actor-authenticator.ts';
+import type { ProjectDiscoveryStorage } from './project-discovery.ts';
+import { handleListMyProjects } from './project-discovery.ts';
 
 export interface HttpApiDeps {
   runtime: Pick<import('../../core/runtime/runtime.service.ts').RuntimeService, 'execute'>;
-  tokens: TokenActorMap;
+  authenticator: ActorAuthenticator;
+  projects?: ProjectDiscoveryStorage;
   sources?: SourceApiDeps;
   admin?: {
     storage: ProviderStorage;
@@ -42,6 +46,7 @@ export interface HttpApiDeps {
 
 const ROUTE = /^\/v1\/projects\/([^/]+)\/runs$/;
 const SOURCES_RE = /^\/v1\/projects\/([^/]+)\/sources(?:\/([^/]+))?$/;
+const MY_PROJECTS_RE = /^\/v1\/projects$/;
 const ADMIN_ROUTE = /^\/v1\/admin\/providers(?:\/([^/]+)(?:\/(test|revoke|models))?)?$/;
 
 export function createHttpApi(deps: HttpApiDeps): Server {
@@ -64,6 +69,14 @@ async function handleProject(
   url: string,
   deps: HttpApiDeps,
 ): Promise<void> {
+  if (url === '/v1/projects' || MY_PROJECTS_RE.test(url)) {
+    if (req.method !== 'GET') return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+    if (!deps.projects) return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+    const actor = await resolveActor(req, res, deps);
+    if (!actor) return;
+    const result = await handleListMyProjects(deps.projects, actor);
+    return sendJson(res, result.status, { ok: result.ok, status: result.status, ...(result.ok ? { data: result.data } : { error: result.error }) } as ApiResult);
+  }
   if (url.includes('/sources')) {
     return handleSources(req, res, url, deps);
   }
@@ -75,10 +88,8 @@ async function handleProject(
     return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
   }
   const projectId = decodeURIComponent(match[1]);
-  const actor = actorFromToken(bearerFromHeader(req.headers.authorization), deps.tokens);
-  if (!actor) {
-    return sendJson(res, 401, { ok: false, status: 401, error: { category: 'authorization', message: 'authentication required' } });
-  }
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
   let body: unknown;
   try {
     body = await readJson(req);
@@ -91,6 +102,26 @@ async function handleProject(
     request: body as never,
   });
   return sendJson(res, result.status, result);
+}
+
+/** Authenticate via the canonical ActorAuthenticator; writes 401 and returns null on failure. */
+async function resolveActor(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  deps: HttpApiDeps,
+): Promise<string | null> {
+  const token = bearerFromHeader(req.headers.authorization);
+  try {
+    const { actor } = await deps.authenticator.authenticate(token ?? '');
+    return actor;
+  } catch (err) {
+    if (err instanceof UnauthenticatedError) {
+      sendJson(res, 401, { ok: false, status: 401, error: { category: 'authorization', message: 'authentication required' } });
+    } else {
+      sendJson(res, 401, { ok: false, status: 401, error: { category: 'authorization', message: 'authentication required' } });
+    }
+    return null;
+  }
 }
 
 async function handleSources(
@@ -108,10 +139,8 @@ async function handleSources(
   }
   const projectId = decodeURIComponent(match[1]);
   const sourceId = match[2] ? decodeURIComponent(match[2]) : undefined;
-  const actor = actorFromToken(bearerFromHeader(req.headers.authorization), deps.tokens);
-  if (!actor) {
-    return sendJson(res, 401, { ok: false, status: 401, error: { category: 'authorization', message: 'authentication required' } });
-  }
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
 
   let result: import('./source-handler.ts').SourceApiResult;
   if (req.method === 'GET' && !sourceId) {

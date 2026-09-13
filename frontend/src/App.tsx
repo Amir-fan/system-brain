@@ -1,23 +1,40 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { I18nProvider } from './i18n';
-import { Sidebar } from './ui/Sidebar';
-import { TopBar } from './ui/TopBar';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { ProjectProvider } from './contexts/ProjectContext';
+import { ProtectedShell } from './components/ProtectedShell';
+import { LoginPage } from './pages/LoginPage';
 import { AIAndModels } from './views/AIAndModels';
+
+function Router() {
+  const { session, initializing } = useAuth();
+
+  if (initializing) {
+    return <div className="flex min-h-screen items-center justify-center text-muted-soft">…</div>;
+  }
+  if (!session) {
+    return <LoginPage />;
+  }
+  return (
+    <ProjectProvider>
+      <ProtectedShell>
+        <Routes>
+          <Route path="/" element={<AIAndModels />} />
+          <Route path="/ai-models" element={<AIAndModels />} />
+          <Route path="*" element={<AIAndModels />} />
+        </Routes>
+      </ProtectedShell>
+    </ProjectProvider>
+  );
+}
 
 export default function App() {
   return (
     <I18nProvider>
       <BrowserRouter>
-        <div className="flex min-h-screen w-full">
-          <Sidebar />
-          <div className="flex min-w-0 flex-1 flex-col">
-            <TopBar />
-            <Routes>
-              <Route path="/" element={<AIAndModels />} />
-              <Route path="*" element={<AIAndModels />} />
-            </Routes>
-          </div>
-        </div>
+        <AuthProvider>
+          <Router />
+        </AuthProvider>
       </BrowserRouter>
     </I18nProvider>
   );

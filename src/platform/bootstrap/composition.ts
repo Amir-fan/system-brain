@@ -20,7 +20,10 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Server } from 'node:http';
 import { createHttpApi } from '../api/http-server.ts';
+import { SupabaseActorAuthenticator } from '../api/supabase-authenticator.ts';
+import { StaticTokenAuthenticator } from '../api/static-authenticator.ts';
 import type { TokenActorMap } from '../api/auth.ts';
+import { createProjectDiscoveryStorage } from '../api/project-discovery.ts';
 import { createProviderStorage } from '../provider/provider.storage.ts';
 import { createSourceStorage } from '../provider/source.storage.ts';
 import {
@@ -39,16 +42,25 @@ export interface BootstrapEnv {
   supabaseUrl: string;
   supabaseSecretKey: string;
   openRouterModel?: string;
-  tokenActors: TokenActorMap;
+  /** DEV/TEST-COMPAT static tokens (legacy KIP_API_TOKENS); optional. */
+  tokenActors?: TokenActorMap;
 }
 
 export async function compose(opts: BootstrapEnv): Promise<Server> {
-  const db = createClient(opts.supabaseUrl, opts.supabaseSecretKey) as unknown as SupabaseDatabase;
+  const rawClient = createClient(opts.supabaseUrl, opts.supabaseSecretKey);
+  const db = rawClient as unknown as SupabaseDatabase;
   const persistence = createSupabaseRuntimePersistence(db);
   const providerStorage = createProviderStorage(db);
   const sourceStorage = createSourceStorage(db);
   const assignmentStorage = createModelAssignmentStorage(db);
   const assignmentResolver = createModelAssignmentResolver(assignmentStorage);
+  const projectDiscovery = createProjectDiscoveryStorage(db);
+
+  // Identity source: Supabase Auth (production); static tokens only as dev/test-compat.
+  const authenticator =
+    opts.tokenActors && opts.tokenActors.size > 0
+      ? new StaticTokenAuthenticator(opts.tokenActors)
+      : new SupabaseActorAuthenticator({ auth: rawClient.auth });
 
   const registry = new MapCapabilityRegistry();
   registry.register('platform.echo', async ({ input }) => input);
@@ -69,7 +81,8 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   const runtime = new RuntimeService(persistence, registry);
   return createHttpApi({
     runtime,
-    tokens: opts.tokenActors,
+    authenticator,
+    projects: projectDiscovery,
     sources: { storage: sourceStorage, boundary: persistence },
     admin: {
       storage: providerStorage,
