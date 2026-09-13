@@ -9,6 +9,10 @@
  * Single place config/env concerns live. No DI framework, no service container,
  * no config subsystem. KIP_PLATFORM_ADMIN_TOKEN is a TEMPORARY bootstrap admin
  * credential (env-only, non-final admin auth) — replace before production.
+ *
+ * The OpenRouter provider credential is NOT read from env for normal runtime.
+ * It is managed via the Admin Provider API and stored in Supabase Vault; on boot
+ * the Model Gateway resolves and loads it from provider_configs + Vault.
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -30,7 +34,7 @@ export interface BootstrapEnv {
   tokenActors: TokenActorMap;
 }
 
-export function compose(opts: BootstrapEnv): Server {
+export async function compose(opts: BootstrapEnv): Promise<Server> {
   const db = createClient(opts.supabaseUrl, opts.supabaseSecretKey) as unknown as SupabaseDatabase;
   const persistence = createSupabaseRuntimePersistence(db);
   const providerStorage = createProviderStorage(db);
@@ -38,11 +42,19 @@ export function compose(opts: BootstrapEnv): Server {
   const registry = new MapCapabilityRegistry();
   registry.register('platform.echo', async ({ input }) => input);
 
-  // OpenRouter is the single active provider. Model invocation still only via the gateway.
+  // OpenRouter is the single active provider. No OPENROUTER_API_KEY env needed:
+  // the credential is resolved from provider_configs + Supabase Vault at boot.
   const openRouter = new OpenRouterGateway({
     apiKey: '',
     defaultModel: opts.openRouterModel ?? 'openrouter/auto',
   });
+
+  // Resolve the stored platform provider credential from Vault (if the super
+  // admin has connected OpenRouter). If not yet configured, gateway runs without
+  // a credential until a key is stored via the Admin API.
+  const storedKey = await providerStorage.readSecret('openrouter');
+  if (storedKey) openRouter.setApiKey(storedKey);
+
   registry.register('platform.ai-echo', platformAiEcho(openRouter));
 
   const runtime = new RuntimeService(persistence, registry);
