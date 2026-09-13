@@ -25,3 +25,9 @@ A concrete item, asset, or object managed by the platform.
 
 ### Event
 A meaningful occurrence that the platform records or reacts to.
+
+### Project Membership
+The canonical link between a trusted Actor and a Project, carrying a constrained role (`owner | member | service`).
+- **It is not** an identity profile.
+- **It is not** a permissions engine.
+- **It is not** an invitation or team-flow record.
