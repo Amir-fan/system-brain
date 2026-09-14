@@ -13,8 +13,12 @@
 
 import type { SupabaseDatabase } from '../supabase/supabase.persistence.ts';
 
-export const SOURCE_TYPES = ['url', 'file', 'text', 'github', 'google_drive'] as const;
-export type SourceType = (typeof SOURCE_TYPES)[number];
+// Canonical vocabulary lives in the project/source domain (single definition);
+// re-exported here so existing importers keep working.
+import { SOURCE_TYPES, isSourceType } from '../../core/project/source-type.ts';
+import type { SourceType } from '../../core/project/source-type.ts';
+export { SOURCE_TYPES, isSourceType };
+export type { SourceType };
 
 /** Types whose origin is an external connection (registered, never stored locally). */
 export const CONNECTED_SOURCE_TYPES = ['github', 'google_drive'] as const;
@@ -61,10 +65,6 @@ export interface SourceStorage {
   archive(projectId: string, sourceId: string): Promise<SourceRecord | null>;
   /** Compensation only: used to roll back a source whose raw artifact failed to persist. */
   hardDelete(projectId: string, sourceId: string): Promise<void>;
-}
-
-export function isSourceType(v: unknown): v is SourceType {
-  return typeof v === 'string' && (SOURCE_TYPES as readonly string[]).includes(v);
 }
 
 const mapRow = (r: Record<string, unknown>): SourceRecord => ({

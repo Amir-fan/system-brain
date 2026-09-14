@@ -17,6 +17,8 @@ export interface RawStorage {
   upload(key: { projectId: string; sourceId: string; artifactId: string; filename: string }, bytes: Uint8Array, contentType: string): Promise<{ bucket: string; path: string }>;
   remove(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
+  /** Server-mediated read of a private object. Never exposed to the browser. */
+  read(path: string): Promise<Uint8Array>;
 }
 
 /** Minimal view of the Supabase Storage API this adapter needs. */
@@ -26,6 +28,7 @@ export interface SupabaseStorageClient {
       upload(path: string, body: Uint8Array, opts?: { contentType?: string; upsert?: boolean }): Promise<{ error: { message: string } | null }>;
       remove(paths: string[]): Promise<{ error: { message: string } | null }>;
       list(path: string): Promise<{ data: Array<{ name: string }> | null; error: { message: string } | null }>;
+      download(path: string): Promise<{ data: Blob | null; error: { message: string } | null }>;
     };
   };
 }
@@ -60,6 +63,11 @@ export function createSupabaseRawStorage(client: SupabaseStorageClient): RawStor
       const file = path.slice(path.lastIndexOf('/') + 1);
       const { data } = await client.storage.from(RAW_BUCKET).list(dir);
       return (data ?? []).some((o) => o.name === file);
+    },
+    async read(path) {
+      const { data, error } = await client.storage.from(RAW_BUCKET).download(path);
+      if (error || !data) throw new Error('raw file read failed');
+      return new Uint8Array(await data.arrayBuffer());
     },
   };
 }

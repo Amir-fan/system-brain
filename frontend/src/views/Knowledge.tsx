@@ -11,11 +11,13 @@ import {
   Loader2,
   X,
   Upload,
+  Play,
+  RefreshCw,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useProjectContext } from '../contexts/ProjectContext';
 import { apiKip } from '../api/kip';
-import type { KipSource, SourceType, ExternalConnection } from '../api/kip';
+import type { KipSource, SourceType, ExternalConnection, IngestionJobView } from '../api/kip';
 import { Card, CardHeader, Button } from '../ui/primitives';
 
 type Mode = 'url' | 'text' | 'file' | 'github' | 'google_drive';
@@ -52,6 +54,8 @@ export function Knowledge() {
   const [file, setFile] = useState<File | null>(null);
 
   const [connections, setConnections] = useState<ExternalConnection[]>([]);
+  const [ingestions, setIngestions] = useState<Record<string, IngestionJobView>>({});
+  const [busySourceId, setBusySourceId] = useState<string | null>(null);
   const [connNotice, setConnNotice] = useState<string | null>(null);
 
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -64,7 +68,12 @@ export function Knowledge() {
     setLoading(true);
     setError(null);
     try {
-      setSources(await apiKip().listSources(projectId));
+      const [list, jobs] = await Promise.all([
+        apiKip().listSources(projectId),
+        apiKip().listProjectIngestions(projectId),
+      ]);
+      setSources(list);
+      setIngestions(Object.fromEntries(jobs.map((j) => [j.sourceId, j])));
     } catch (e) {
       setError(e instanceof Error ? e.message : t('knowledge.error.load'));
       setSources([]);
@@ -194,6 +203,48 @@ export function Knowledge() {
     }
   };
 
+  const processSource = async (source: KipSource) => {
+    if (!projectId) return;
+    setBusySourceId(source.id);
+    try {
+      const { job } = await apiKip().startIngestion(projectId, source.id);
+      setToast(job.status === 'failed' ? job.errorMessage ?? t('ingestion.toast.failed') : t('ingestion.toast.done'));
+      await load();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : t('ingestion.toast.failed'));
+    } finally {
+      setBusySourceId(null);
+    }
+  };
+
+  const retrySource = async (job: IngestionJobView) => {
+    if (!projectId) return;
+    setBusySourceId(job.sourceId);
+    try {
+      const outcome = await apiKip().retryIngestion(projectId, job.id);
+      setToast(outcome.job.status === 'failed' ? outcome.job.errorMessage ?? t('ingestion.toast.failed') : t('ingestion.toast.done'));
+      await load();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : t('ingestion.toast.failed'));
+    } finally {
+      setBusySourceId(null);
+    }
+  };
+
+  const ingestible = (type: SourceType) => type === 'text' || type === 'file';
+
+  const statusLabel = (status?: string) =>
+    !status ? t('ingestion.status.none') : t('ingestion.status.' + status);
+
+  const statusClass = (status?: string) =>
+    status === 'completed'
+      ? 'bg-success-100 text-success-700'
+      : status === 'failed'
+        ? 'bg-rose-50 text-rose-600'
+        : status === 'processing' || status === 'queued'
+          ? 'bg-brand-50 text-brand-700'
+          : 'bg-slate-100 text-muted';
+
   const connectionFor = (p: 'github' | 'google_drive') => connections.find((c) => c.provider === p) ?? null;
 
   const subtitleOf = useMemo(
@@ -268,6 +319,32 @@ export function Knowledge() {
                     </div>
                     {s.description ? <p className="mt-0.5 truncate text-xs text-muted">{s.description}</p> : null}
                   </div>
+                  {ingestible(s.sourceType) ? (
+                    <div className="flex shrink-0 items-center gap-2">
+                      <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${statusClass(ingestions[s.id]?.status)}`}>
+                        {statusLabel(ingestions[s.id]?.status)}
+                      </span>
+                      {ingestions[s.id]?.status === 'failed' ? (
+                        <Button
+                          variant="ghost"
+                          disabled={busySourceId === s.id}
+                          onClick={() => retrySource(ingestions[s.id])}
+                          title={t('ingestion.retry')}
+                        >
+                          <RefreshCw className="h-4 w-4" /> {t('ingestion.retry')}
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          disabled={busySourceId === s.id || ingestions[s.id]?.status === 'processing' || ingestions[s.id]?.status === 'queued'}
+                          onClick={() => processSource(s)}
+                          title={t('ingestion.process')}
+                        >
+                          <Play className="h-4 w-4" /> {busySourceId === s.id ? t('ingestion.status.processing') : t('ingestion.process')}
+                        </Button>
+                      )}
+                    </div>
+                  ) : null}
                   <div className="flex shrink-0 items-center gap-1">
                     {s.sourceType === 'url' ? (
                       <Button variant="ghost" onClick={() => openEdit(s)} title={t('knowledge.edit')}>

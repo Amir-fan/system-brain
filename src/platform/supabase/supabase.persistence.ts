@@ -23,6 +23,8 @@ export type SupabaseDatabase = {
   delete(): SupabaseDatabase;
   eq(column: string, value: unknown): SupabaseDatabase;
   neq(column: string, value: unknown): SupabaseDatabase;
+  in(column: string, values: unknown[]): SupabaseDatabase;
+  order(column: string, opts?: { ascending?: boolean }): SupabaseDatabase;
   limit(count: number): Promise<{ data: Array<Record<string, unknown>> | null; error: unknown }>;
   maybeSingle(): Promise<{ data: Record<string, unknown> | null; error: unknown }>;
   rpc(fn: string, args?: Record<string, unknown>): Promise<{ data: unknown; error: { message: string } | null }>;

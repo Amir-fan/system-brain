@@ -104,6 +104,22 @@ export interface ExternalConnection {
   accountLabel?: string;
 }
 
+export type IngestionStatus = 'queued' | 'processing' | 'completed' | 'failed';
+
+export interface IngestionJobView {
+  id: string;
+  sourceId: string;
+  status: IngestionStatus;
+  attemptNumber: number;
+  triggerType: string;
+  startedAt?: string;
+  completedAt?: string;
+  failedAt?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  createdAt: string;
+}
+
 export interface ExternalItem {
   id: string;
   name: string;
@@ -156,6 +172,16 @@ export function apiKip() {
     /** Repositories actually granted to the project's GitHub installation. */
     listGitHubRepositories: (projectId: string) =>
       call<ExternalItem[]>(`/v1/projects/${projectId}/connections/github/repositories`),
+    /** Latest ingestion job per source for the active project. */
+    listProjectIngestions: (projectId: string) => call<IngestionJobView[]>(`/v1/projects/${projectId}/ingestions`),
+    /** Process a source (safe to call twice: an active job is reused, not duplicated). */
+    startIngestion: (projectId: string, sourceId: string) =>
+      call<{ job: IngestionJobView; reused: boolean; reason?: string }>(
+        `/v1/projects/${projectId}/sources/${sourceId}/ingestions`,
+        json('POST', {}),
+      ),
+    retryIngestion: (projectId: string, ingestionId: string) =>
+      call<{ job: IngestionJobView; reused: boolean }>(`/v1/projects/${projectId}/ingestions/${ingestionId}/retry`, json('POST', {})),
     disconnectGitHub: (projectId: string) =>
       call<{ provider: string; status: string }>(`/v1/projects/${projectId}/connections/github`, {
         method: 'DELETE',

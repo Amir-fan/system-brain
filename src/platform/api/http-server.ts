@@ -42,6 +42,14 @@ import {
   handleListConnectionItems,
   handleRegisterExternalSource,
 } from './connection-handler.ts';
+import type { IngestionApiDeps } from './ingestion-handler.ts';
+import {
+  handleCreateIngestion,
+  handleListSourceIngestions,
+  handleListProjectIngestions,
+  handleGetIngestion,
+  handleRetryIngestion,
+} from './ingestion-handler.ts';
 import type { GitHubConnectorDeps } from './github-connector.ts';
 import {
   handleGitHubStart,
@@ -61,6 +69,7 @@ export interface HttpApiDeps {
   sources?: SourceApiDeps;
   connections?: ConnectionApiDeps;
   github?: GitHubConnectorDeps;
+  ingestion?: IngestionApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -104,6 +113,9 @@ async function handleProject(
     if (!actor) return;
     const result = await handleListMyProjects(deps.projects, actor);
     return sendJson(res, result.status, { ok: result.ok, status: result.status, ...(result.ok ? { data: result.data } : { error: result.error }) } as ApiResult);
+  }
+  if (url.includes('/ingestions')) {
+    return handleIngestions(req, res, url, deps);
   }
   if (url.includes('/connections')) {
     return handleConnections(req, res, url, deps);
@@ -314,6 +326,47 @@ async function handleProviderRedirect(
   const { redirect } = await handleGitHubCallback(deps.github, new URLSearchParams(qs));
   res.writeHead(302, { location: redirect });
   res.end();
+}
+
+async function handleIngestions(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.ingestion) return notFound(res);
+  const sourceJobs = /^\/v1\/projects\/([^/]+)\/sources\/([^/]+)\/ingestions$/.exec(url);
+  const projectJobs = /^\/v1\/projects\/([^/]+)\/ingestions$/.exec(url);
+  const retryJob = /^\/v1\/projects\/([^/]+)\/ingestions\/([^/]+)\/retry$/.exec(url);
+  const oneJob = /^\/v1\/projects\/([^/]+)\/ingestions\/([^/]+)$/.exec(url);
+
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+
+  if (sourceJobs) {
+    const projectId = decodeURIComponent(sourceJobs[1]);
+    const sourceId = decodeURIComponent(sourceJobs[2]);
+    if (req.method === 'POST') {
+      return sendSourceResult(res, await handleCreateIngestion(deps.ingestion, projectId, sourceId, actor));
+    }
+    if (req.method === 'GET') {
+      return sendSourceResult(res, await handleListSourceIngestions(deps.ingestion, projectId, sourceId, actor));
+    }
+    return notFound(res);
+  }
+  if (projectJobs && req.method === 'GET') {
+    return sendSourceResult(res, await handleListProjectIngestions(deps.ingestion, decodeURIComponent(projectJobs[1]), actor));
+  }
+  if (retryJob && req.method === 'POST') {
+    return sendSourceResult(
+      res,
+      await handleRetryIngestion(deps.ingestion, decodeURIComponent(retryJob[1]), decodeURIComponent(retryJob[2]), actor),
+    );
+  }
+  if (oneJob && req.method === 'GET') {
+    return sendSourceResult(res, await handleGetIngestion(deps.ingestion, decodeURIComponent(oneJob[1]), decodeURIComponent(oneJob[2]), actor));
+  }
+  return notFound(res);
 }
 
 function notFound(res: import('node:http').ServerResponse): void {

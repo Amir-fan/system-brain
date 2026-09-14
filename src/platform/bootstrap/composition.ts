@@ -30,6 +30,11 @@ import { createRawArtifactStorage } from '../provider/raw-artifact.storage.ts';
 import { createExternalConnectionStorage } from '../provider/external-connection.storage.ts';
 import { createSupabaseRawStorage } from '../storage/raw-storage.ts';
 import type { SupabaseStorageClient } from '../storage/raw-storage.ts';
+import { createIngestionPersistence, createIngestionSourceReader } from '../provider/ingestion.storage.ts';
+import { createTextAcquisitionAdapter } from '../ingestion/text-acquisition.ts';
+import { createFileAcquisitionAdapter } from '../ingestion/file-acquisition.ts';
+import { SourceAcquisitionRouter } from '../../core/ingestion/acquisition-router.ts';
+import { IngestionService } from '../../core/ingestion/ingestion.service.ts';
 import type { GitHubAppConfig } from '../github/github-app.ts';
 import { createGitHubAppAuth } from '../github/github-app.ts';
 import {
@@ -105,6 +110,20 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
       }
     : undefined;
 
+  // Ingestion: one router, one adapter per supported source type. Content-free
+  // structured observability only (project/source/job/result/duration).
+  const ingestionReader = createIngestionSourceReader(db, rawStorage);
+  const ingestionRouter = new SourceAcquisitionRouter([
+    createTextAcquisitionAdapter(ingestionReader),
+    createFileAcquisitionAdapter(ingestionReader),
+  ]);
+  const ingestionService = new IngestionService({
+    persistence: createIngestionPersistence(db),
+    sources: ingestionReader,
+    router: ingestionRouter,
+    observer: (event) => console.log('[ingestion]', JSON.stringify(event)),
+  });
+
   const runtime = new RuntimeService(persistence, registry);
   return createHttpApi({
     runtime,
@@ -123,6 +142,7 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
       boundary: persistence,
     },
     github: githubDeps,
+    ingestion: { service: ingestionService, boundary: persistence },
     admin: {
       storage: providerStorage,
       adminApi: {
