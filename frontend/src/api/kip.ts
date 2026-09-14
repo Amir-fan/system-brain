@@ -22,6 +22,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   } catch {
     throw new Error('تعذر الوصول إلى الخادم — تأكد من أن الخادم يعمل وحاول مجددًا.');
   }
+  // Guard against non-JSON responses (e.g. an SPA fallback returning index.html):
+  // without this the caller would receive `undefined` and could crash on render.
+  const contentType = res.headers.get('content-type') ?? '';
+  if (!contentType.includes('application/json')) {
+    throw new Error('رد غير متوقع من الخادم — تأكد من أن واجهة KIP البرمجية تعمل.');
+  }
   const body = (await res.json().catch(() => ({}))) as { error?: { message?: string }; data?: T };
   if (!res.ok) {
     const msg = body.error?.message ?? `request failed (${res.status})`;

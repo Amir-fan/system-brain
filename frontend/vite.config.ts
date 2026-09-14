@@ -6,7 +6,9 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/v1/admin': {
+      // All KIP API routes (projects, sources, admin) — without this, unmatched
+      // /v1 calls fall back to index.html (200 text/html) and break the client.
+      '/v1': {
         target: 'http://localhost:8787',
         changeOrigin: true,
       },
