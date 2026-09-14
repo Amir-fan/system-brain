@@ -151,6 +151,7 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     github: githubDeps,
     ingestion: { service: ingestionService, boundary: persistence },
     documents: { persistence: ingestionPersistence, boundary: persistence },
+    chunks: { persistence: ingestionPersistence, boundary: persistence },
     admin: {
       storage: providerStorage,
       adminApi: {

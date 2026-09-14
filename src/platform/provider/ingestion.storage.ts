@@ -31,6 +31,7 @@ import type {
 } from '../../core/ingestion/ingestion.types.ts';
 import type { SourceType } from '../../core/project/source-type.ts';
 import type { CreateDocumentInput, DocumentRecord, DocumentSummary } from '../../core/ingestion/document.ts';
+import type { ChunkRecord, ChunkSummary, CreateChunkInput } from '../../core/ingestion/chunk.ts';
 
 const JOB_COLUMNS =
   'id, project_id, source_id, status, attempt_number, trigger_type, started_at, completed_at, failed_at, error_code, error_message, created_by_subject, created_at, updated_at';
@@ -44,6 +45,46 @@ const DOC_SUMMARY_COLUMNS =
 
 /** Single-document projection: includes the normalized text for inspection. */
 const DOC_FULL_COLUMNS = DOC_COLUMNS + ', normalized_text';
+
+const CHUNK_COLUMNS =
+  'id, project_id, document_id, source_id, ingestion_job_id, chunk_index, chunk_key, content_sha256, char_count, start_char, end_char, heading_context, logical_path, created_at';
+const CHUNK_FULL_COLUMNS = CHUNK_COLUMNS + ', text_content';
+/** List projection: metadata + a bounded preview, never the full chunk body. */
+const CHUNK_SUMMARY_COLUMNS =
+  'id, project_id, document_id, source_id, ingestion_job_id, chunk_index, chunk_key, content_sha256, char_count, heading_context, logical_path, created_at, text_content';
+
+const PREVIEW_CHARS = 160;
+
+const mapChunk = (r: Record<string, unknown>): ChunkRecord => ({
+  id: r.id as string,
+  projectId: r.project_id as string,
+  documentId: r.document_id as string,
+  sourceId: r.source_id as string,
+  ingestionJobId: r.ingestion_job_id as string,
+  index: Number(r.chunk_index ?? 0),
+  key: r.chunk_key as string,
+  text: (r.text_content as string) ?? '',
+  sha256: r.content_sha256 as string,
+  charCount: Number(r.char_count ?? 0),
+  startChar: Number(r.start_char ?? 0),
+  endChar: Number(r.end_char ?? 0),
+  headingContext: (r.heading_context as string) ?? undefined,
+  logicalPath: (r.logical_path as string) ?? undefined,
+  createdAt: r.created_at as string,
+});
+
+const mapChunkSummary = (r: Record<string, unknown>): ChunkSummary => ({
+  id: r.id as string,
+  documentId: r.document_id as string,
+  sourceId: r.source_id as string,
+  chunkIndex: Number(r.chunk_index ?? 0),
+  chunkKey: r.chunk_key as string,
+  charCount: Number(r.char_count ?? 0),
+  contentSha256: r.content_sha256 as string,
+  headingContext: (r.heading_context as string) ?? undefined,
+  logicalPath: (r.logical_path as string) ?? undefined,
+  preview: ((r.text_content as string) ?? '').slice(0, PREVIEW_CHARS),
+});
 
 const OUTPUT_COLUMNS =
   'id, project_id, ingestion_job_id, source_id, content_type, normalized_text, content_sha256, char_count, created_at';
@@ -277,6 +318,55 @@ export function createIngestionPersistence(db: SupabaseDatabase): IngestionPersi
         .limit(1);
       const row = (data ?? [])[0];
       return row ? mapJob(row) : null;
+    },
+
+    // ---- canonical chunks (K13) ---------------------------------------------
+    async saveChunks(inputs: CreateChunkInput[]) {
+      const rows = inputs.map((c) => ({
+        project_id: c.projectId,
+        document_id: c.documentId,
+        source_id: c.sourceId,
+        ingestion_job_id: c.ingestionJobId,
+        chunk_index: c.chunkIndex,
+        chunk_key: c.chunkKey,
+        text_content: c.textContent,
+        content_sha256: c.contentSha256,
+        char_count: c.charCount,
+        start_char: c.startChar,
+        end_char: c.endChar,
+        heading_context: c.headingContext ?? null,
+        logical_path: c.logicalPath ?? null,
+      }));
+      const { data, error } = (await db.from('document_chunks').insert(rows).select(CHUNK_COLUMNS)) as unknown as {
+        data: Array<Record<string, unknown>> | null;
+        error: { message?: string; code?: string; details?: string } | null;
+      };
+      if (error || !data || data.length === 0) {
+        throw new Error(`chunk write failed: ${error?.code ?? 'none'} ${error?.message ?? ''} ${error?.details ?? ''}`.trim());
+      }
+      return data.map(mapChunk);
+    },
+    async deleteChunksForJob(ingestionJobId) {
+      await db.from('document_chunks').delete().eq('ingestion_job_id', ingestionJobId);
+    },
+    async listChunkSummaries(projectId, documentId) {
+      const { data } = await db
+        .from('document_chunks')
+        .select(CHUNK_SUMMARY_COLUMNS)
+        .eq('project_id', projectId)
+        .eq('document_id', documentId)
+        .order('chunk_index', { ascending: true })
+        .limit(2000);
+      return (data ?? []).map(mapChunkSummary);
+    },
+    async getChunk(projectId, chunkId) {
+      const { data } = await db
+        .from('document_chunks')
+        .select(CHUNK_FULL_COLUMNS)
+        .eq('project_id', projectId)
+        .eq('id', chunkId)
+        .maybeSingle();
+      return data ? mapChunk(data) : null;
     },
   };
 }

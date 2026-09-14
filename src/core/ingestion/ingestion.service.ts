@@ -19,6 +19,9 @@ import { normalizeText } from './normalize.ts';
 import { IngestionFailure, userMessage } from './ingestion.types.ts';
 import type { IngestionErrorCode, IngestionJob, IngestionOutput, IngestionTrigger } from './ingestion.types.ts';
 import type { CreateDocumentInput } from './document.ts';
+import type { DocumentRecord } from './document.ts';
+import { chunkDocument } from './chunk.ts';
+import type { CreateChunkInput } from './chunk.ts';
 import { ActiveIngestionJobExistsError } from './ingestion.ports.ts';
 import type { IngestionPersistence, IngestionSourceReader } from './ingestion.ports.ts';
 import type { SourceAcquisitionRouter } from './acquisition-router.ts';
@@ -38,6 +41,9 @@ export interface IngestionObservation {
   fileCount?: number;
   /** Canonical documents persisted by this ingestion. */
   documentCount?: number;
+  /** Canonical chunks persisted for those documents (K13). */
+  chunkCount?: number;
+  chunkChars?: number;
 }
 
 export interface IngestionServiceDeps {
@@ -170,13 +176,59 @@ export class IngestionService {
       // No documents means there is nothing canonical to keep: never report success.
       if (documents.length === 0) throw new IngestionFailure('DOCUMENT_PERSISTENCE_FAILED');
 
+      let savedDocuments: DocumentRecord[];
       try {
-        await persistence.saveDocuments(documents);
+        savedDocuments = await persistence.saveDocuments(documents);
       } catch {
         // Atomicity: a partially written snapshot is rolled back and the
         // ingestion is NOT allowed to report completed.
         await persistence.deleteDocumentsForJob(job.id).catch(() => {});
         throw new IngestionFailure('DOCUMENT_PERSISTENCE_FAILED');
+      }
+
+      // Canonical chunks (K13). Deterministic segmentation of each persisted
+      // document; a chunk belongs to exactly one document and never crosses
+      // boundaries. Chunk persistence is part of ingestion completion, so a
+      // chunk failure must never look like a successful ingestion.
+      const chunkInputs: CreateChunkInput[] = [];
+      for (let i = 0; i < savedDocuments.length; i++) {
+        const doc = savedDocuments[i];
+        // The persisted id comes from the store; the canonical text is the one we
+        // just normalized (the list projection deliberately omits the body).
+        const source = documents[i];
+        const body = source?.normalizedText ?? doc.normalizedText ?? '';
+        const key = doc.documentKey ?? source?.documentKey ?? '';
+        const logicalPath = doc.logicalPath ?? source?.logicalPath;
+        for (const unit of chunkDocument(body, key)) {
+          chunkInputs.push({
+            projectId,
+            documentId: doc.id,
+            sourceId,
+            ingestionJobId: job.id,
+            chunkIndex: unit.index,
+            chunkKey: unit.key,
+            textContent: unit.text,
+            contentSha256: unit.sha256,
+            charCount: unit.charCount,
+            startChar: unit.startChar,
+            endChar: unit.endChar,
+            ...(unit.headingContext ? { headingContext: unit.headingContext } : {}),
+            ...(logicalPath ? { logicalPath } : {}),
+          });
+        }
+      }
+      if (chunkInputs.length === 0) {
+        await persistence.deleteDocumentsForJob(job.id).catch(() => {});
+        throw new IngestionFailure('CHUNK_PERSISTENCE_FAILED');
+      }
+
+      try {
+        await persistence.saveChunks(chunkInputs);
+      } catch {
+        // Never a misleading successful snapshot: roll back both layers.
+        await persistence.deleteChunksForJob(job.id).catch(() => {});
+        await persistence.deleteDocumentsForJob(job.id).catch(() => {});
+        throw new IngestionFailure('CHUNK_PERSISTENCE_FAILED');
       }
 
       const completedAt = this.nowIso();
@@ -193,6 +245,8 @@ export class IngestionService {
         byteCount: acquired.provenance.byteCount,
         fileCount: acquired.provenance.fileCount,
         documentCount: documents.length,
+        chunkCount: chunkInputs.length,
+        chunkChars: chunkInputs.reduce((sum, c) => sum + c.charCount, 0),
       });
       return {
         job: { ...job, status: 'completed', startedAt, completedAt },

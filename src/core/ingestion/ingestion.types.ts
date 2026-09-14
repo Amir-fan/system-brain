@@ -37,6 +37,7 @@ export const INGESTION_ERROR_CODES = [
   'GITHUB_ACQUISITION_FAILED',
   'GITHUB_LIMIT_EXCEEDED',
   'DOCUMENT_PERSISTENCE_FAILED',
+  'CHUNK_PERSISTENCE_FAILED',
   'INTERNAL_ERROR',
 ] as const;
 export type IngestionErrorCode = (typeof INGESTION_ERROR_CODES)[number];
@@ -151,6 +152,7 @@ const USER_MESSAGES: Record<IngestionErrorCode, string> = {
   GITHUB_ACQUISITION_FAILED: 'تعذر قراءة محتوى المستودع.',
   GITHUB_LIMIT_EXCEEDED: 'حجم المستودع يتجاوز الحدود المسموحة للمعالجة.',
   DOCUMENT_PERSISTENCE_FAILED: 'تعذر حفظ المستندات الناتجة عن المعالجة.',
+  CHUNK_PERSISTENCE_FAILED: 'تعذر حفظ مقاطع المستندات.',
 };
 
 export const userMessage = (code: IngestionErrorCode): string => USER_MESSAGES[code];

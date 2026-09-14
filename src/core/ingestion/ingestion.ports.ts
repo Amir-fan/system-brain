@@ -20,6 +20,7 @@ import type {
 } from './ingestion.types.ts';
 import type { SourceType } from '../project/source-type.ts';
 import type { CreateDocumentInput, DocumentRecord, DocumentSummary } from './document.ts';
+import type { ChunkRecord, ChunkSummary, CreateChunkInput } from './chunk.ts';
 
 /** Raised when the database refuses a second active job for the same source. */
 export class ActiveIngestionJobExistsError extends Error {
@@ -54,6 +55,15 @@ export interface IngestionPersistence {
   getDocument(projectId: string, documentId: string): Promise<DocumentRecord | null>;
   /** Resolves which snapshot a default listing should read. */
   latestCompletedJob(projectId: string, sourceId: string): Promise<IngestionJob | null>;
+
+  // ---- canonical chunks (K13)
+  /** Persists the chunk snapshot of one ingestion. Throws on failure. */
+  saveChunks(inputs: CreateChunkInput[]): Promise<ChunkRecord[]>;
+  /** Compensation: removes a partially written chunk snapshot. */
+  deleteChunksForJob(ingestionJobId: string): Promise<void>;
+  /** Chunk listing for one document: metadata + short preview, never the full body. */
+  listChunkSummaries(projectId: string, documentId: string): Promise<ChunkSummary[]>;
+  getChunk(projectId: string, chunkId: string): Promise<ChunkRecord | null>;
 }
 
 export interface IngestionSourceSummary {

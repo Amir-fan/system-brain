@@ -57,6 +57,7 @@ function fakePersistence(seed?: { activeJob?: FakeJob | null }) {
   const jobs: FakeJob[] = [];
   const outputs: Array<Record<string, unknown>> = [];
   const documents: Array<Record<string, unknown>> = [];
+  const chunks: Array<Record<string, unknown>> = [];
   const state = { activeJob: seed?.activeJob ?? null };
   let counter = 0;
 
@@ -121,12 +122,26 @@ function fakePersistence(seed?: { activeJob?: FakeJob | null }) {
       // Canonical documents (K12): one row per acquired unit.
       saveDocuments: async (inputs: Array<Record<string, unknown>>) => {
         for (const input of inputs) documents.push(input);
-        return inputs;
+        // Mirror the real store: persisted documents carry identity + text.
+        return inputs.map((input, n) => ({
+          ...input,
+          id: 'doc-' + String(n + 1),
+          documentKey: (input as Record<string, unknown>).documentKey ?? 'text:primary',
+          normalizedText: (input as Record<string, unknown>).normalizedText ?? '',
+        }));
       },
       deleteDocumentsByJob: async () => {},
       listDocumentsByJob: async () => documents,
       listLatestDocumentsBySource: async () => documents,
       getDocument: async () => null,
+      // Canonical chunks (K13)
+      saveChunks: async (inputs: Array<Record<string, unknown>>) => {
+        for (const input of inputs) chunks.push(input);
+        return inputs;
+      },
+      deleteChunksForJob: async () => {},
+      listChunkSummaries: async () => [],
+      getChunk: async () => null,
     } as never,
   };
 }
@@ -203,11 +218,17 @@ test('idempotency: losing the DB race reuses the winner instead of failing', asy
     saveOutput: async () => ({}) as never,
     latestOutput: async () => null,
     deleteOutputByJob: async () => {},
-    saveDocuments: async () => [] as never,
+    saveDocuments: async () => [
+      { id: 'doc-1', documentKey: 'text:primary', normalizedText: 'x' },
+    ] as never,
     deleteDocumentsByJob: async () => {},
     listDocumentsByJob: async () => [],
     listLatestDocumentsBySource: async () => [],
     getDocument: async () => null,
+    saveChunks: async () => [] as never,
+    deleteChunksForJob: async () => {},
+    listChunkSummaries: async () => [],
+    getChunk: async () => null,
   };
   const out = await service(persistence, sourceReader({ kind: 'text', text: 'x' })).ingest({
     projectId: 'p1', sourceId: 's1', actor: 'a',

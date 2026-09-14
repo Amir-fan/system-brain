@@ -104,6 +104,19 @@ export interface ExternalConnection {
   accountLabel?: string;
 }
 
+export interface ChunkView {
+  id: string;
+  documentId: string;
+  chunkIndex: number;
+  logicalPath?: string;
+  headingContext?: string;
+  charCount: number;
+  contentSha256: string;
+  preview: string;
+  /** Present only on the single-chunk read. */
+  text?: string;
+}
+
 export interface DocumentView {
   id: string;
   sourceId: string;
@@ -193,6 +206,13 @@ export function apiKip() {
       ),
     getDocument: (projectId: string, documentId: string) =>
       call<DocumentView>(`/v1/projects/${projectId}/documents/${documentId}`),
+    /** Canonical chunks of one document (position, context and a short preview). */
+    listDocumentChunks: (projectId: string, documentId: string) =>
+      call<{ documentId: string; chunkCount: number; chunks: ChunkView[] }>(
+        `/v1/projects/${projectId}/documents/${documentId}/chunks`,
+      ),
+    getChunk: (projectId: string, chunkId: string) =>
+      call<ChunkView>(`/v1/projects/${projectId}/chunks/${chunkId}`),
     /** Latest ingestion job per source for the active project. */
     listProjectIngestions: (projectId: string) => call<IngestionJobView[]>(`/v1/projects/${projectId}/ingestions`),
     /** Process a source (safe to call twice: an active job is reused, not duplicated). */

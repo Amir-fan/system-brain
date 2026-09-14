@@ -43,7 +43,9 @@ import {
   handleRegisterExternalSource,
 } from './connection-handler.ts';
 import type { DocumentApiDeps } from './document-handler.ts';
+import type { ChunkApiDeps } from './chunk-handler.ts';
 import { handleListSourceDocuments, handleGetDocument } from './document-handler.ts';
+import { handleGetChunk, handleListDocumentChunks } from './chunk-handler.ts';
 import type { IngestionApiDeps } from './ingestion-handler.ts';
 import {
   handleCreateIngestion,
@@ -73,6 +75,7 @@ export interface HttpApiDeps {
   github?: GitHubConnectorDeps;
   ingestion?: IngestionApiDeps;
   documents?: DocumentApiDeps;
+  chunks?: ChunkApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -116,6 +119,9 @@ async function handleProject(
     if (!actor) return;
     const result = await handleListMyProjects(deps.projects, actor);
     return sendJson(res, result.status, { ok: result.ok, status: result.status, ...(result.ok ? { data: result.data } : { error: result.error }) } as ApiResult);
+  }
+  if (url.includes('/chunks')) {
+    return handleChunks(req, res, url, deps);
   }
   if (url.includes('/documents')) {
     return handleDocuments(req, res, url, deps);
@@ -369,6 +375,40 @@ async function handleDocuments(
   return sendSourceResult(
     res,
     await handleGetDocument(deps.documents, decodeURIComponent(byId![1]), decodeURIComponent(byId![2]), actor),
+  );
+}
+
+async function handleChunks(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.chunks) return notFound(res);
+  if (req.method !== 'GET') return notFound(res);
+
+  const path = url.split('?')[0];
+  const byDocument = new RegExp('^/v1/projects/([^/]+)/documents/([^/]+)/chunks$').exec(path);
+  const byId = new RegExp('^/v1/projects/([^/]+)/chunks/([^/]+)$').exec(path);
+  if (!byDocument && !byId) return notFound(res);
+
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+
+  if (byDocument) {
+    return sendSourceResult(
+      res,
+      await handleListDocumentChunks(
+        deps.chunks,
+        decodeURIComponent(byDocument[1]),
+        decodeURIComponent(byDocument[2]),
+        actor,
+      ),
+    );
+  }
+  return sendSourceResult(
+    res,
+    await handleGetChunk(deps.chunks, decodeURIComponent(byId![1]), decodeURIComponent(byId![2]), actor),
   );
 }
 

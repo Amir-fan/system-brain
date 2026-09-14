@@ -18,7 +18,7 @@ import {
 import { useI18n } from '../i18n';
 import { useProjectContext } from '../contexts/ProjectContext';
 import { apiKip } from '../api/kip';
-import type { KipSource, SourceType, ExternalConnection, IngestionJobView, DocumentView } from '../api/kip';
+import type { KipSource, SourceType, ExternalConnection, IngestionJobView, ChunkView, DocumentView } from '../api/kip';
 import { Card, CardHeader, Button } from '../ui/primitives';
 
 type Mode = 'url' | 'text' | 'file' | 'github' | 'google_drive';
@@ -62,6 +62,10 @@ export function Knowledge() {
   const [docs, setDocs] = useState<DocumentView[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<DocumentView | null>(null);
+  const [chunks, setChunks] = useState<ChunkView[]>([]);
+  const [openChunkFor, setOpenChunkFor] = useState<string | null>(null);
+  const [selectedChunk, setSelectedChunk] = useState<ChunkView | null>(null);
+  const [chunksLoading, setChunksLoading] = useState(false);
   const [connNotice, setConnNotice] = useState<string | null>(null);
 
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -258,6 +262,42 @@ export function Knowledge() {
     setDocsFor(null);
     setDocs([]);
     setSelectedDoc(null);
+    setChunks([]);
+    setOpenChunkFor(null);
+    setSelectedChunk(null);
+  };
+
+  // K13: the chunk list stays metadata + a short preview; the full text is
+  // fetched only when one chunk is opened.
+  const openChunks = async (documentId: string) => {
+    if (!projectId) return;
+    if (openChunkFor === documentId) {
+      setOpenChunkFor(null);
+      setChunks([]);
+      setSelectedChunk(null);
+      return;
+    }
+    setOpenChunkFor(documentId);
+    setSelectedChunk(null);
+    setChunks([]);
+    setChunksLoading(true);
+    try {
+      const res = await apiKip().listDocumentChunks(projectId, documentId);
+      setChunks(res.chunks);
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : t('chunks.error'));
+    } finally {
+      setChunksLoading(false);
+    }
+  };
+
+  const viewChunk = async (chunkId: string) => {
+    if (!projectId) return;
+    try {
+      setSelectedChunk(await apiKip().getChunk(projectId, chunkId));
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : t('chunks.error'));
+    }
   };
 
   const viewDocument = async (documentId: string) => {
@@ -575,9 +615,14 @@ export function Knowledge() {
                           {d.charCount} {t('documents.chars')}
                         </span>
                       </span>
-                      <Button variant="outline" onClick={() => viewDocument(d.id)}>
-                        {t('documents.view')}
-                      </Button>
+                      <span className="flex shrink-0 items-center gap-2">
+                        <Button variant="outline" onClick={() => openChunks(d.id)}>
+                          {t('chunks.open')}
+                        </Button>
+                        <Button variant="outline" onClick={() => viewDocument(d.id)}>
+                          {t('documents.view')}
+                        </Button>
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -592,6 +637,50 @@ export function Knowledge() {
                     >
                       {selectedDoc.normalizedText ?? ''}
                     </pre>
+                  </div>
+                ) : null}
+                {openChunkFor ? (
+                  <div className="mt-4 rounded-lg border border-surface-line p-3">
+                    <h3 className="text-sm font-semibold text-slate-900">{t('chunks.title')}</h3>
+                    {chunksLoading ? (
+                      <p className="mt-2 text-xs text-muted-soft">{t('chunks.loading')}</p>
+                    ) : chunks.length === 0 ? (
+                      <p className="mt-2 text-xs text-muted-soft">{t('chunks.empty')}</p>
+                    ) : (
+                      <ul className="mt-2 divide-y divide-surface-line">
+                        {chunks.map((c) => (
+                          <li key={c.id} className="py-2">
+                            <button type="button" onClick={() => viewChunk(c.id)} className="w-full text-start">
+                              <span className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-medium text-slate-700" dir="auto">
+                                  {t('chunks.number')} {c.chunkIndex + 1}
+                                  {c.headingContext ? ' · ' + c.headingContext : ''}
+                                </span>
+                                <span className="shrink-0 text-xs text-muted-soft">
+                                  {c.charCount} {t('documents.chars')}
+                                </span>
+                              </span>
+                              {c.logicalPath ? (
+                                <span className="mt-1 block truncate text-[11px] text-muted-soft" dir="auto">
+                                  {c.logicalPath}
+                                </span>
+                              ) : null}
+                              <span className="mt-1 block truncate text-[11px] text-muted-soft" dir="auto">
+                                {c.preview}
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {selectedChunk?.text ? (
+                      <pre
+                        className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap rounded-lg border border-surface-line bg-surface p-3 text-xs text-slate-700"
+                        dir="auto"
+                      >
+                        {selectedChunk.text}
+                      </pre>
+                    ) : null}
                   </div>
                 ) : null}
               </>
