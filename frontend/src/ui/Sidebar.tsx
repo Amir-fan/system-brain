@@ -11,18 +11,20 @@ import {
   Hexagon,
   Crown,
 } from 'lucide-react';
+import { NavLink } from 'react-router-dom';
 import { useI18n } from '../i18n';
 
+// `to` present = implemented route. Items without `to` are future screens (rendered inert).
 const ITEMS = [
-  { key: 'nav.home', icon: Home, active: false },
-  { key: 'nav.projects', icon: FolderKanban, active: false },
-  { key: 'nav.knowledge', icon: BookOpen, active: false },
-  { key: 'nav.skills', icon: Sparkles, active: false },
-  { key: 'nav.ai', icon: BrainCircuit, active: true },
-  { key: 'nav.users', icon: Users, active: false },
-  { key: 'nav.integrations', icon: Plug, active: false },
-  { key: 'nav.reports', icon: FileText, active: false },
-  { key: 'nav.settings', icon: Settings, active: false },
+  { key: 'nav.home', icon: Home },
+  { key: 'nav.projects', icon: FolderKanban },
+  { key: 'nav.knowledge', icon: BookOpen, to: '/knowledge' },
+  { key: 'nav.skills', icon: Sparkles },
+  { key: 'nav.ai', icon: BrainCircuit, to: '/ai-models' },
+  { key: 'nav.users', icon: Users },
+  { key: 'nav.integrations', icon: Plug },
+  { key: 'nav.reports', icon: FileText },
+  { key: 'nav.settings', icon: Settings },
 ] as const;
 
 export function Sidebar() {
@@ -42,17 +44,31 @@ export function Sidebar() {
       <nav className="mt-2 flex-1 space-y-1 px-3">
         {ITEMS.map((it) => {
           const Icon = it.icon;
+          const to = 'to' in it ? it.to : undefined;
+          const base = 'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition';
+          if (!to) {
+            return (
+              <button
+                key={it.key}
+                type="button"
+                className={`${base} text-muted/70 hover:bg-slate-50 hover:text-slate-700`}
+              >
+                <Icon className="h-[18px] w-[18px]" strokeWidth={2} />
+                <span dir="auto">{t(it.key)}</span>
+              </button>
+            );
+          }
           return (
-            <button
+            <NavLink
               key={it.key}
-              type="button"
-              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition ${
-                it.active ? 'bg-brand-50 text-brand-700' : 'text-muted hover:bg-slate-50 hover:text-slate-800'
-              }`}
+              to={to}
+              className={({ isActive }) =>
+                `${base} ${isActive ? 'bg-brand-50 text-brand-700' : 'text-muted hover:bg-slate-50 hover:text-slate-800'}`
+              }
             >
               <Icon className="h-[18px] w-[18px]" strokeWidth={2} />
               <span dir="auto">{t(it.key)}</span>
-            </button>
+            </NavLink>
           );
         })}
       </nav>

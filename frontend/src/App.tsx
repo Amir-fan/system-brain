@@ -5,6 +5,7 @@ import { ProjectProvider } from './contexts/ProjectContext';
 import { ProtectedShell } from './components/ProtectedShell';
 import { LoginPage } from './pages/LoginPage';
 import { AIAndModels } from './views/AIAndModels';
+import { Knowledge } from './views/Knowledge';
 
 function Router() {
   const { session, initializing } = useAuth();
@@ -21,6 +22,7 @@ function Router() {
         <Routes>
           <Route path="/" element={<AIAndModels />} />
           <Route path="/ai-models" element={<AIAndModels />} />
+          <Route path="/knowledge" element={<Knowledge />} />
           <Route path="*" element={<AIAndModels />} />
         </Routes>
       </ProtectedShell>
