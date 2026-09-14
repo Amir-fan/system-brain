@@ -129,6 +129,24 @@ export interface IndexStatusView {
   } | null;
 }
 
+export type AnswerStatus = 'answered' | 'insufficient_evidence' | 'conflicting_evidence' | 'needs_clarification';
+export interface AnswerEvidenceView {
+  label: string;
+  sourceTitle: string | null;
+  documentTitle: string | null;
+  logicalPath: string | null;
+  headingContext: string | null;
+  excerpt: string;
+}
+export interface KnowledgeAnswerView {
+  status: AnswerStatus;
+  answer: string | null;
+  message: string | null;
+  clarification: { question: string; choices?: string[] } | null;
+  confidence: string;
+  evidence: AnswerEvidenceView[];
+}
+
 export interface RetrievalHitView {
   position: number;
   text: string;
@@ -249,6 +267,9 @@ export function apiKip() {
     getChunk: (projectId: string, chunkId: string) =>
       call<ChunkView>(`/v1/projects/${projectId}/chunks/${chunkId}`),
     /** Ranked evidence for a query (no answer generation, no vectors). */
+    /** Evidence-grounded answer to one question (no memory, no chatbot). */
+    askKnowledge: (projectId: string, body: { question: string; language?: 'ar' | 'en' }) =>
+      call<KnowledgeAnswerView>(`/v1/projects/${projectId}/knowledge/answer`, json('POST', body)),
     searchKnowledge: (
       projectId: string,
       body: { query: string; topK?: number; sourceIds?: string[]; documentIds?: string[] },

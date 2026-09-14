@@ -19,7 +19,7 @@ import {
 import { useI18n } from '../i18n';
 import { useProjectContext } from '../contexts/ProjectContext';
 import { apiKip } from '../api/kip';
-import type { KipSource, SourceType, ExternalConnection, IngestionJobView, ChunkView, DocumentView, IndexStatusView, RetrievalHitView } from '../api/kip';
+import type { KipSource, SourceType, ExternalConnection, IngestionJobView, ChunkView, DocumentView, IndexStatusView, RetrievalHitView, KnowledgeAnswerView } from '../api/kip';
 import { Card, CardHeader, Button } from '../ui/primitives';
 
 type Mode = 'url' | 'text' | 'file' | 'github' | 'google_drive';
@@ -74,6 +74,10 @@ export function Knowledge() {
   const [searching, setSearching] = useState(false);
   const [searchPerformed, setSearchPerformed] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [askQuestion, setAskQuestion] = useState('');
+  const [askState, setAskState] = useState<'idle' | 'searching' | 'answering'>('idle');
+  const [askResult, setAskResult] = useState<KnowledgeAnswerView | null>(null);
+  const [askError, setAskError] = useState<string | null>(null);
   const [connNotice, setConnNotice] = useState<string | null>(null);
 
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -246,6 +250,27 @@ export function Knowledge() {
       setToast(e instanceof Error ? e.message : t('ingestion.toast.failed'));
     } finally {
       setBusySourceId(null);
+    }
+  };
+
+  // K16: ask the knowledge — one evidence-grounded question, no chatbot memory.
+  const askKnowledge = async () => {
+    if (!projectId) return;
+    const question = askQuestion.trim();
+    if (question.length === 0) return;
+    setAskError(null);
+    setAskResult(null);
+    setAskState('searching');
+    // Two readable stages without exposing internals: first lookup, then synthesis.
+    const timer = window.setTimeout(() => setAskState('answering'), 1400);
+    try {
+      const res = await apiKip().askKnowledge(projectId, { question });
+      setAskResult(res);
+    } catch (e) {
+      setAskError(e instanceof Error ? e.message : t('ask.error'));
+    } finally {
+      window.clearTimeout(timer);
+      setAskState('idle');
     }
   };
 
@@ -477,7 +502,85 @@ export function Knowledge() {
         <>
           {projectId ? (
           <Card className="mt-6 p-4">
-            <CardHeader title={t('retrieval.title')} />
+            <CardHeader title={t('ask.title')} />
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                value={askQuestion}
+                onChange={(e) => setAskQuestion(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void askKnowledge();
+                }}
+                placeholder={t('ask.placeholder')}
+                className="w-full rounded-lg border border-surface-line px-3 py-2 text-sm text-slate-800 outline-none focus:border-brand-400"
+                dir="auto"
+              />
+              <Button variant="primary" disabled={askState !== 'idle' || askQuestion.trim().length === 0} onClick={() => void askKnowledge()}>
+                {askState === 'searching' ? t('ask.searching') : askState === 'answering' ? t('ask.answering') : t('ask.action')}
+              </Button>
+            </div>
+            {askError ? <p className="mt-2 text-xs text-rose-600">{askError}</p> : null}
+            {askResult ? (
+              <div className="mt-4">
+                {askResult.status === 'answered' && askResult.answer ? (
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800" dir="auto">
+                    {askResult.answer}
+                  </p>
+                ) : null}
+                {askResult.status === 'insufficient_evidence' ? (
+                  <div className="rounded-lg border border-surface-line bg-surface p-3 text-sm text-muted-soft" dir="auto">
+                    {askResult.message ?? t('ask.insufficient')}
+                  </div>
+                ) : null}
+                {askResult.status === 'conflicting_evidence' ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800" dir="auto">
+                    <p className="font-medium">{t('ask.conflicting')}</p>
+                    {askResult.answer ? <p className="mt-1 whitespace-pre-wrap">{askResult.answer}</p> : null}
+                  </div>
+                ) : null}
+                {askResult.status === 'needs_clarification' ? (
+                  <div className="rounded-lg border border-surface-line bg-surface p-3 text-sm text-slate-800" dir="auto">
+                    <p className="font-medium">{t('ask.clarify')}</p>
+                    <p className="mt-1">{askResult.clarification?.question ?? ''}</p>
+                    {askResult.clarification?.choices?.length ? (
+                      <ul className="mt-2 space-y-1">
+                        {askResult.clarification.choices.map((choice, i) => (
+                          <li key={i} className="text-xs text-muted-soft" dir="auto">
+                            · {choice}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                ) : null}
+                {askResult.evidence.length > 0 ? (
+                  <div className="mt-4">
+                    <p className="text-xs font-medium text-slate-500">{t('ask.evidence')}</p>
+                    <ul className="mt-2 space-y-2">
+                      {askResult.evidence.map((e) => (
+                        <li key={e.label} className="rounded-lg border border-surface-line bg-surface p-3">
+                          <div className="truncate text-xs font-medium text-slate-700" dir="auto">
+                            {e.sourceTitle ?? e.documentTitle ?? e.logicalPath ?? ''}
+                          </div>
+                          {e.logicalPath && e.logicalPath !== e.sourceTitle && e.logicalPath !== e.documentTitle ? (
+                            <div className="truncate text-[11px] text-muted-soft" dir="auto">{e.logicalPath}</div>
+                          ) : null}
+                          {e.headingContext ? (
+                            <div className="truncate text-[11px] text-muted-soft" dir="auto">{e.headingContext}</div>
+                          ) : null}
+                          <p className="mt-1 whitespace-pre-wrap text-xs text-slate-600" dir="auto">{e.excerpt}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </Card>
+                  ) : null}
+
+                  {projectId ? (
+                  <Card className="mt-6 p-4">
+                      <CardHeader title={t('retrieval.title')} />
             <p className="mt-1 text-xs text-muted-soft">{t('retrieval.hint')}</p>
             <div className="mt-3 flex items-center gap-2">
               <input
