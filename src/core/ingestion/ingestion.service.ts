@@ -32,6 +32,9 @@ export interface IngestionObservation {
   result: string;
   errorCode?: string;
   durationMs?: number;
+  /** Bounded acquisition metrics (never content). */
+  byteCount?: number;
+  fileCount?: number;
 }
 
 export interface IngestionServiceDeps {
@@ -152,6 +155,8 @@ export class IngestionService {
         attemptNumber,
         result: 'completed',
         durationMs: Date.now() - startedMs,
+        byteCount: acquired.provenance.byteCount,
+        fileCount: acquired.provenance.fileCount,
       });
       return {
         job: { ...job, status: 'completed', startedAt, completedAt },

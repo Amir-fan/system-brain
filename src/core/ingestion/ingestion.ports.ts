@@ -49,6 +49,8 @@ export interface IngestionSourceSummary {
   projectId: string;
   sourceType: SourceType;
   status: string;
+  /** Registered origin for url sources (needed by the URL adapter). */
+  externalUri?: string;
 }
 
 /** Raw material handed to an adapter. `bytes` is only populated for file artifacts. */

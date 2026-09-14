@@ -32,6 +32,8 @@ import { createSupabaseRawStorage } from '../storage/raw-storage.ts';
 import type { SupabaseStorageClient } from '../storage/raw-storage.ts';
 import { createIngestionPersistence, createIngestionSourceReader } from '../provider/ingestion.storage.ts';
 import { createTextAcquisitionAdapter } from '../ingestion/text-acquisition.ts';
+import { createUrlAcquisitionAdapter } from '../ingestion/url-acquisition.ts';
+import { createGitHubAcquisitionAdapter } from '../ingestion/github-acquisition.ts';
 import { createFileAcquisitionAdapter } from '../ingestion/file-acquisition.ts';
 import { SourceAcquisitionRouter } from '../../core/ingestion/acquisition-router.ts';
 import { IngestionService } from '../../core/ingestion/ingestion.service.ts';
@@ -116,6 +118,10 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   const ingestionRouter = new SourceAcquisitionRouter([
     createTextAcquisitionAdapter(ingestionReader),
     createFileAcquisitionAdapter(ingestionReader),
+    createUrlAcquisitionAdapter({ sources: ingestionReader }),
+    // GitHub acquisition needs the App credentials; without them the type stays
+    // unsupported rather than silently failing at request time.
+    ...(githubDeps ? [createGitHubAcquisitionAdapter({ sources: ingestionReader, connections: connectionStorage, app: githubDeps.app })] : []),
   ]);
   const ingestionService = new IngestionService({
     persistence: createIngestionPersistence(db),

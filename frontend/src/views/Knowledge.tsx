@@ -231,7 +231,8 @@ export function Knowledge() {
     }
   };
 
-  const ingestible = (type: SourceType) => type === 'text' || type === 'file';
+  // K11: one Process action covers every supported source type.
+  const ingestible = (type: SourceType) => type === 'text' || type === 'file' || type === 'url' || type === 'github';
 
   const statusLabel = (status?: string) =>
     !status ? t('ingestion.status.none') : t('ingestion.status.' + status);

@@ -31,7 +31,13 @@ export function createFileAcquisitionAdapter(sources: IngestionSourceReader): So
         throw new IngestionFailure('ACQUISITION_FAILED', `unsupported file format: ${ext || 'unknown'}`);
       }
       const text = new TextDecoder('utf-8', { fatal: false }).decode(raw.bytes);
-      return { sourceId, contentType: 'text/plain', text, provenance: `file:${ext}` };
+      return {
+        sourceId,
+        sourceType: 'file',
+        contentType: 'text/plain',
+        text,
+        provenance: { kind: 'file', detail: ext, byteCount: raw.bytes.length },
+      };
     },
   };
 }

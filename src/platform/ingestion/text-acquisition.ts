@@ -19,7 +19,13 @@ export function createTextAcquisitionAdapter(sources: IngestionSourceReader): So
       if (!raw || raw.kind !== 'text' || typeof raw.text !== 'string') {
         throw new IngestionFailure('RAW_ARTIFACT_MISSING');
       }
-      return { sourceId, contentType: 'text/plain', text: raw.text, provenance: 'pasted-text' };
+      return {
+        sourceId,
+        sourceType: 'text',
+        contentType: 'text/plain',
+        text: raw.text,
+        provenance: { kind: 'text', byteCount: Buffer.byteLength(raw.text, 'utf8') },
+      };
     },
   };
 }

@@ -192,7 +192,7 @@ export function createIngestionSourceReader(db: SupabaseDatabase, rawStorage: Ra
     async getSource(projectId, sourceId): Promise<IngestionSourceSummary | null> {
       const { data } = await db
         .from('sources')
-        .select('id, project_id, source_type, status')
+        .select('id, project_id, source_type, status, external_uri')
         .eq('project_id', projectId)
         .eq('id', sourceId)
         .maybeSingle();
@@ -202,6 +202,7 @@ export function createIngestionSourceReader(db: SupabaseDatabase, rawStorage: Ra
         projectId: data.project_id as string,
         sourceType: data.source_type as SourceType,
         status: data.status as string,
+        externalUri: (data.external_uri as string) ?? undefined,
       };
     },
     async readRawMaterial(projectId, sourceId): Promise<RawMaterial | null> {
