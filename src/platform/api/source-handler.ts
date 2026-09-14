@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import { authorizeProject } from '../../core/authorization/project-boundary.ts';
 import type { ProjectBoundaryReaders } from '../../core/authorization/project-boundary.ts';
 import type { SourceStorage, SourceRecord, SourceType } from '../provider/source.storage.ts';
+import { isSourceRole } from '../provider/source.storage.ts';
 import { isSourceType } from '../provider/source.storage.ts';
 import type { RawArtifactRecord, RawArtifactStorage } from '../provider/raw-artifact.storage.ts';
 import type { ExternalConnectionStorage, ExternalReferenceRecord } from '../provider/external-connection.storage.ts';
@@ -72,6 +73,7 @@ function publicSource(
     description: s.description ?? undefined,
     externalUri: s.externalUri ?? undefined,
     status: s.status,
+    role: s.role,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     archivedAt: s.archivedAt ?? undefined,
@@ -125,8 +127,9 @@ export async function handleCreateSource(deps: SourceApiDeps, projectId: string,
   const auth = await authorizeProject(deps.boundary, projectId, actor, 'write');
   if (!auth.ok) return boundaryFail(auth);
 
-  const { sourceType, title, description, externalUri } = (body ?? {}) as Record<string, unknown>;
+  const { sourceType, title, description, externalUri, role } = (body ?? {}) as Record<string, unknown>;
   if (!isSourceType(sourceType)) return fail('unsupported source type', 'validation');
+  if (role !== undefined && !isSourceRole(role)) return fail('role must be primary, supporting or reference', 'validation');
   if (sourceType !== 'url') {
     return fail(`source type '${sourceType}' is not creatable through this route`, 'validation');
   }
@@ -139,6 +142,7 @@ export async function handleCreateSource(deps: SourceApiDeps, projectId: string,
     title: title.trim(),
     description: typeof description === 'string' ? description.trim() || undefined : undefined,
     externalUri,
+    role: role as never ?? undefined,
     createdBySubject: actor,
   });
   return ok(publicSource(source), 201);
@@ -149,7 +153,8 @@ export async function handleCreateTextSource(deps: SourceApiDeps, projectId: str
   const auth = await authorizeProject(deps.boundary, projectId, actor, 'write');
   if (!auth.ok) return boundaryFail(auth);
 
-  const { title, content, description } = (body ?? {}) as Record<string, unknown>;
+  const { title, content, description, role } = (body ?? {}) as Record<string, unknown>;
+  if (role !== undefined && !isSourceRole(role)) return fail('role must be primary, supporting or reference', 'validation');
   if (typeof title !== 'string' || title.trim().length === 0) return fail('title is required', 'validation');
   if (typeof content !== 'string' || content.trim().length === 0) return fail('content is required', 'validation');
   if (content.length > MAX_TEXT_CHARS) return fail('content is too large', 'validation');
@@ -261,7 +266,11 @@ export async function handleUpdateSource(
 
   // Only user-editable metadata; status is NOT editable here.
   const patch: Record<string, unknown> = {};
-  const { title, description, externalUri } = (body ?? {}) as Record<string, unknown>;
+  const { title, description, externalUri, role } = (body ?? {}) as Record<string, unknown>;
+  if (role !== undefined) {
+    if (!isSourceRole(role)) return fail('role must be primary, supporting or reference', 'validation');
+    patch.role = role;
+  }
   if (title !== undefined) {
     if (typeof title !== 'string' || title.trim().length === 0) return fail('title must be a non-empty string', 'validation');
     patch.title = title.trim();
