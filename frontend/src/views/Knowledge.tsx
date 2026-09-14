@@ -13,12 +13,13 @@ import {
   Upload,
   Play,
   RefreshCw,
+  Sparkles,
   FileText,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useProjectContext } from '../contexts/ProjectContext';
 import { apiKip } from '../api/kip';
-import type { KipSource, SourceType, ExternalConnection, IngestionJobView, ChunkView, DocumentView } from '../api/kip';
+import type { KipSource, SourceType, ExternalConnection, IngestionJobView, ChunkView, DocumentView, IndexStatusView } from '../api/kip';
 import { Card, CardHeader, Button } from '../ui/primitives';
 
 type Mode = 'url' | 'text' | 'file' | 'github' | 'google_drive';
@@ -66,6 +67,8 @@ export function Knowledge() {
   const [openChunkFor, setOpenChunkFor] = useState<string | null>(null);
   const [selectedChunk, setSelectedChunk] = useState<ChunkView | null>(null);
   const [chunksLoading, setChunksLoading] = useState(false);
+  const [indexBySource, setIndexBySource] = useState<Record<string, IndexStatusView>>({});
+  const [indexBusyId, setIndexBusyId] = useState<string | null>(null);
   const [connNotice, setConnNotice] = useState<string | null>(null);
 
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -241,6 +244,41 @@ export function Knowledge() {
     }
   };
 
+  // K14: index readiness is FETCHED, never inferred from ingestion status.
+  const refreshIndexStatuses = useCallback(async () => {
+    if (!projectId || sources.length === 0) return;
+    const entries = await Promise.all(
+      sources.map(async (s) => {
+        try {
+          return [s.id, await apiKip().indexStatus(projectId, s.id)] as const;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    const next: Record<string, IndexStatusView> = {};
+    for (const entry of entries) if (entry) next[entry[0]] = entry[1];
+    setIndexBySource(next);
+  }, [projectId, sources]);
+
+  useEffect(() => {
+    void refreshIndexStatuses();
+  }, [refreshIndexStatuses]);
+
+  /** 'فهرسة المعرفة': explicit indexing. Never triggers on its own. */
+  const indexSourceKnowledge = async (source: KipSource) => {
+    if (!projectId) return;
+    setIndexBusyId(source.id);
+    try {
+      await apiKip().indexSourceKnowledge(projectId, source.id);
+      await refreshIndexStatuses();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : t('index.error'));
+    } finally {
+      setIndexBusyId(null);
+    }
+  };
+
   // K11: one Process action covers every supported source type.
   const openDocuments = async (source: KipSource) => {
     if (!projectId) return;
@@ -313,6 +351,37 @@ export function Knowledge() {
 
   const statusLabel = (status?: string) =>
     !status ? t('ingestion.status.none') : t('ingestion.status.' + status);
+
+  /**
+   * Two concepts, stated plainly: content readiness and index readiness.
+   * Technical states are never shown — only Arabic-first wording.
+   */
+  const indexLabelFor = (sourceId: string) => {
+    const view = indexBySource[sourceId];
+    if (!view) return t('index.state.none');
+    if (view.job?.status === 'queued' || view.job?.status === 'processing') return t('index.state.indexing');
+    if (view.job?.status === 'failed') return t('index.state.failed');
+    if (view.index.modelMatches === false) return t('index.state.stale');
+    switch (view.index.state) {
+      case 'ready':
+        return t('index.state.ready');
+      case 'indexing':
+        return t('index.state.indexing');
+      case 'partial':
+        return t('index.state.partial');
+      default:
+        return t('index.state.none');
+    }
+  };
+
+  const indexClass = (state?: string) =>
+    state === 'ready'
+      ? 'bg-success-100 text-success-700'
+      : state === 'failed'
+        ? 'bg-rose-50 text-rose-600'
+        : state === 'indexing' || state === 'partial'
+          ? 'bg-brand-50 text-brand-700'
+          : 'bg-slate-100 text-muted';
 
   const statusClass = (status?: string) =>
     status === 'completed'
@@ -400,7 +469,9 @@ export function Knowledge() {
                   {ingestible(s.sourceType) ? (
                     <div className="flex shrink-0 items-center gap-2">
                       <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${statusClass(ingestions[s.id]?.status)}`}>
-                        {statusLabel(ingestions[s.id]?.status)}
+                        {ingestions[s.id]?.status === 'completed'
+                          ? t('index.content.done')
+                          : statusLabel(ingestions[s.id]?.status)}
                       </span>
                       {ingestions[s.id]?.status === 'failed' ? (
                         <Button
@@ -425,6 +496,41 @@ export function Knowledge() {
                         <Button variant="ghost" onClick={() => openDocuments(s)} title={t('documents.open')}>
                           <FileText className="h-4 w-4" /> {t('documents.open')}
                         </Button>
+                      ) : null}
+                      {ingestions[s.id]?.status === 'completed' ? (
+                        <>
+                          <span
+                            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${indexClass(
+                              indexBySource[s.id]?.job?.status === 'failed'
+                                ? 'failed'
+                                : indexBySource[s.id]?.index.state,
+                            )}`}
+                          >
+                            {indexLabelFor(s.id)}
+                          </span>
+                          {indexBySource[s.id]?.job?.status === 'failed' ||
+                          indexBySource[s.id]?.index.modelMatches === false ? (
+                            <Button
+                              variant="ghost"
+                              disabled={indexBusyId === s.id}
+                              onClick={() => indexSourceKnowledge(s)}
+                              title={t('index.action')}
+                            >
+                              <RefreshCw className={`h-4 w-4 ${indexBusyId === s.id ? 'animate-spin' : ''}`} />
+                              {indexBusyId === s.id ? t('index.working') : t('index.action')}
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="outline"
+                              disabled={indexBusyId === s.id || indexBySource[s.id]?.index.state === 'indexing'}
+                              onClick={() => indexSourceKnowledge(s)}
+                              title={t('index.action')}
+                            >
+                              <Sparkles className={`h-4 w-4 ${indexBusyId === s.id ? 'animate-spin' : ''}`} />
+                              {indexBusyId === s.id ? t('index.working') : t('index.action')}
+                            </Button>
+                          )}
+                        </>
                       ) : null}
                     </div>
                   ) : null}

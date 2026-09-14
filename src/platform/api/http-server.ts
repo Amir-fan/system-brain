@@ -19,6 +19,7 @@ import {
   revokeProvider,
   testConnection,
   listProviderModels,
+  getEmbeddingModelCatalog,
   listAssignments,
   putAssignment,
   deleteAssignment,
@@ -44,8 +45,10 @@ import {
 } from './connection-handler.ts';
 import type { DocumentApiDeps } from './document-handler.ts';
 import type { ChunkApiDeps } from './chunk-handler.ts';
+import type { EmbeddingApiDeps } from './embedding-handler.ts';
 import { handleListSourceDocuments, handleGetDocument } from './document-handler.ts';
 import { handleGetChunk, handleListDocumentChunks } from './chunk-handler.ts';
+import { handleGetEmbeddingJob, handleIndexSource, handleIndexStatus } from './embedding-handler.ts';
 import type { IngestionApiDeps } from './ingestion-handler.ts';
 import {
   handleCreateIngestion,
@@ -76,6 +79,7 @@ export interface HttpApiDeps {
   ingestion?: IngestionApiDeps;
   documents?: DocumentApiDeps;
   chunks?: ChunkApiDeps;
+  embeddings?: EmbeddingApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -131,6 +135,12 @@ async function handleProject(
   }
   if (url.includes('/connections')) {
     return handleConnections(req, res, url, deps);
+  }
+  if (url.includes('/embedding-jobs')) {
+    return handleEmbeddingJobs(req, res, url, deps);
+  }
+  if (url.includes('/embeddings')) {
+    return handleEmbeddings(req, res, url, deps);
   }
   if (url.includes('/sources')) {
     return handleSources(req, res, url, deps);
@@ -412,6 +422,55 @@ async function handleChunks(
   );
 }
 
+async function handleEmbeddings(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.embeddings) return notFound(res);
+
+  const path = url.split('?')[0];
+  const scoped = new RegExp('^/v1/projects/([^/]+)/sources/([^/]+)/embeddings$').exec(path);
+  if (!scoped) return notFound(res);
+  if (req.method !== 'POST' && req.method !== 'GET') return notFound(res);
+
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+
+  const projectId = decodeURIComponent(scoped[1]);
+  const sourceId = decodeURIComponent(scoped[2]);
+  if (req.method === 'POST') {
+    return sendSourceResult(res, await handleIndexSource(deps.embeddings, projectId, sourceId, actor));
+  }
+  return sendSourceResult(res, await handleIndexStatus(deps.embeddings, projectId, sourceId, actor));
+}
+
+async function handleEmbeddingJobs(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.embeddings) return notFound(res);
+  if (req.method !== 'GET') return notFound(res);
+
+  const match = new RegExp('^/v1/projects/([^/]+)/embedding-jobs/([^/]+)$').exec(url.split('?')[0]);
+  if (!match) return notFound(res);
+
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+  return sendSourceResult(
+    res,
+    await handleGetEmbeddingJob(
+      deps.embeddings,
+      decodeURIComponent(match[1]),
+      decodeURIComponent(match[2]),
+      actor,
+    ),
+  );
+}
+
 async function handleIngestions(
   req: import('node:http').IncomingMessage,
   res: import('node:http').ServerResponse,
@@ -524,7 +583,7 @@ async function handleAdmin(
     return sendResult(res, apiResponse);
   }
 
-  const ASSIGNMENT_RE = /^\/v1\/admin\/providers(?:\/([^/]+)(?:\/(test|revoke|models))?)?$/;
+  const ASSIGNMENT_RE = /^\/v1\/admin\/providers(?:\/([^/]+)(?:\/(test|revoke|models|embedding-models))?)?$/;
   const match = ASSIGNMENT_RE.exec(url);
   if (!match) {
     return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
@@ -536,7 +595,9 @@ async function handleAdmin(
 
   let apiResponse;
   try {
-    if (req.method === 'GET' && /\/models$/.test(url)) {
+    if (req.method === 'GET' && /\/embedding-models$/.test(url)) {
+      apiResponse = await getEmbeddingModelCatalog(deps.admin.adminApi);
+    } else if (req.method === 'GET' && /\/models$/.test(url)) {
       apiResponse = await listProviderModels(deps.admin.adminApi);
     } else if (req.method === 'POST' && /\/test$/.test(url)) {
       apiResponse = await testConnection(deps.admin.adminApi, providerKey);

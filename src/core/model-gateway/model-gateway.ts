@@ -48,11 +48,42 @@ export interface ModelGatewayOutput {
 }
 
 /**
+ * Embedding input. Deliberately SEPARATE from text generation: an embedding call
+ * has its own provider endpoint, its own failure modes (rate limits, dimension
+ * drift) and its own accounting, so it never rides on generateText().
+ *
+ * `inputType` is provider-neutral intent: knowledge being indexed is a document,
+ * a future retrieval query is a query. No provider-specific type crosses here.
+ */
+export interface EmbedTextsInput {
+  projectId: string;
+  runId: string;
+  texts: string[];
+  inputType?: 'document' | 'query';
+  /** Requested output width. The provider may honour it (MRL) or not. */
+  dimensions?: number;
+  model?: ModelRequirement;
+  /** Already-resolved model id (from the control-plane assignment resolver). */
+  modelId?: string;
+}
+
+export interface EmbedTextsOutput {
+  /** One vector per input text, in the same order. */
+  vectors: number[][];
+  provider?: string;
+  model?: string;
+  dimensions?: number;
+  usage?: ModelUsage;
+  latencyMs?: number;
+}
+
+/**
  * The single provider-neutral door to external models.
  * Implemented by a platform provider adapter; consumed by Core capabilities.
  */
 export interface ModelGateway {
   generateText(input: ModelGatewayInput): Promise<ModelGatewayOutput>;
+  embedTexts(input: EmbedTextsInput): Promise<EmbedTextsOutput>;
 }
 
 /** Trace metadata a capability may attach to a completed run (provider-neutral). */

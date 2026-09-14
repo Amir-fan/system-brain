@@ -9,6 +9,10 @@ import type { Actor, ProjectMembership, Role } from '../src/core/authorization/a
 import type { Project } from '../src/core/project/project.ts';
 
 class FakeGateway implements ModelGateway {
+  async embedTexts(): Promise<{ vectors: number[][]; provider?: string; model?: string }> {
+    return { vectors: [[0.1, 0.2]], provider: 'fake', model: 'fake-embed' };
+  }
+
   callCount = 0;
   lastInput?: ModelGatewayInput;
   failWith?: Error;

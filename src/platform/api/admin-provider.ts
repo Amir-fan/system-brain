@@ -18,6 +18,12 @@ import type {
   ModelAssignmentResolver,
 } from '../provider/model-assignment.ts';
 import { isWorkloadKey, ALLOWED_WORKLOADS } from '../provider/model-assignment.ts';
+import {
+  EMBEDDING_MODEL_CATALOG,
+  LOCKED_EMBEDDING_DIMENSIONS,
+  assignableEmbeddingModels,
+  isAssignableEmbeddingModel,
+} from '../model-gateway/embedding-models.catalog.ts';
 import type { ModelGatewayOutput } from '../../core/model-gateway/model-gateway.ts';
 import { providerError } from '../../core/model-gateway/gateway-errors.ts';
 
@@ -97,6 +103,35 @@ export async function revokeProvider(deps: AdminProviderApiDeps, providerKey: st
   }
 }
 
+/**
+ * Embedding-capable models. A DISTINCT catalog from the chat models: OpenRouter's
+ * GET /models does not list embedding models at all, so folding them together
+ * would advertise models that cannot answer a chat request. Capabilities come
+ * from the curated catalog, which also keeps the picker honest about the locked
+ * vector width.
+ */
+export async function getEmbeddingModelCatalog(_deps: AdminProviderApiDeps): Promise<AdminApiResponse> {
+  return ok({
+    lockedDimensions: LOCKED_EMBEDDING_DIMENSIONS,
+    count: EMBEDDING_MODEL_CATALOG.length,
+    assignableCount: assignableEmbeddingModels().length,
+    models: EMBEDDING_MODEL_CATALOG.map((m) => ({
+      id: m.id,
+      providerKey: m.providerKey,
+      label: m.label,
+      nativeDimensions: m.nativeDimensions,
+      supportedDimensions: m.supportedDimensions,
+      contextTokens: m.contextTokens,
+      pricePerMillionTokensUsd: m.pricePerMillionTokensUsd,
+      multilingual: m.multilingual,
+      approved: m.approved,
+      // Only models that can emit the locked width may be assigned in V1.
+      assignable: m.supportedDimensions.includes(LOCKED_EMBEDDING_DIMENSIONS),
+      notes: m.notes,
+    })),
+  });
+}
+
 export async function listProviderModels(deps: AdminProviderApiDeps): Promise<AdminApiResponse> {
   try {
     const secret = await deps.storage.readSecret('openrouter');
@@ -152,12 +187,24 @@ export async function putAssignment(
   const { modelId } = (body ?? {}) as { modelId?: string };
   if (!modelId || typeof modelId !== 'string') return fail('modelId is required', 'validation');
 
-  // Validate the selected model against the live OpenRouter catalog.
-  const catalogRes = await getModelCatalog(deps);
-  if (!catalogRes.ok) return catalogRes;
-  const catalog = (catalogRes.data as { models: Array<{ id: string }> }).models;
-  if (!catalog.some((m) => m.id === modelId)) {
-    return fail(`model '${modelId}' is not in the OpenRouter catalog`, 'validation');
+  // K14: embedding models live in a DISTINCT catalog — OpenRouter's chat catalog
+  // never lists them — and only a model that can emit the locked vector width may
+  // be assigned, because the pgvector column is fixed-width.
+  if (workloadKey === 'embeddings') {
+    if (!isAssignableEmbeddingModel(modelId)) {
+      return fail(
+        `model '${modelId}' cannot emit the locked ${LOCKED_EMBEDDING_DIMENSIONS}-dimension vector`,
+        'validation',
+      );
+    }
+  } else {
+    // Validate the selected chat model against the live OpenRouter catalog.
+    const catalogRes = await getModelCatalog(deps);
+    if (!catalogRes.ok) return catalogRes;
+    const catalog = (catalogRes.data as { models: Array<{ id: string }> }).models;
+    if (!catalog.some((m) => m.id === modelId)) {
+      return fail(`model '${modelId}' is not in the OpenRouter catalog`, 'validation');
+    }
   }
 
   const assignment = await deps.assignmentStorage.upsert(workloadKey as never, modelId, 'openrouter');

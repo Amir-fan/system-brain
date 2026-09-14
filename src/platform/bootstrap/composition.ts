@@ -31,6 +31,8 @@ import { createExternalConnectionStorage } from '../provider/external-connection
 import { createSupabaseRawStorage } from '../storage/raw-storage.ts';
 import type { SupabaseStorageClient } from '../storage/raw-storage.ts';
 import { createIngestionPersistence, createIngestionSourceReader } from '../provider/ingestion.storage.ts';
+import { createEmbeddingPersistence } from '../provider/embedding.storage.ts';
+import { EmbeddingService } from '../../core/embedding/embedding.service.ts';
 import { createTextAcquisitionAdapter } from '../ingestion/text-acquisition.ts';
 import { createUrlAcquisitionAdapter } from '../ingestion/url-acquisition.ts';
 import { createGitHubAcquisitionAdapter } from '../ingestion/github-acquisition.ts';
@@ -124,6 +126,21 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     ...(githubDeps ? [createGitHubAcquisitionAdapter({ sources: ingestionReader, connections: connectionStorage, app: githubDeps.app })] : []),
   ]);
   const ingestionPersistence = createIngestionPersistence(db);
+
+  // K14: INDEX_READY is a separate, explicit stage over a COMPLETED ingestion snapshot.
+  const embeddingPersistence = createEmbeddingPersistence(db);
+  const embeddingService = new EmbeddingService({
+    persistence: embeddingPersistence,
+    sources: {
+      latestCompletedIngestion: async (projectId: string, sourceId: string) => {
+        const job = await ingestionPersistence.latestCompletedJob(projectId, sourceId);
+        return job ? { id: job.id } : null;
+      },
+    },
+    resolver: assignmentResolver,
+    gateway,
+  });
+
   const ingestionService = new IngestionService({
     persistence: ingestionPersistence,
     sources: ingestionReader,
@@ -152,6 +169,22 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     ingestion: { service: ingestionService, boundary: persistence },
     documents: { persistence: ingestionPersistence, boundary: persistence },
     chunks: { persistence: ingestionPersistence, boundary: persistence },
+    embeddings: {
+      service: embeddingService,
+      persistence: embeddingPersistence,
+      ingestion: {
+        latestCompletedIngestion: async (projectId: string, sourceId: string) => {
+          const job = await ingestionPersistence.latestCompletedJob(projectId, sourceId);
+          return job ? { id: job.id } : null;
+        },
+      },
+      resolver: assignmentResolver,
+      sources: {
+        exists: async (projectId: string, sourceId: string) =>
+          Boolean(await ingestionReader.getSource(projectId, sourceId)),
+      },
+      boundary: persistence,
+    },
     admin: {
       storage: providerStorage,
       adminApi: {

@@ -104,6 +104,31 @@ export interface ExternalConnection {
   accountLabel?: string;
 }
 
+export type IndexState = 'ready' | 'partial' | 'none' | 'indexing';
+
+/** Two separate concepts: content readiness (ingestion) and index readiness. */
+export interface IndexStatusView {
+  content: { ready: boolean; chunkCount: number };
+  index: {
+    state: IndexState;
+    modelId: string | null;
+    modelMatches: boolean;
+    embeddedChunks: number;
+    totalChunks: number;
+  };
+  job: {
+    id: string;
+    status: string;
+    chunksRequested: number;
+    chunksEmbedded: number;
+    chunksReused: number;
+    batchCount: number;
+    failedAt?: string;
+    errorCode?: string;
+    errorMessage?: string;
+  } | null;
+}
+
 export interface ChunkView {
   id: string;
   documentId: string;
@@ -213,6 +238,15 @@ export function apiKip() {
       ),
     getChunk: (projectId: string, chunkId: string) =>
       call<ChunkView>(`/v1/projects/${projectId}/chunks/${chunkId}`),
+    /** Content readiness + index readiness for one source (no vectors, no internals). */
+    indexStatus: (projectId: string, sourceId: string) =>
+      call<IndexStatusView>(`/v1/projects/${projectId}/sources/${sourceId}/embeddings`),
+    /** Explicit indexing / reindexing of the latest processed content. */
+    indexSourceKnowledge: (projectId: string, sourceId: string) =>
+      call<{ job: unknown; reused: boolean }>(
+        `/v1/projects/${projectId}/sources/${sourceId}/embeddings`,
+        json('POST', {}),
+      ),
     /** Latest ingestion job per source for the active project. */
     listProjectIngestions: (projectId: string) => call<IngestionJobView[]>(`/v1/projects/${projectId}/ingestions`),
     /** Process a source (safe to call twice: an active job is reused, not duplicated). */

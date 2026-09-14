@@ -16,8 +16,16 @@ import type {
   ModelGatewayOutput,
 } from '../../core/model-gateway/model-gateway.ts';
 import { providerError } from '../../core/model-gateway/gateway-errors.ts';
+import {
+  EMBEDDING_MAX_RETRIES,
+  EMBEDDING_RETRY_BACKOFF_MS,
+  EMBEDDING_RETRYABLE_STATUS,
+} from '../../core/embedding/embedding.ts';
+import type { EmbedTextsInput, EmbedTextsOutput } from '../../core/model-gateway/model-gateway.ts';
 
 const BASE = 'https://openrouter.ai/api/v1';
+/** Bounded per-request timeout; embeddings of one bounded batch finish well inside it. */
+const EMBEDDING_TIMEOUT_MS = 60_000;
 
 export interface OpenRouterAdapterOptions {
   apiKey: string;
@@ -108,5 +116,87 @@ export class OpenRouterGateway implements ModelGateway {
       },
       latencyMs: Date.now() - started,
     };
+  }
+
+  /**
+   * Embeddings via OpenRouter's OpenAI-compatible /embeddings route.
+   *
+   * Retries ONLY transient failures (429/500/502/503/524/529 and network
+   * timeouts) with bounded backoff; terminal provider answers (400/401/402/403/
+   * 404/413) fail immediately. Never logs input text, vectors or the credential.
+   */
+  async embedTexts(input: EmbedTextsInput): Promise<EmbedTextsOutput> {
+    const started = Date.now();
+    const model = input.modelId ?? this.defaultModel;
+
+    const body: Record<string, unknown> = {
+      model,
+      input: input.texts,
+      encoding_format: 'float',
+    };
+    // Only sent when the caller pinned a width; the service always does.
+    if (input.dimensions !== undefined) body.dimensions = input.dimensions;
+    if (input.inputType) {
+      body.input_type = input.inputType === 'query' ? 'search_query' : 'search_document';
+    }
+
+    let lastStatus = 0;
+    for (let attempt = 0; attempt <= EMBEDDING_MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        const wait = EMBEDDING_RETRY_BACKOFF_MS[
+          Math.min(attempt - 1, EMBEDDING_RETRY_BACKOFF_MS.length - 1)
+        ];
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+
+      let res: Response;
+      try {
+        res = await this.raw('/embeddings', {
+          method: 'POST',
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(EMBEDDING_TIMEOUT_MS),
+        });
+      } catch {
+        lastStatus = 0; // network failure / timeout: retryable, never a terminal answer
+        continue;
+      }
+
+      if (!res.ok) {
+        lastStatus = res.status;
+        const retryable = (EMBEDDING_RETRYABLE_STATUS as readonly number[]).includes(res.status);
+        if (retryable && attempt < EMBEDDING_MAX_RETRIES) continue;
+        throw providerError('embedding request failed', 'PROVIDER_EMBEDDING_FAILED', { status: res.status });
+      }
+
+      const parsed = (await res.json()) as {
+        data?: Array<{ embedding?: number[]; index?: number }>;
+        model?: string;
+        provider?: string;
+        usage?: { prompt_tokens?: number; total_tokens?: number; cost?: number };
+      };
+
+      // Order is part of the contract: caller's texts[i] must map to vectors[i].
+      const vectors = (parsed.data ?? [])
+        .slice()
+        .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+        .map((d) => (Array.isArray(d.embedding) ? d.embedding : []));
+
+      return {
+        vectors,
+        provider: parsed.provider ?? 'openrouter',
+        model: parsed.model ?? model,
+        dimensions: vectors[0]?.length,
+        usage: {
+          promptTokens: parsed.usage?.prompt_tokens,
+          totalTokens: parsed.usage?.total_tokens,
+          costUsd: parsed.usage?.cost,
+        },
+        latencyMs: Date.now() - started,
+      };
+    }
+
+    throw providerError('embedding request failed after retries', 'PROVIDER_EMBEDDING_FAILED', {
+      status: lastStatus,
+    });
   }
 }

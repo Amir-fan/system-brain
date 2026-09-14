@@ -11,6 +11,10 @@ import type { ModelGateway, ModelGatewayOutput } from '../src/core/model-gateway
 import type { RuntimePersistence, RunRecord } from '../src/core/runtime/runtime.ports.ts';
 
 class FakeGateway implements ModelGateway {
+  async embedTexts(): Promise<{ vectors: number[][]; provider?: string; model?: string }> {
+    return { vectors: [[0.1, 0.2]], provider: 'fake', model: 'fake-embed' };
+  }
+
   async generateText(): Promise<ModelGatewayOutput> {
     return { text: 'ai-answer', provider: 'fake', model: 'fake-mini', usage: { totalTokens: 9 }, latencyMs: 5 };
   }

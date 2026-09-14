@@ -16,6 +16,8 @@
  */
 
 import type {
+  EmbedTextsInput,
+  EmbedTextsOutput,
   ModelGateway,
   ModelGatewayInput,
   ModelGatewayOutput,
@@ -36,5 +38,19 @@ export class ResolvingModelGateway implements ModelGateway {
       modelId = resolved.modelId;
     }
     return this.inner.generateText({ ...input, modelId });
+  }
+
+  /**
+   * Same control-plane resolution for embeddings: the canonical `embeddings`
+   * workload maps to a model, and a missing assignment fails explicitly here.
+   * The adapter stays assignment-blind and never picks a model on its own.
+   */
+  async embedTexts(input: EmbedTextsInput): Promise<EmbedTextsOutput> {
+    let modelId = input.modelId;
+    if (!modelId) {
+      const resolved = await this.resolver.resolve(input.model ?? { profile: 'embeddings' });
+      modelId = resolved.modelId;
+    }
+    return this.inner.embedTexts({ ...input, modelId });
   }
 }

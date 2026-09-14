@@ -37,10 +37,15 @@ test('model-assignment API: admin auth required + assignment CRUD', { skip: !has
     const noAuth = await fetch(`${base}/v1/admin/model-assignments`);
     assert.equal(noAuth.status, 401);
 
-    // GET empty
+    // GET: assert only about the workload THIS test owns. A live project can
+    // legitimately hold other assignments (e.g. the approved `embeddings` model),
+    // so the whole-table emptiness is not this test's contract.
+    const seedDb = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SECRET_KEY!) as unknown as SupabaseDatabase;
+    await seedDb.from('model_assignments').delete().eq('workload_key', 'source_analysis');
     const empty = await req('/v1/admin/model-assignments', 'GET');
     assert.equal(empty.status, 200);
-    assert.deepEqual(empty.json.data, []);
+    const mine = (empty.json.data ?? []).filter((a: { workloadKey?: string }) => a.workloadKey === 'source_analysis');
+    assert.deepEqual(mine, []);
 
     // PUT assign (validates against catalog only if a catalog is reachable; use a real openrouter model id if available)
     const validModel = ['anthropic/claude-3-5-sonnet-20241022', 'openai/gpt-4o-mini', 'meta-llama/llama-3.1-8b-instruct:free'].find(() => true)!;
