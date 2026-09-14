@@ -123,8 +123,9 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     // unsupported rather than silently failing at request time.
     ...(githubDeps ? [createGitHubAcquisitionAdapter({ sources: ingestionReader, connections: connectionStorage, app: githubDeps.app })] : []),
   ]);
+  const ingestionPersistence = createIngestionPersistence(db);
   const ingestionService = new IngestionService({
-    persistence: createIngestionPersistence(db),
+    persistence: ingestionPersistence,
     sources: ingestionReader,
     router: ingestionRouter,
     observer: (event) => console.log('[ingestion]', JSON.stringify(event)),
@@ -149,6 +150,7 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     },
     github: githubDeps,
     ingestion: { service: ingestionService, boundary: persistence },
+    documents: { persistence: ingestionPersistence, boundary: persistence },
     admin: {
       storage: providerStorage,
       adminApi: {

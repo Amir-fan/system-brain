@@ -42,6 +42,8 @@ import {
   handleListConnectionItems,
   handleRegisterExternalSource,
 } from './connection-handler.ts';
+import type { DocumentApiDeps } from './document-handler.ts';
+import { handleListSourceDocuments, handleGetDocument } from './document-handler.ts';
 import type { IngestionApiDeps } from './ingestion-handler.ts';
 import {
   handleCreateIngestion,
@@ -70,6 +72,7 @@ export interface HttpApiDeps {
   connections?: ConnectionApiDeps;
   github?: GitHubConnectorDeps;
   ingestion?: IngestionApiDeps;
+  documents?: DocumentApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -113,6 +116,9 @@ async function handleProject(
     if (!actor) return;
     const result = await handleListMyProjects(deps.projects, actor);
     return sendJson(res, result.status, { ok: result.ok, status: result.status, ...(result.ok ? { data: result.data } : { error: result.error }) } as ApiResult);
+  }
+  if (url.includes('/documents')) {
+    return handleDocuments(req, res, url, deps);
   }
   if (url.includes('/ingestions')) {
     return handleIngestions(req, res, url, deps);
@@ -326,6 +332,44 @@ async function handleProviderRedirect(
   const { redirect } = await handleGitHubCallback(deps.github, new URLSearchParams(qs));
   res.writeHead(302, { location: redirect });
   res.end();
+}
+
+async function handleDocuments(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.documents) return notFound(res);
+  if (req.method !== 'GET') return notFound(res);
+
+  const split = url.split('?');
+  const path = split[0];
+  const qs = split[1] ?? '';
+  const bySource = new RegExp('^/v1/projects/([^/]+)/sources/([^/]+)/documents$').exec(path);
+  const byId = new RegExp('^/v1/projects/([^/]+)/documents/([^/]+)$').exec(path);
+  if (!bySource && !byId) return notFound(res);
+
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+
+  if (bySource) {
+    const ingestionId = new URLSearchParams(qs).get('ingestionId') ?? undefined;
+    return sendSourceResult(
+      res,
+      await handleListSourceDocuments(
+        deps.documents,
+        decodeURIComponent(bySource[1]),
+        decodeURIComponent(bySource[2]),
+        actor,
+        ingestionId ?? undefined,
+      ),
+    );
+  }
+  return sendSourceResult(
+    res,
+    await handleGetDocument(deps.documents, decodeURIComponent(byId![1]), decodeURIComponent(byId![2]), actor),
+  );
 }
 
 async function handleIngestions(

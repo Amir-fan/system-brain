@@ -24,6 +24,7 @@ export function createTextAcquisitionAdapter(sources: IngestionSourceReader): So
         sourceType: 'text',
         contentType: 'text/plain',
         text: raw.text,
+        units: [{ key: 'text:primary', contentType: 'text/plain', text: raw.text }],
         provenance: { kind: 'text', byteCount: Buffer.byteLength(raw.text, 'utf8') },
       };
     },

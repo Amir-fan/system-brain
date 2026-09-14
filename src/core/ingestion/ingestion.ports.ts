@@ -19,6 +19,7 @@ import type {
   SaveIngestionOutputInput,
 } from './ingestion.types.ts';
 import type { SourceType } from '../project/source-type.ts';
+import type { CreateDocumentInput, DocumentRecord, DocumentSummary } from './document.ts';
 
 /** Raised when the database refuses a second active job for the same source. */
 export class ActiveIngestionJobExistsError extends Error {
@@ -42,6 +43,17 @@ export interface IngestionPersistence {
   markFailed(jobId: string, at: string, errorCode: string, errorMessage: string): Promise<void>;
   saveOutput(input: SaveIngestionOutputInput): Promise<IngestionOutput>;
   latestOutput(projectId: string, sourceId: string): Promise<IngestionOutput | null>;
+
+  // ---- canonical documents (K12)
+  /** Persists the document snapshot for one ingestion. Throws on failure. */
+  saveDocuments(inputs: CreateDocumentInput[]): Promise<DocumentRecord[]>;
+  /** Compensation: removes a partially written snapshot. */
+  deleteDocumentsForJob(ingestionJobId: string): Promise<void>;
+  /** Metadata-only listing (never selects normalized_text). */
+  listDocumentSummaries(projectId: string, sourceId: string, ingestionJobId: string): Promise<DocumentSummary[]>;
+  getDocument(projectId: string, documentId: string): Promise<DocumentRecord | null>;
+  /** Resolves which snapshot a default listing should read. */
+  latestCompletedJob(projectId: string, sourceId: string): Promise<IngestionJob | null>;
 }
 
 export interface IngestionSourceSummary {

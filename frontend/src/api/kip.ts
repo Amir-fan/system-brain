@@ -104,6 +104,20 @@ export interface ExternalConnection {
   accountLabel?: string;
 }
 
+export interface DocumentView {
+  id: string;
+  sourceId: string;
+  title?: string;
+  logicalPath?: string;
+  contentType: string;
+  charCount: number;
+  contentSha256: string;
+  ordinal: number;
+  createdAt: string;
+  /** Present only on the single-document read. */
+  normalizedText?: string;
+}
+
 export type IngestionStatus = 'queued' | 'processing' | 'completed' | 'failed';
 
 export interface IngestionJobView {
@@ -172,6 +186,13 @@ export function apiKip() {
     /** Repositories actually granted to the project's GitHub installation. */
     listGitHubRepositories: (projectId: string) =>
       call<ExternalItem[]>(`/v1/projects/${projectId}/connections/github/repositories`),
+    /** Canonical documents for a source (latest completed ingestion by default). */
+    listSourceDocuments: (projectId: string, sourceId: string) =>
+      call<{ ingestionId: string | null; documents: DocumentView[] }>(
+        `/v1/projects/${projectId}/sources/${sourceId}/documents`,
+      ),
+    getDocument: (projectId: string, documentId: string) =>
+      call<DocumentView>(`/v1/projects/${projectId}/documents/${documentId}`),
     /** Latest ingestion job per source for the active project. */
     listProjectIngestions: (projectId: string) => call<IngestionJobView[]>(`/v1/projects/${projectId}/ingestions`),
     /** Process a source (safe to call twice: an active job is reused, not duplicated). */

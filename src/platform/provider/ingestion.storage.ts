@@ -30,9 +30,20 @@ import type {
   SaveIngestionOutputInput,
 } from '../../core/ingestion/ingestion.types.ts';
 import type { SourceType } from '../../core/project/source-type.ts';
+import type { CreateDocumentInput, DocumentRecord, DocumentSummary } from '../../core/ingestion/document.ts';
 
 const JOB_COLUMNS =
   'id, project_id, source_id, status, attempt_number, trigger_type, started_at, completed_at, failed_at, error_code, error_message, created_by_subject, created_at, updated_at';
+
+const DOC_COLUMNS =
+  'id, project_id, source_id, ingestion_job_id, ingestion_output_id, document_key, title, logical_path, content_type, content_sha256, char_count, ordinal, created_at, updated_at';
+
+/** List projection: deliberately excludes normalized_text. */
+const DOC_SUMMARY_COLUMNS =
+  'id, project_id, source_id, ingestion_job_id, ingestion_output_id, document_key, title, logical_path, content_type, content_sha256, char_count, ordinal, created_at, updated_at';
+
+/** Single-document projection: includes the normalized text for inspection. */
+const DOC_FULL_COLUMNS = DOC_COLUMNS + ', normalized_text';
 
 const OUTPUT_COLUMNS =
   'id, project_id, ingestion_job_id, source_id, content_type, normalized_text, content_sha256, char_count, created_at';
@@ -53,6 +64,31 @@ const mapJob = (r: Record<string, unknown>): IngestionJob => ({
   createdAt: r.created_at as string,
   updatedAt: r.updated_at as string,
 });
+
+const mapDocument = (r: Record<string, unknown>): DocumentRecord => ({
+  id: r.id as string,
+  projectId: r.project_id as string,
+  sourceId: r.source_id as string,
+  ingestionJobId: r.ingestion_job_id as string,
+  ingestionOutputId: (r.ingestion_output_id as string) ?? undefined,
+  documentKey: r.document_key as string,
+  title: (r.title as string) ?? undefined,
+  logicalPath: (r.logical_path as string) ?? undefined,
+  contentType: r.content_type as 'text/plain',
+  normalizedText: (r.normalized_text as string) ?? '',
+  contentSha256: r.content_sha256 as string,
+  charCount: Number(r.char_count ?? 0),
+  ordinal: Number(r.ordinal ?? 0),
+  createdAt: r.created_at as string,
+  updatedAt: r.updated_at as string,
+});
+
+function summaryOf(doc: DocumentRecord): DocumentSummary {
+  const { normalizedText, ...rest } = doc;
+  void normalizedText;
+  return rest;
+}
+const mapDocumentSummary = (r: Record<string, unknown>): DocumentSummary => summaryOf(mapDocument(r));
 
 const mapOutput = (r: Record<string, unknown>): IngestionOutput => ({
   id: r.id as string,
@@ -182,6 +218,65 @@ export function createIngestionPersistence(db: SupabaseDatabase): IngestionPersi
         .limit(1);
       const row = (data ?? [])[0];
       return row ? mapOutput(row) : null;
+    },
+
+    // ---- canonical documents (K12) ------------------------------------------
+    async saveDocuments(inputs: CreateDocumentInput[]) {
+      const rows = inputs.map((d) => ({
+        project_id: d.projectId,
+        source_id: d.sourceId,
+        ingestion_job_id: d.ingestionJobId,
+        ingestion_output_id: d.ingestionOutputId ?? null,
+        document_key: d.documentKey,
+        title: d.title ?? null,
+        logical_path: d.logicalPath ?? null,
+        content_type: 'text/plain',
+        normalized_text: d.normalizedText,
+        content_sha256: d.contentSha256,
+        char_count: d.charCount,
+        ordinal: d.ordinal,
+      }));
+      const { data, error } = (await db.from('documents').insert(rows).select(DOC_COLUMNS).limit(1000)) as {
+        data: Array<Record<string, unknown>> | null;
+        error: unknown;
+      };
+      if (error || !data || data.length === 0) throw new Error('document write failed');
+      return data.map(mapDocument);
+    },
+    async deleteDocumentsForJob(ingestionJobId) {
+      await db.from('documents').delete().eq('ingestion_job_id', ingestionJobId);
+    },
+    async listDocumentSummaries(projectId, sourceId, ingestionJobId) {
+      const { data } = await db
+        .from('documents')
+        .select(DOC_SUMMARY_COLUMNS)
+        .eq('project_id', projectId)
+        .eq('source_id', sourceId)
+        .eq('ingestion_job_id', ingestionJobId)
+        .order('ordinal', { ascending: true })
+        .limit(1000);
+      return (data ?? []).map(mapDocumentSummary);
+    },
+    async getDocument(projectId, documentId) {
+      const { data } = await db
+        .from('documents')
+        .select(DOC_FULL_COLUMNS)
+        .eq('project_id', projectId)
+        .eq('id', documentId)
+        .maybeSingle();
+      return data ? mapDocument(data) : null;
+    },
+    async latestCompletedJob(projectId, sourceId) {
+      const { data } = await db
+        .from('ingestion_jobs')
+        .select(JOB_COLUMNS)
+        .eq('project_id', projectId)
+        .eq('source_id', sourceId)
+        .eq('status', 'completed')
+        .order('completed_at', { ascending: false })
+        .limit(1);
+      const row = (data ?? [])[0];
+      return row ? mapJob(row) : null;
     },
   };
 }

@@ -36,6 +36,7 @@ export const INGESTION_ERROR_CODES = [
   'GITHUB_NOT_CONNECTED',
   'GITHUB_ACQUISITION_FAILED',
   'GITHUB_LIMIT_EXCEEDED',
+  'DOCUMENT_PERSISTENCE_FAILED',
   'INTERNAL_ERROR',
 ] as const;
 export type IngestionErrorCode = (typeof INGESTION_ERROR_CODES)[number];
@@ -102,13 +103,31 @@ export interface AcquiredProvenance {
   truncated?: boolean;
 }
 
+/**
+ * One logical unit of acquired content. For single-resource sources there is
+ * exactly one unit; a repository yields one unit per eligible file. Units carry
+ * the deterministic logical identity that later becomes the document key, so
+ * file boundaries survive acquisition -> normalization -> Document creation
+ * without re-parsing a combined string.
+ */
+export interface AcquiredUnit {
+  /** Deterministic logical identity within the source, e.g. github:src/a.ts */
+  key: string;
+  title?: string;
+  logicalPath?: string;
+  contentType: 'text/plain';
+  text: string;
+}
+
 /** Acquisition boundary result - provider/source neutral. NOT a Document. */
 export interface AcquiredContent {
   sourceId: string;
   sourceType: SourceType;
   contentType: 'text/plain';
-  /** Text extracted from the raw material; K10 normalization happens afterwards. */
+  /** Aggregate/compatibility representation of all units (K10 output keeps this). */
   text: string;
+  /** Structured per-unit content; canonical Documents are derived from these. */
+  units: AcquiredUnit[];
   provenance: AcquiredProvenance;
 }
 
@@ -131,6 +150,7 @@ const USER_MESSAGES: Record<IngestionErrorCode, string> = {
   GITHUB_NOT_CONNECTED: 'لا يوجد اتصال GitHub صالح لهذا المشروع.',
   GITHUB_ACQUISITION_FAILED: 'تعذر قراءة محتوى المستودع.',
   GITHUB_LIMIT_EXCEEDED: 'حجم المستودع يتجاوز الحدود المسموحة للمعالجة.',
+  DOCUMENT_PERSISTENCE_FAILED: 'تعذر حفظ المستندات الناتجة عن المعالجة.',
 };
 
 export const userMessage = (code: IngestionErrorCode): string => USER_MESSAGES[code];

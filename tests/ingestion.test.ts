@@ -56,12 +56,14 @@ interface FakeJob {
 function fakePersistence(seed?: { activeJob?: FakeJob | null }) {
   const jobs: FakeJob[] = [];
   const outputs: Array<Record<string, unknown>> = [];
+  const documents: Array<Record<string, unknown>> = [];
   const state = { activeJob: seed?.activeJob ?? null };
   let counter = 0;
 
   return {
     jobs,
     outputs,
+    documents,
     state,
     persistence: {
       findActiveJob: async () => state.activeJob,
@@ -111,6 +113,20 @@ function fakePersistence(seed?: { activeJob?: FakeJob | null }) {
         return row as never;
       },
       latestOutput: async () => (outputs[outputs.length - 1] as never) ?? null,
+      deleteOutputByJob: async (projectId: string, ingestionJobId: string) => {
+        for (let i = outputs.length - 1; i >= 0; i--) {
+          if (outputs[i].projectId === projectId && outputs[i].ingestionJobId === ingestionJobId) outputs.splice(i, 1);
+        }
+      },
+      // Canonical documents (K12): one row per acquired unit.
+      saveDocuments: async (inputs: Array<Record<string, unknown>>) => {
+        for (const input of inputs) documents.push(input);
+        return inputs;
+      },
+      deleteDocumentsByJob: async () => {},
+      listDocumentsByJob: async () => documents,
+      listLatestDocumentsBySource: async () => documents,
+      getDocument: async () => null,
     } as never,
   };
 }
@@ -186,6 +202,12 @@ test('idempotency: losing the DB race reuses the winner instead of failing', asy
     markFailed: async () => {},
     saveOutput: async () => ({}) as never,
     latestOutput: async () => null,
+    deleteOutputByJob: async () => {},
+    saveDocuments: async () => [] as never,
+    deleteDocumentsByJob: async () => {},
+    listDocumentsByJob: async () => [],
+    listLatestDocumentsBySource: async () => [],
+    getDocument: async () => null,
   };
   const out = await service(persistence, sourceReader({ kind: 'text', text: 'x' })).ingest({
     projectId: 'p1', sourceId: 's1', actor: 'a',

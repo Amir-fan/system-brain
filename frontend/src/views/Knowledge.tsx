@@ -13,11 +13,12 @@ import {
   Upload,
   Play,
   RefreshCw,
+  FileText,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useProjectContext } from '../contexts/ProjectContext';
 import { apiKip } from '../api/kip';
-import type { KipSource, SourceType, ExternalConnection, IngestionJobView } from '../api/kip';
+import type { KipSource, SourceType, ExternalConnection, IngestionJobView, DocumentView } from '../api/kip';
 import { Card, CardHeader, Button } from '../ui/primitives';
 
 type Mode = 'url' | 'text' | 'file' | 'github' | 'google_drive';
@@ -56,6 +57,11 @@ export function Knowledge() {
   const [connections, setConnections] = useState<ExternalConnection[]>([]);
   const [ingestions, setIngestions] = useState<Record<string, IngestionJobView>>({});
   const [busySourceId, setBusySourceId] = useState<string | null>(null);
+  // Canonical documents (K12): inspection is read-only and minimal.
+  const [docsFor, setDocsFor] = useState<KipSource | null>(null);
+  const [docs, setDocs] = useState<DocumentView[]>([]);
+  const [docsLoading, setDocsLoading] = useState(false);
+  const [selectedDoc, setSelectedDoc] = useState<DocumentView | null>(null);
   const [connNotice, setConnNotice] = useState<string | null>(null);
 
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -232,6 +238,37 @@ export function Knowledge() {
   };
 
   // K11: one Process action covers every supported source type.
+  const openDocuments = async (source: KipSource) => {
+    if (!projectId) return;
+    setDocsFor(source);
+    setDocs([]);
+    setSelectedDoc(null);
+    setDocsLoading(true);
+    try {
+      const res = await apiKip().listSourceDocuments(projectId, source.id);
+      setDocs(res.documents);
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : t('documents.error'));
+    } finally {
+      setDocsLoading(false);
+    }
+  };
+
+  const closeDocuments = () => {
+    setDocsFor(null);
+    setDocs([]);
+    setSelectedDoc(null);
+  };
+
+  const viewDocument = async (documentId: string) => {
+    if (!projectId) return;
+    try {
+      setSelectedDoc(await apiKip().getDocument(projectId, documentId));
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : t('documents.error'));
+    }
+  };
+
   const ingestible = (type: SourceType) => type === 'text' || type === 'file' || type === 'url' || type === 'github';
 
   const statusLabel = (status?: string) =>
@@ -344,6 +381,11 @@ export function Knowledge() {
                           <Play className="h-4 w-4" /> {busySourceId === s.id ? t('ingestion.status.processing') : t('ingestion.process')}
                         </Button>
                       )}
+                      {ingestions[s.id]?.status === 'completed' ? (
+                        <Button variant="ghost" onClick={() => openDocuments(s)} title={t('documents.open')}>
+                          <FileText className="h-4 w-4" /> {t('documents.open')}
+                        </Button>
+                      ) : null}
                     </div>
                   ) : null}
                   <div className="flex shrink-0 items-center gap-1">
@@ -498,6 +540,62 @@ export function Knowledge() {
                 </Button>
               )}
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Canonical documents (K12): read-only inspection, no internals exposed. */}
+      {docsFor ? (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/20">
+          <div className="h-full w-full max-w-lg overflow-y-auto border-s border-surface-line bg-white p-6 shadow-lift">
+            <div className="flex items-start justify-between">
+              <h2 className="text-lg font-semibold text-slate-900">{t('documents.title')}</h2>
+              <button type="button" onClick={closeDocuments} className="text-muted-soft hover:text-slate-700">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <p className="mt-1 truncate text-xs text-muted-soft" dir="auto">
+              {docsFor.title}
+            </p>
+
+            {docsLoading ? (
+              <p className="mt-4 text-sm text-muted-soft">{t('documents.loading')}</p>
+            ) : docs.length === 0 ? (
+              <p className="mt-4 text-sm text-muted-soft">{t('documents.empty')}</p>
+            ) : (
+              <>
+                <ul className="mt-4 divide-y divide-surface-line rounded-xl border border-surface-line">
+                  {docs.map((d) => (
+                    <li key={d.id} className="flex items-center justify-between gap-3 px-4 py-3">
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm text-slate-800" dir="auto">
+                          {d.logicalPath ?? d.title ?? d.contentType}
+                        </span>
+                        <span className="block text-xs text-muted-soft">
+                          {d.charCount} {t('documents.chars')}
+                        </span>
+                      </span>
+                      <Button variant="outline" onClick={() => viewDocument(d.id)}>
+                        {t('documents.view')}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+                {selectedDoc ? (
+                  <div className="mt-4">
+                    <div className="truncate text-xs text-muted-soft" dir="auto">
+                      {selectedDoc.logicalPath ?? selectedDoc.title ?? ''}
+                    </div>
+                    <pre
+                      className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded-lg border border-surface-line bg-surface p-3 text-xs text-slate-700"
+                      dir="auto"
+                    >
+                      {selectedDoc.normalizedText ?? ''}
+                    </pre>
+                  </div>
+                ) : null}
+              </>
+            )}
           </div>
         </div>
       ) : null}

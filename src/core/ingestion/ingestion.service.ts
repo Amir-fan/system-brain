@@ -18,6 +18,7 @@
 import { normalizeText } from './normalize.ts';
 import { IngestionFailure, userMessage } from './ingestion.types.ts';
 import type { IngestionErrorCode, IngestionJob, IngestionOutput, IngestionTrigger } from './ingestion.types.ts';
+import type { CreateDocumentInput } from './document.ts';
 import { ActiveIngestionJobExistsError } from './ingestion.ports.ts';
 import type { IngestionPersistence, IngestionSourceReader } from './ingestion.ports.ts';
 import type { SourceAcquisitionRouter } from './acquisition-router.ts';
@@ -35,6 +36,8 @@ export interface IngestionObservation {
   /** Bounded acquisition metrics (never content). */
   byteCount?: number;
   fileCount?: number;
+  /** Canonical documents persisted by this ingestion. */
+  documentCount?: number;
 }
 
 export interface IngestionServiceDeps {
@@ -144,6 +147,38 @@ export class IngestionService {
         charCount: normalized.charCount,
       });
 
+      // Canonical documents: one per acquired unit, each normalized
+      // independently so every logical unit keeps its own text and hash.
+      const units = acquired.units ?? [];
+      const documents: CreateDocumentInput[] = units.map((unit, ordinal) => {
+        const unitText = normalizeText(unit.text);
+        return {
+          projectId,
+          sourceId,
+          ingestionJobId: job.id,
+          ingestionOutputId: output.id,
+          documentKey: unit.key,
+          title: unit.title,
+          logicalPath: unit.logicalPath,
+          normalizedText: unitText.text,
+          contentSha256: unitText.sha256,
+          charCount: unitText.charCount,
+          ordinal,
+        };
+      });
+
+      // No documents means there is nothing canonical to keep: never report success.
+      if (documents.length === 0) throw new IngestionFailure('DOCUMENT_PERSISTENCE_FAILED');
+
+      try {
+        await persistence.saveDocuments(documents);
+      } catch {
+        // Atomicity: a partially written snapshot is rolled back and the
+        // ingestion is NOT allowed to report completed.
+        await persistence.deleteDocumentsForJob(job.id).catch(() => {});
+        throw new IngestionFailure('DOCUMENT_PERSISTENCE_FAILED');
+      }
+
       const completedAt = this.nowIso();
       await persistence.markCompleted(job.id, completedAt);
       observer?.({
@@ -157,6 +192,7 @@ export class IngestionService {
         durationMs: Date.now() - startedMs,
         byteCount: acquired.provenance.byteCount,
         fileCount: acquired.provenance.fileCount,
+        documentCount: documents.length,
       });
       return {
         job: { ...job, status: 'completed', startedAt, completedAt },

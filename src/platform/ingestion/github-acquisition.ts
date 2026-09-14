@@ -206,6 +206,15 @@ export function createGitHubAcquisitionAdapter(deps: GithubAcquisitionDeps): Sou
         sourceType: 'github',
         contentType: 'text/plain',
         text: combineFiles(files),
+        // One unit per repository file: the K12 canonical Documents are derived
+        // from these units, so file boundaries never depend on re-parsing a blob.
+        units: files.map((file) => ({
+          key: 'github:' + file.path,
+          title: file.path.slice(file.path.lastIndexOf('/') + 1),
+          logicalPath: file.path,
+          contentType: 'text/plain' as const,
+          text: file.text,
+        })),
         provenance: {
           kind: 'github',
           detail: fullName,

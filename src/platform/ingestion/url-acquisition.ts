@@ -138,13 +138,23 @@ export function createUrlAcquisitionAdapter(deps: UrlAcquisitionDeps): SourceAcq
       const bytes = await readCapped(response, maxBytes);
       const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
       const looksHtml = contentType.includes('html') || /^\s*<(?:!doctype|html)/i.test(decoded);
-      const text = looksHtml ? htmlToText(decoded).text : decoded;
+      const extracted = looksHtml ? htmlToText(decoded) : { title: undefined, text: decoded };
+      const text = extracted.text;
 
       return {
         sourceId,
         sourceType: 'url',
         contentType: 'text/plain',
         text,
+        units: [
+          {
+            key: 'url:primary',
+            ...(extracted.title ? { title: extracted.title } : {}),
+            logicalPath: current.hostname,
+            contentType: 'text/plain',
+            text,
+          },
+        ],
         provenance: { kind: 'url', detail: current.hostname, byteCount: bytes.length },
       };
     },
