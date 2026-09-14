@@ -30,6 +30,8 @@ import { createRawArtifactStorage } from '../provider/raw-artifact.storage.ts';
 import { createExternalConnectionStorage } from '../provider/external-connection.storage.ts';
 import { createSupabaseRawStorage } from '../storage/raw-storage.ts';
 import type { SupabaseStorageClient } from '../storage/raw-storage.ts';
+import type { GitHubAppConfig } from '../github/github-app.ts';
+import { createGitHubAppAuth } from '../github/github-app.ts';
 import {
   createModelAssignmentStorage,
   createModelAssignmentResolver,
@@ -48,6 +50,10 @@ export interface BootstrapEnv {
   openRouterModel?: string;
   /** DEV/TEST-COMPAT static tokens (legacy KIP_API_TOKENS); optional. */
   tokenActors?: TokenActorMap;
+  /** GitHub App credentials (null/undefined when the connector is not configured). */
+  githubApp?: GitHubAppConfig | null;
+  /** Browser origin the provider redirects back to (never hardcoded in domain logic). */
+  frontendUrl?: string;
 }
 
 export async function compose(opts: BootstrapEnv): Promise<Server> {
@@ -86,6 +92,19 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   registry.register('platform.ai-completion', platformAiCompletion(gateway));
   registry.register('platform.ai-echo', platformAiCompletion(gateway));
 
+  // GitHub App connector: only wired when credentials exist. Installation
+  // tokens are minted on demand; the client secret doubles as the state-signing
+  // secret so no additional secret has to be introduced.
+  const githubDeps = opts.githubApp
+    ? {
+        app: createGitHubAppAuth(opts.githubApp),
+        stateSecret: opts.githubApp.clientSecret,
+        connections: connectionStorage,
+        boundary: persistence,
+        frontendUrl: opts.frontendUrl ?? 'http://localhost:5173',
+      }
+    : undefined;
+
   const runtime = new RuntimeService(persistence, registry);
   return createHttpApi({
     runtime,
@@ -103,6 +122,7 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
       storage: sourceStorage,
       boundary: persistence,
     },
+    github: githubDeps,
     admin: {
       storage: providerStorage,
       adminApi: {

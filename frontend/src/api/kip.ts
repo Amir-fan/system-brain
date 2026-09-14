@@ -149,5 +149,16 @@ export function apiKip() {
       provider: string,
       body: { itemId: string; itemType: string; name: string; uri?: string; detail?: string },
     ) => call<KipSource>(`/v1/projects/${projectId}/sources/${provider}`, json('POST', body)),
+
+    /** Returns the GitHub install URL the browser must be navigated to. */
+    startGitHubConnect: (projectId: string) =>
+      call<{ url: string }>(`/v1/projects/${projectId}/connections/github/start`, json('POST', {})),
+    /** Repositories actually granted to the project's GitHub installation. */
+    listGitHubRepositories: (projectId: string) =>
+      call<ExternalItem[]>(`/v1/projects/${projectId}/connections/github/repositories`),
+    disconnectGitHub: (projectId: string) =>
+      call<{ provider: string; status: string }>(`/v1/projects/${projectId}/connections/github`, {
+        method: 'DELETE',
+      }),
   };
 }

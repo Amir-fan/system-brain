@@ -42,6 +42,13 @@ import {
   handleListConnectionItems,
   handleRegisterExternalSource,
 } from './connection-handler.ts';
+import type { GitHubConnectorDeps } from './github-connector.ts';
+import {
+  handleGitHubStart,
+  handleGitHubCallback,
+  handleGitHubRepositories,
+  handleGitHubDisconnect,
+} from './github-connector.ts';
 import type { ActorAuthenticator } from './actor-authenticator.ts';
 import { UnauthenticatedError } from './actor-authenticator.ts';
 import type { ProjectDiscoveryStorage } from './project-discovery.ts';
@@ -53,6 +60,7 @@ export interface HttpApiDeps {
   projects?: ProjectDiscoveryStorage;
   sources?: SourceApiDeps;
   connections?: ConnectionApiDeps;
+  github?: GitHubConnectorDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -70,6 +78,11 @@ export function createHttpApi(deps: HttpApiDeps): Server {
       const url = req.url ?? '';
       if (url.startsWith('/v1/admin')) {
         return handleAdmin(req, res, url, deps);
+      }
+      // Provider redirect endpoints: browser navigation, no bearer token exists.
+      // Authority comes from the signed state, never from query parameters.
+      if (url.startsWith('/v1/connections/')) {
+        return handleProviderRedirect(res, url, deps);
       }
       return handleProject(req, res, url, deps);
     } catch {
@@ -242,6 +255,28 @@ async function handleConnections(
   deps: HttpApiDeps,
 ): Promise<void> {
   if (!deps.connections) return notFound(res);
+
+  const githubRoute = /^\/v1\/projects\/([^/]+)\/connections\/github(?:\/(start|repositories))?$/.exec(url);
+  if (githubRoute) {
+    if (!deps.github) {
+      return sendJson(res, 400, { ok: false, status: 400, error: { category: 'validation', message: 'connector is not configured' } });
+    }
+    const actor = await resolveActor(req, res, deps);
+    if (!actor) return;
+    const projectId = decodeURIComponent(githubRoute[1]);
+    const sub = githubRoute[2];
+    if (sub === 'start' && req.method === 'POST') {
+      return sendSourceResult(res, await handleGitHubStart(deps.github, projectId, actor));
+    }
+    if (sub === 'repositories' && req.method === 'GET') {
+      return sendSourceResult(res, await handleGitHubRepositories(deps.github, projectId, actor));
+    }
+    if (!sub && req.method === 'DELETE') {
+      return sendSourceResult(res, await handleGitHubDisconnect(deps.github, projectId, actor));
+    }
+    return notFound(res);
+  }
+
   const listMatch = /^\/v1\/projects\/([^/]+)\/connections$/.exec(url);
   const itemsMatch = /^\/v1\/projects\/([^/]+)\/connections\/([^/]+)\/items$/.exec(url);
   if (!listMatch && !itemsMatch) return notFound(res);
@@ -261,6 +296,24 @@ async function handleConnections(
       actor,
     ),
   );
+}
+
+/** GitHub redirect endpoints: 302 back to the app with a non-sensitive indicator. */
+async function handleProviderRedirect(
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  const [path, qs = ''] = url.split('?');
+  const isGitHub = path === '/v1/connections/github/callback' || path === '/v1/connections/github/setup';
+  if (!isGitHub || !deps.github) {
+    res.writeHead(302, { location: `${deps.github?.frontendUrl ?? ''}/knowledge#connector-unavailable` });
+    res.end();
+    return;
+  }
+  const { redirect } = await handleGitHubCallback(deps.github, new URLSearchParams(qs));
+  res.writeHead(302, { location: redirect });
+  res.end();
 }
 
 function notFound(res: import('node:http').ServerResponse): void {

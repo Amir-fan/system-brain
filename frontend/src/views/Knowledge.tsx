@@ -91,6 +91,14 @@ export function Knowledge() {
     }
   }, [projectId, load, loadConnections]);
 
+  // Return trip from the provider redirect: show a plain, non-technical outcome.
+  useEffect(() => {
+    const outcome = new URLSearchParams(window.location.search).get('github');
+    if (!outcome) return;
+    setToast(outcome === 'connected' ? t('knowledge.toast.githubConnected') : t('knowledge.error.connector'));
+    window.history.replaceState({}, '', window.location.pathname);
+  }, [t]);
+
   const resetForm = () => {
     setTitle('');
     setUri('');
@@ -187,17 +195,6 @@ export function Knowledge() {
   };
 
   const connectionFor = (p: 'github' | 'google_drive') => connections.find((c) => c.provider === p) ?? null;
-
-  const tryBrowse = async (provider: 'github' | 'google_drive') => {
-    if (!projectId) return;
-    setConnNotice(null);
-    try {
-      await apiKip().listConnectionItems(projectId, provider);
-    } catch (e) {
-      // Honest: the connector genuinely cannot browse until its credentials exist.
-      setConnNotice(e instanceof Error ? e.message : t('knowledge.conn.notConfigured'));
-    }
-  };
 
   const subtitleOf = useMemo(
     () => (s: KipSource) => {
@@ -343,7 +340,6 @@ export function Knowledge() {
               <ConnectorPanel
                 provider={mode}
                 connection={connectionFor(mode)}
-                onBrowse={() => tryBrowse(mode)}
                 projectId={projectId}
                 onRegistered={async () => {
                   setToast(t('knowledge.toast.created'));
@@ -454,14 +450,12 @@ function ConnectorPanel({
   provider,
   connection,
   projectId,
-  onBrowse,
   onRegistered,
   onError,
 }: {
   provider: 'github' | 'google_drive';
   connection: ExternalConnection | null;
   projectId?: string;
-  onBrowse: () => void;
   onRegistered: () => Promise<void>;
   onError: (m: string) => void;
 }) {
@@ -474,7 +468,38 @@ function ConnectorPanel({
     if (!projectId) return;
     setBusy(true);
     try {
-      setItems(await apiKip().listConnectionItems(projectId, provider));
+      setItems(
+        provider === 'github'
+          ? await apiKip().listGitHubRepositories(projectId)
+          : await apiKip().listConnectionItems(projectId, provider),
+      );
+    } catch (e) {
+      onError(e instanceof Error ? e.message : t('knowledge.conn.notConfigured'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // GitHub is a real provider redirect: the browser must leave the SPA and come back.
+  const connect = async () => {
+    if (!projectId) return;
+    setBusy(true);
+    try {
+      const { url } = await apiKip().startGitHubConnect(projectId);
+      window.location.href = url;
+    } catch (e) {
+      onError(e instanceof Error ? e.message : t('knowledge.conn.notConfigured'));
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    if (!projectId) return;
+    setBusy(true);
+    try {
+      await apiKip().disconnectGitHub(projectId);
+      setItems([]);
+      await onRegistered();
     } catch (e) {
       onError(e instanceof Error ? e.message : t('knowledge.conn.notConfigured'));
     } finally {
@@ -510,13 +535,20 @@ function ConnectorPanel({
         <div className="mt-1 text-xs text-muted-soft">
           {connected ? (connection?.accountLabel ?? t('knowledge.conn.connected')) : t('knowledge.conn.notConnected')}
         </div>
-        <div className="mt-3 flex gap-2">
+        <div className="mt-3 flex flex-wrap gap-2">
           {connected ? (
-            <Button variant="primary" onClick={browse} disabled={busy}>
-              <Upload className="h-4 w-4" /> {t('knowledge.conn.choose')}
-            </Button>
+            <>
+              <Button variant="primary" onClick={browse} disabled={busy}>
+                <Upload className="h-4 w-4" /> {t('knowledge.conn.choose')}
+              </Button>
+              {provider === 'github' ? (
+                <Button variant="ghost" onClick={disconnect} disabled={busy}>
+                  {t('knowledge.conn.disconnect')}
+                </Button>
+              ) : null}
+            </>
           ) : (
-            <Button variant="default" onClick={() => { onBrowse(); browse(); }} disabled={busy}>
+            <Button variant="default" onClick={connect} disabled={busy}>
               {provider === 'github' ? t('knowledge.conn.connectGithub') : t('knowledge.conn.connectDrive')}
             </Button>
           )}

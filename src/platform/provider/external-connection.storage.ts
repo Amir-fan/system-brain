@@ -60,11 +60,11 @@ export interface ExternalConnectionStorage {
   listConnections(projectId: string): Promise<ExternalConnectionRecord[]>;
   getConnection(projectId: string, provider: ExternalProvider): Promise<ExternalConnectionRecord | null>;
   readSecret(projectId: string, provider: ExternalProvider): Promise<string | null>;
-  /** Records a connection whose secret already lives in Vault. */
+  /** Records a connection. Secret material (if any) already lives in Vault. */
   saveConnection(
     projectId: string,
     provider: ExternalProvider,
-    input: { accountId?: string; accountLabel?: string; secretRef: string },
+    input: { accountId?: string; accountLabel?: string; secretRef?: string },
   ): Promise<ExternalConnectionRecord>;
   /** Revokes access without touching any source identity. */
   disconnect(projectId: string, provider: ExternalProvider): Promise<void>;
@@ -128,7 +128,7 @@ export function createExternalConnectionStorage(db: SupabaseDatabase): ExternalC
         status: 'connected' as ConnectionStatus,
         external_account_id: input.accountId ?? null,
         external_account_label: input.accountLabel ?? null,
-        secure_secret_reference: input.secretRef,
+        secure_secret_reference: input.secretRef ?? null,
         updated_at: new Date().toISOString(),
       };
       if (existing) {
