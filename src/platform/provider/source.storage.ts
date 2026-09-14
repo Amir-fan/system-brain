@@ -26,6 +26,14 @@ export const CONNECTED_SOURCE_TYPES = ['github', 'google_drive'] as const;
 export const SOURCE_STATUSES = ['registered', 'archived'] as const;
 export type SourceStatus = (typeof SOURCE_STATUSES)[number];
 
+/** Source Role V1: retrieval-policy metadata only (never truth/authority/permission). */
+export const SOURCE_ROLES = ['primary', 'supporting', 'reference'] as const;
+export type SourceRole = (typeof SOURCE_ROLES)[number];
+export const DEFAULT_SOURCE_ROLE: SourceRole = 'supporting';
+export function isSourceRole(v: unknown): v is SourceRole {
+  return typeof v === 'string' && (SOURCE_ROLES as readonly string[]).includes(v);
+}
+
 export interface SourceRecord {
   id: string;
   projectId: string;
@@ -34,6 +42,7 @@ export interface SourceRecord {
   description?: string;
   externalUri?: string;
   status: SourceStatus;
+  role: SourceRole;
   createdBySubject: string;
   createdAt: string;
   updatedAt: string;
@@ -48,6 +57,7 @@ export interface CreateSourceInput {
   title: string;
   description?: string;
   externalUri?: string;
+  role?: SourceRole;
   createdBySubject: string;
 }
 
@@ -55,6 +65,7 @@ export interface UpdateSourceInput {
   title?: string;
   description?: string;
   externalUri?: string;
+  role?: SourceRole;
 }
 
 export interface SourceStorage {
@@ -75,6 +86,7 @@ const mapRow = (r: Record<string, unknown>): SourceRecord => ({
   description: (r.description as string) ?? undefined,
   externalUri: (r.external_uri as string) ?? undefined,
   status: r.status as SourceStatus,
+  role: (isSourceRole(r.role) ? r.role : DEFAULT_SOURCE_ROLE) as SourceRole,
   createdBySubject: r.created_by_subject as string,
   createdAt: r.created_at as string,
   updatedAt: r.updated_at as string,
@@ -85,7 +97,7 @@ export function createSourceStorage(db: SupabaseDatabase): SourceStorage {
   const getById = async (projectId: string, sourceId: string) => {
     const { data } = await db
       .from('sources')
-      .select('id, project_id, source_type, title, description, external_uri, status, created_by_subject, created_at, updated_at, archived_at')
+      .select('id, project_id, source_type, title, description, external_uri, status, role, created_by_subject, created_at, updated_at, archived_at')
       .eq('project_id', projectId)
       .eq('id', sourceId)
       .maybeSingle();
@@ -105,12 +117,13 @@ export function createSourceStorage(db: SupabaseDatabase): SourceStorage {
         description: input.description ?? null,
         external_uri: input.externalUri ?? null,
         status: 'registered',
+        role: input.role ?? DEFAULT_SOURCE_ROLE,
         created_by_subject: input.createdBySubject,
       };
       const { data, error } = await (db
         .from('sources')
         .insert(row)
-        .select('id, project_id, source_type, title, description, external_uri, status, created_by_subject, created_at, updated_at, archived_at')
+        .select('id, project_id, source_type, title, description, external_uri, status, role, created_by_subject, created_at, updated_at, archived_at')
         .maybeSingle() as unknown as Promise<{ data: Record<string, unknown> | null; error: unknown }>);
       if (error || !data) throw new Error('source create failed');
       // Prefer reading the exact inserted row by id (deterministic regardless of what `.select()` returned).
@@ -118,7 +131,7 @@ export function createSourceStorage(db: SupabaseDatabase): SourceStorage {
       return fresh ?? mapRow(data);
     },
     async listByProject(projectId, includeArchived = false) {
-      let q = db.from('sources').select('id, project_id, source_type, title, description, external_uri, status, created_by_subject, created_at, updated_at, archived_at').eq('project_id', projectId);
+      let q = db.from('sources').select('id, project_id, source_type, title, description, external_uri, status, role, created_by_subject, created_at, updated_at, archived_at').eq('project_id', projectId);
       if (!includeArchived) q = q.neq('status', 'archived');
       const { data } = await q.limit(1000);
       return (data ?? []).map(mapRow);
@@ -131,6 +144,9 @@ export function createSourceStorage(db: SupabaseDatabase): SourceStorage {
       if (patch.title !== undefined) dbPatch.title = patch.title;
       if (patch.description !== undefined) dbPatch.description = patch.description;
       if (patch.externalUri !== undefined) dbPatch.external_uri = patch.externalUri;
+      if (patch.role !== undefined) dbPatch.role = patch.role;
+      // Role is metadata: update only touches sources.role. Nothing downstream is
+      // triggered (no re-acquire, re-chunk or re-embed).
       await db.from('sources').update(dbPatch).eq('project_id', projectId).eq('id', sourceId);
       return getById(projectId, sourceId);
     },
