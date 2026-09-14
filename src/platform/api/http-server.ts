@@ -27,7 +27,21 @@ import type { ProviderStorage } from '../provider/provider.storage.ts';
 import type { ErrorCategory } from '../../core/run/run.ts';
 import type { ApiResult } from './api.types.ts';
 import type { SourceApiDeps } from './source-handler.ts';
-import { handleListSources, handleCreateSource, handleGetSource, handleUpdateSource, handleArchiveSource } from './source-handler.ts';
+import {
+  handleListSources,
+  handleCreateSource,
+  handleGetSource,
+  handleUpdateSource,
+  handleArchiveSource,
+  handleCreateTextSource,
+  handleCreateFileSource,
+} from './source-handler.ts';
+import type { ConnectionApiDeps } from './connection-handler.ts';
+import {
+  handleListConnections,
+  handleListConnectionItems,
+  handleRegisterExternalSource,
+} from './connection-handler.ts';
 import type { ActorAuthenticator } from './actor-authenticator.ts';
 import { UnauthenticatedError } from './actor-authenticator.ts';
 import type { ProjectDiscoveryStorage } from './project-discovery.ts';
@@ -38,6 +52,7 @@ export interface HttpApiDeps {
   authenticator: ActorAuthenticator;
   projects?: ProjectDiscoveryStorage;
   sources?: SourceApiDeps;
+  connections?: ConnectionApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -76,6 +91,9 @@ async function handleProject(
     if (!actor) return;
     const result = await handleListMyProjects(deps.projects, actor);
     return sendJson(res, result.status, { ok: result.ok, status: result.status, ...(result.ok ? { data: result.data } : { error: result.error }) } as ApiResult);
+  }
+  if (url.includes('/connections')) {
+    return handleConnections(req, res, url, deps);
   }
   if (url.includes('/sources')) {
     return handleSources(req, res, url, deps);
@@ -133,6 +151,59 @@ async function handleSources(
   if (!deps.sources) {
     return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
   }
+
+  // Pasted text: the original text becomes the raw artifact.
+  const textMatch = /^\/v1\/projects\/([^/]+)\/sources\/text$/.exec(url);
+  if (textMatch) {
+    if (req.method !== 'POST') return notFound(res);
+    const actor = await resolveActor(req, res, deps);
+    if (!actor) return;
+    const result = await handleCreateTextSource(deps.sources, decodeURIComponent(textMatch[1]), actor, await readJson(req).catch(() => ({})));
+    return sendSourceResult(res, result);
+  }
+
+  // File upload: raw body + metadata headers, stored in PRIVATE storage.
+  const fileMatch = /^\/v1\/projects\/([^/]+)\/sources\/file$/.exec(url);
+  if (fileMatch) {
+    if (req.method !== 'POST') return notFound(res);
+    const actor = await resolveActor(req, res, deps);
+    if (!actor) return;
+    const decoded = (v: string | string[] | undefined) => (typeof v === 'string' ? decodeURIComponent(v) : undefined);
+    const filename = decoded(req.headers['x-kip-filename']);
+    if (!filename) return sendJson(res, 400, { ok: false, status: 400, error: { category: 'validation', message: 'x-kip-filename header is required' } });
+    let bytes: Uint8Array;
+    try {
+      bytes = await readBinary(req);
+    } catch {
+      return sendJson(res, 400, { ok: false, status: 400, error: { category: 'validation', message: 'invalid or oversized upload' } });
+    }
+    const result = await handleCreateFileSource(deps.sources, decodeURIComponent(fileMatch[1]), actor, {
+      bytes,
+      filename,
+      mimeType: (req.headers['content-type'] as string | undefined) ?? 'application/octet-stream',
+      title: decoded(req.headers['x-kip-title']),
+      description: decoded(req.headers['x-kip-description']),
+    });
+    return sendSourceResult(res, result);
+  }
+
+  // Register an item selected from an external connection (github | google_drive).
+  const providerMatch = /^\/v1\/projects\/([^/]+)\/sources\/(github|google_drive)$/.exec(url);
+  if (providerMatch) {
+    if (req.method !== 'POST') return notFound(res);
+    if (!deps.connections) return notFound(res);
+    const actor = await resolveActor(req, res, deps);
+    if (!actor) return;
+    const result = await handleRegisterExternalSource(
+      deps.connections,
+      decodeURIComponent(providerMatch[1]),
+      providerMatch[2],
+      actor,
+      await readJson(req).catch(() => ({})),
+    );
+    return sendSourceResult(res, result);
+  }
+
   const match = SOURCES_RE.exec(url);
   if (!match) {
     return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
@@ -162,6 +233,70 @@ async function handleSources(
     ...('data' in result && result.ok ? { data: result.data } : {}),
     ...('error' in result && !result.ok ? { error: result.error } : {}),
   } as ApiResult);
+}
+
+async function handleConnections(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.connections) return notFound(res);
+  const listMatch = /^\/v1\/projects\/([^/]+)\/connections$/.exec(url);
+  const itemsMatch = /^\/v1\/projects\/([^/]+)\/connections\/([^/]+)\/items$/.exec(url);
+  if (!listMatch && !itemsMatch) return notFound(res);
+  if (req.method !== 'GET') return notFound(res);
+
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+  if (listMatch) {
+    return sendSourceResult(res, await handleListConnections(deps.connections, decodeURIComponent(listMatch[1]), actor));
+  }
+  return sendSourceResult(
+    res,
+    await handleListConnectionItems(
+      deps.connections,
+      decodeURIComponent(itemsMatch![1]),
+      decodeURIComponent(itemsMatch![2]),
+      actor,
+    ),
+  );
+}
+
+function notFound(res: import('node:http').ServerResponse): void {
+  sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
+}
+
+/** Single response envelope for source + connection handler results. */
+function sendSourceResult(
+  res: import('node:http').ServerResponse,
+  result: { ok: true; status: number; data: unknown } | { ok: false; status: number; error: { message: string; category: string } },
+): void {
+  const payload = result.ok
+    ? ({ ok: true, status: result.status, data: result.data } as unknown as ApiResult)
+    : ({ ok: false, status: result.status, error: result.error } as unknown as ApiResult);
+  sendJson(res, result.status, payload);
+}
+
+/** Largest accepted raw upload — matches the private bucket's own limit. */
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+function readBinary(req: import('node:http').IncomingMessage): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_UPLOAD_BYTES) {
+        reject(new Error('body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(new Uint8Array(Buffer.concat(chunks))));
+    req.on('error', reject);
+  });
 }
 
 async function handleAdmin(

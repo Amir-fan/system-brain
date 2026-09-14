@@ -26,6 +26,10 @@ import type { TokenActorMap } from '../api/auth.ts';
 import { createProjectDiscoveryStorage } from '../api/project-discovery.ts';
 import { createProviderStorage } from '../provider/provider.storage.ts';
 import { createSourceStorage } from '../provider/source.storage.ts';
+import { createRawArtifactStorage } from '../provider/raw-artifact.storage.ts';
+import { createExternalConnectionStorage } from '../provider/external-connection.storage.ts';
+import { createSupabaseRawStorage } from '../storage/raw-storage.ts';
+import type { SupabaseStorageClient } from '../storage/raw-storage.ts';
 import {
   createModelAssignmentStorage,
   createModelAssignmentResolver,
@@ -52,6 +56,10 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   const persistence = createSupabaseRuntimePersistence(db);
   const providerStorage = createProviderStorage(db);
   const sourceStorage = createSourceStorage(db);
+  const artifactStorage = createRawArtifactStorage(db);
+  const connectionStorage = createExternalConnectionStorage(db);
+  // Private raw-file storage (server credential only; browser never sees it).
+  const rawStorage = createSupabaseRawStorage(rawClient as unknown as SupabaseStorageClient);
   const assignmentStorage = createModelAssignmentStorage(db);
   const assignmentResolver = createModelAssignmentResolver(assignmentStorage);
   const projectDiscovery = createProjectDiscoveryStorage(db);
@@ -83,7 +91,18 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     runtime,
     authenticator,
     projects: projectDiscovery,
-    sources: { storage: sourceStorage, boundary: persistence },
+    sources: {
+      storage: sourceStorage,
+      boundary: persistence,
+      artifacts: artifactStorage,
+      references: connectionStorage,
+      rawStorage,
+    },
+    connections: {
+      connections: connectionStorage,
+      storage: sourceStorage,
+      boundary: persistence,
+    },
     admin: {
       storage: providerStorage,
       adminApi: {

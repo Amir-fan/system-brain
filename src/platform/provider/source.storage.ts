@@ -13,8 +13,11 @@
 
 import type { SupabaseDatabase } from '../supabase/supabase.persistence.ts';
 
-export const SOURCE_TYPES = ['url'] as const;
+export const SOURCE_TYPES = ['url', 'file', 'text', 'github', 'google_drive'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
+
+/** Types whose origin is an external connection (registered, never stored locally). */
+export const CONNECTED_SOURCE_TYPES = ['github', 'google_drive'] as const;
 
 export const SOURCE_STATUSES = ['registered', 'archived'] as const;
 export type SourceStatus = (typeof SOURCE_STATUSES)[number];
@@ -25,7 +28,7 @@ export interface SourceRecord {
   sourceType: SourceType;
   title: string;
   description?: string;
-  externalUri: string;
+  externalUri?: string;
   status: SourceStatus;
   createdBySubject: string;
   createdAt: string;
@@ -34,11 +37,13 @@ export interface SourceRecord {
 }
 
 export interface CreateSourceInput {
+  /** Optional caller-supplied id so storage paths can be planned before insert. */
+  id?: string;
   projectId: string;
   sourceType: SourceType;
   title: string;
   description?: string;
-  externalUri: string;
+  externalUri?: string;
   createdBySubject: string;
 }
 
@@ -54,6 +59,8 @@ export interface SourceStorage {
   getByProject(projectId: string, sourceId: string): Promise<SourceRecord | null>;
   update(projectId: string, sourceId: string, patch: UpdateSourceInput): Promise<SourceRecord | null>;
   archive(projectId: string, sourceId: string): Promise<SourceRecord | null>;
+  /** Compensation only: used to roll back a source whose raw artifact failed to persist. */
+  hardDelete(projectId: string, sourceId: string): Promise<void>;
 }
 
 export function isSourceType(v: unknown): v is SourceType {
@@ -66,7 +73,7 @@ const mapRow = (r: Record<string, unknown>): SourceRecord => ({
   sourceType: r.source_type as SourceType,
   title: r.title as string,
   description: (r.description as string) ?? undefined,
-  externalUri: r.external_uri as string,
+  externalUri: (r.external_uri as string) ?? undefined,
   status: r.status as SourceStatus,
   createdBySubject: r.created_by_subject as string,
   createdAt: r.created_at as string,
@@ -87,15 +94,16 @@ export function createSourceStorage(db: SupabaseDatabase): SourceStorage {
 
   return {
     async create(input) {
-      // Generate the id up-front so we can deterministically read the created row.
-      const id = crypto.randomUUID();
+      // Generate the id up-front (unless the caller planned one) so we can
+      // deterministically read the created row and pre-plan storage paths.
+      const id = input.id ?? crypto.randomUUID();
       const row = {
         id,
         project_id: input.projectId,
         source_type: input.sourceType,
         title: input.title,
         description: input.description ?? null,
-        external_uri: input.externalUri,
+        external_uri: input.externalUri ?? null,
         status: 'registered',
         created_by_subject: input.createdBySubject,
       };
@@ -134,6 +142,9 @@ export function createSourceStorage(db: SupabaseDatabase): SourceStorage {
         .eq('project_id', projectId)
         .eq('id', sourceId);
       return getById(projectId, sourceId);
+    },
+    async hardDelete(projectId, sourceId) {
+      await db.from('sources').delete().eq('project_id', projectId).eq('id', sourceId);
     },
   };
 }

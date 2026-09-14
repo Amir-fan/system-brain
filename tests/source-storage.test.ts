@@ -59,10 +59,13 @@ function fakeDb(): { db: SupabaseDatabase; sources: Array<Record<string, unknown
   return { db: db as unknown as SupabaseDatabase, sources };
 }
 
-test('isSourceType: only url is a valid V1 source type', () => {
-  assert.equal(isSourceType('url'), true);
-  assert.equal(isSourceType('file'), false); // not implemented in V1
+test('isSourceType: the canonical Knowledge Intake V1 source types are valid', () => {
+  for (const t of ['url', 'file', 'text', 'github', 'google_drive'] as const) {
+    assert.equal(isSourceType(t), true, `${t} must be a valid source type`);
+  }
   assert.equal(isSourceType('connector'), false);
+  assert.equal(isSourceType(''), false);
+  assert.equal(isSourceType(undefined), false);
 });
 
 test('source storage: create -> registered; list excludes archived; archive terminal; get still works', async () => {
