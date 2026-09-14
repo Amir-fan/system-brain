@@ -3,3 +3,9 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Secret material — never commit keys or provider secrets
+keys/
+*.pem
+*.private-key.pem
+*.key
