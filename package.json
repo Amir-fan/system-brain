@@ -10,11 +10,13 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {
+    "@types/jszip": "^3.4.0",
     "@types/node": "^26.5.1",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.116.0"
+    "@supabase/supabase-js": "^2.116.0",
+    "jszip": "^3.10.2"
   }
 }

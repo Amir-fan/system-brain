@@ -11,6 +11,7 @@
  */
 
 import { IngestionFailure } from '../../core/ingestion/ingestion.types.ts';
+import { extractPptx } from '../ingestion/pptx-extraction.ts';
 import type { AcquiredContent } from '../../core/ingestion/ingestion.types.ts';
 import type { IngestionSourceReader, SourceAcquisitionAdapter } from '../../core/ingestion/ingestion.ports.ts';
 
@@ -26,6 +27,25 @@ export function createFileAcquisitionAdapter(sources: IngestionSourceReader): So
 
       const name = (raw.originalName ?? '').toLowerCase();
       const ext = name.includes('.') ? name.split('.').pop() ?? '' : '';
+      // Structured knowledge: Pptx is an OOXML data archive. Each slide becomes one
+      // canonical document with slide provenance (logicalPath = "الشريحة N").
+      if (ext === 'pptx') {
+        const extraction = await extractPptx(raw.bytes);
+        return {
+          sourceId,
+          sourceType: 'file',
+          contentType: 'text/plain',
+          text: '',
+          units: extraction.slides.map((slide) => ({
+            key: 'slide:' + String(slide.number),
+            title: slide.title || 'الشريحة ' + slide.number,
+            logicalPath: 'الشريحة ' + slide.number,
+            contentType: 'text/plain',
+            text: slide.text,
+          })),
+          provenance: { kind: 'file', detail: 'pptx', byteCount: raw.bytes.length },
+        };
+      }
       if (!(TEXT_FILE_EXTENSIONS as readonly string[]).includes(ext)) {
         // Explicit, safe failure: no fake extraction, no binary-as-text garbage.
         throw new IngestionFailure('ACQUISITION_FAILED', `unsupported file format: ${ext || 'unknown'}`);
