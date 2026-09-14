@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useI18n } from '../i18n';
+import { SESSION_NOTICE_KEY } from '../api/session';
 
 export function LoginPage() {
   const { signIn } = useAuth();
@@ -9,6 +10,20 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // A prior request may have ended the session (expired and unrecoverable):
+  // show why the user is back here, then clear the one-shot notice.
+  useEffect(() => {
+    try {
+      const notice = localStorage.getItem(SESSION_NOTICE_KEY);
+      if (notice) {
+        setError(notice);
+        localStorage.removeItem(SESSION_NOTICE_KEY);
+      }
+    } catch {
+      /* storage unavailable — nothing to show */
+    }
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
