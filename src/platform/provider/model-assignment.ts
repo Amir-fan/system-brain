@@ -20,6 +20,7 @@ export const ALLOWED_WORKLOADS = [
   'vision_scan',
   'summarization',
   'embeddings',
+  'knowledge_answer',
 ] as const;
 export type WorkloadKey = (typeof ALLOWED_WORKLOADS)[number];
 

@@ -78,6 +78,10 @@ export interface SearchOutcome {
   timings: RetrievalTimings;
   modelId: string;
   candidates: { semantic: number; lexical: number };
+  /** Best RAW score from each retriever — the measure the K15 confidence floor was
+   *  calibrated on. The fused top-1 can hide a strong semantic hit behind a lexical
+   *  winner, which would starve the sufficiency gate of its best signal. */
+  rawBest: { semantic: number | null; lexical: number | null };
 }
 
 export class RetrievalService {
@@ -206,6 +210,10 @@ export class RetrievalService {
       timings,
       modelId,
       candidates: { semantic: semantic.length, lexical: lexical.length },
+      rawBest: {
+        semantic: semantic[0]?.score ?? null,
+        lexical: lexical[0]?.score ?? null,
+      },
     };
   }
 }

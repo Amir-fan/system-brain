@@ -34,6 +34,7 @@ import { createIngestionPersistence, createIngestionSourceReader } from '../prov
 import { createEmbeddingPersistence } from '../provider/embedding.storage.ts';
 import { createRetrievalStorage } from '../provider/retrieval.storage.ts';
 import { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
+import { KnowledgeAnswerService } from '../../core/knowledge/knowledge-answer.service.ts';
 import { EmbeddingService } from '../../core/embedding/embedding.service.ts';
 import { createTextAcquisitionAdapter } from '../ingestion/text-acquisition.ts';
 import { createUrlAcquisitionAdapter } from '../ingestion/url-acquisition.ts';
@@ -133,6 +134,31 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
 
   // K15: retrieval is a platform service — two concurrent candidate retrievers,
   // rank-based fusion, deterministic diversity. It never generates answers.
+
+  // K16: answers are built ONLY from retrieval evidence; the model never sees the corpus.
+  const knowledgeLabels = {
+    sources: async (projectId: string, sourceIds: string[]) => {
+      const { data } = (await db
+        .from('sources')
+        .select('id, title')
+        .eq('project_id', projectId)
+        .in('id', sourceIds)) as unknown as { data: Array<Record<string, unknown>> | null };
+      return new Map((data ?? []).map((r) => [r.id as string, r.title as string]));
+    },
+    documents: async (projectId: string, documentIds: string[]) => {
+      const { data } = (await db
+        .from('documents')
+        .select('id, title, logical_path')
+        .eq('project_id', projectId)
+        .in('id', documentIds)) as unknown as { data: Array<Record<string, unknown>> | null };
+      return new Map(
+        (data ?? []).map((r) => [
+          r.id as string,
+          (r.title as string) ?? (r.logical_path as string) ?? '',
+        ]),
+      );
+    },
+  };
   const retrievalStorage = createRetrievalStorage(db);
   const retrievalService = new RetrievalService({
     vector: retrievalStorage,
@@ -182,6 +208,15 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     ingestion: { service: ingestionService, boundary: persistence },
     documents: { persistence: ingestionPersistence, boundary: persistence },
     chunks: { persistence: ingestionPersistence, boundary: persistence },
+    knowledgeAnswer: {
+      service: new KnowledgeAnswerService({
+        retrieval: retrievalService,
+        gateway,
+        resolver: assignmentResolver,
+        labels: knowledgeLabels,
+      }),
+      boundary: persistence,
+    },
     retrieval: {
       service: retrievalService,
       labels: {
