@@ -129,6 +129,16 @@ export interface IndexStatusView {
   } | null;
 }
 
+export interface RetrievalHitView {
+  position: number;
+  text: string;
+  source: string | null;
+  document: string | null;
+  logicalPath: string | null;
+  headingContext: string | null;
+  score: number;
+}
+
 export interface ChunkView {
   id: string;
   documentId: string;
@@ -238,6 +248,15 @@ export function apiKip() {
       ),
     getChunk: (projectId: string, chunkId: string) =>
       call<ChunkView>(`/v1/projects/${projectId}/chunks/${chunkId}`),
+    /** Ranked evidence for a query (no answer generation, no vectors). */
+    searchKnowledge: (
+      projectId: string,
+      body: { query: string; topK?: number; sourceIds?: string[]; documentIds?: string[] },
+    ) =>
+      call<{ query: string; resultCount: number; results: RetrievalHitView[] }>(
+        `/v1/projects/${projectId}/retrieval/search`,
+        json('POST', body),
+      ),
     /** Content readiness + index readiness for one source (no vectors, no internals). */
     indexStatus: (projectId: string, sourceId: string) =>
       call<IndexStatusView>(`/v1/projects/${projectId}/sources/${sourceId}/embeddings`),

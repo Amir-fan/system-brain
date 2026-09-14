@@ -46,9 +46,11 @@ import {
 import type { DocumentApiDeps } from './document-handler.ts';
 import type { ChunkApiDeps } from './chunk-handler.ts';
 import type { EmbeddingApiDeps } from './embedding-handler.ts';
+import type { RetrievalApiDeps } from './retrieval-handler.ts';
 import { handleListSourceDocuments, handleGetDocument } from './document-handler.ts';
 import { handleGetChunk, handleListDocumentChunks } from './chunk-handler.ts';
 import { handleGetEmbeddingJob, handleIndexSource, handleIndexStatus } from './embedding-handler.ts';
+import { handleRetrievalSearch } from './retrieval-handler.ts';
 import type { IngestionApiDeps } from './ingestion-handler.ts';
 import {
   handleCreateIngestion,
@@ -80,6 +82,7 @@ export interface HttpApiDeps {
   documents?: DocumentApiDeps;
   chunks?: ChunkApiDeps;
   embeddings?: EmbeddingApiDeps;
+  retrieval?: RetrievalApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -135,6 +138,9 @@ async function handleProject(
   }
   if (url.includes('/connections')) {
     return handleConnections(req, res, url, deps);
+  }
+  if (url.includes('/retrieval/search')) {
+    return handleRetrieval(req, res, url, deps);
   }
   if (url.includes('/embedding-jobs')) {
     return handleEmbeddingJobs(req, res, url, deps);
@@ -444,6 +450,28 @@ async function handleEmbeddings(
     return sendSourceResult(res, await handleIndexSource(deps.embeddings, projectId, sourceId, actor));
   }
   return sendSourceResult(res, await handleIndexStatus(deps.embeddings, projectId, sourceId, actor));
+}
+
+async function handleRetrieval(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.retrieval) return notFound(res);
+  if (req.method !== 'POST') return notFound(res);
+
+  const match = new RegExp('^/v1/projects/([^/]+)/retrieval/search$').exec(url.split('?')[0]);
+  if (!match) return notFound(res);
+
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+
+  const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
+  return sendSourceResult(
+    res,
+    await handleRetrievalSearch(deps.retrieval, decodeURIComponent(match[1]), actor, body),
+  );
 }
 
 async function handleEmbeddingJobs(

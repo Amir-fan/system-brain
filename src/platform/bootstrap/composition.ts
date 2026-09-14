@@ -32,6 +32,8 @@ import { createSupabaseRawStorage } from '../storage/raw-storage.ts';
 import type { SupabaseStorageClient } from '../storage/raw-storage.ts';
 import { createIngestionPersistence, createIngestionSourceReader } from '../provider/ingestion.storage.ts';
 import { createEmbeddingPersistence } from '../provider/embedding.storage.ts';
+import { createRetrievalStorage } from '../provider/retrieval.storage.ts';
+import { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
 import { EmbeddingService } from '../../core/embedding/embedding.service.ts';
 import { createTextAcquisitionAdapter } from '../ingestion/text-acquisition.ts';
 import { createUrlAcquisitionAdapter } from '../ingestion/url-acquisition.ts';
@@ -128,6 +130,17 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   const ingestionPersistence = createIngestionPersistence(db);
 
   // K14: INDEX_READY is a separate, explicit stage over a COMPLETED ingestion snapshot.
+
+  // K15: retrieval is a platform service — two concurrent candidate retrievers,
+  // rank-based fusion, deterministic diversity. It never generates answers.
+  const retrievalStorage = createRetrievalStorage(db);
+  const retrievalService = new RetrievalService({
+    vector: retrievalStorage,
+    lexical: retrievalStorage,
+    index: retrievalStorage,
+    resolver: assignmentResolver,
+    gateway,
+  });
   const embeddingPersistence = createEmbeddingPersistence(db);
   const embeddingService = new EmbeddingService({
     persistence: embeddingPersistence,
@@ -169,6 +182,33 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     ingestion: { service: ingestionService, boundary: persistence },
     documents: { persistence: ingestionPersistence, boundary: persistence },
     chunks: { persistence: ingestionPersistence, boundary: persistence },
+    retrieval: {
+      service: retrievalService,
+      labels: {
+        sources: async (projectId: string, sourceIds: string[]) => {
+          const { data } = (await db
+            .from('sources')
+            .select('id, title')
+            .eq('project_id', projectId)
+            .in('id', sourceIds)) as unknown as { data: Array<Record<string, unknown>> | null };
+          return new Map((data ?? []).map((r) => [r.id as string, r.title as string]));
+        },
+        documents: async (projectId: string, documentIds: string[]) => {
+          const { data } = (await db
+            .from('documents')
+            .select('id, title, logical_path')
+            .eq('project_id', projectId)
+            .in('id', documentIds)) as unknown as { data: Array<Record<string, unknown>> | null };
+          return new Map(
+            (data ?? []).map((r) => [
+              r.id as string,
+              (r.title as string) ?? (r.logical_path as string) ?? '',
+            ]),
+          );
+        },
+      },
+      boundary: persistence,
+    },
     embeddings: {
       service: embeddingService,
       persistence: embeddingPersistence,

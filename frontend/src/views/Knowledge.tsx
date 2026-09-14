@@ -19,7 +19,7 @@ import {
 import { useI18n } from '../i18n';
 import { useProjectContext } from '../contexts/ProjectContext';
 import { apiKip } from '../api/kip';
-import type { KipSource, SourceType, ExternalConnection, IngestionJobView, ChunkView, DocumentView, IndexStatusView } from '../api/kip';
+import type { KipSource, SourceType, ExternalConnection, IngestionJobView, ChunkView, DocumentView, IndexStatusView, RetrievalHitView } from '../api/kip';
 import { Card, CardHeader, Button } from '../ui/primitives';
 
 type Mode = 'url' | 'text' | 'file' | 'github' | 'google_drive';
@@ -69,6 +69,11 @@ export function Knowledge() {
   const [chunksLoading, setChunksLoading] = useState(false);
   const [indexBySource, setIndexBySource] = useState<Record<string, IndexStatusView>>({});
   const [indexBusyId, setIndexBusyId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<RetrievalHitView[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchPerformed, setSearchPerformed] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [connNotice, setConnNotice] = useState<string | null>(null);
 
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -241,6 +246,26 @@ export function Knowledge() {
       setToast(e instanceof Error ? e.message : t('ingestion.toast.failed'));
     } finally {
       setBusySourceId(null);
+    }
+  };
+
+  // K15: retrieval lab — ranked evidence only, no answer generation.
+  const runSearch = async () => {
+    if (!projectId) return;
+    const query = searchQuery.trim();
+    if (query.length === 0) return;
+    setSearching(true);
+    setSearchError(null);
+    try {
+      const res = await apiKip().searchKnowledge(projectId, { query, topK: 8 });
+      setSearchResults(res.results);
+      setSearchPerformed(true);
+    } catch (e) {
+      setSearchError(e instanceof Error ? e.message : t('retrieval.error'));
+      setSearchResults([]);
+      setSearchPerformed(true);
+    } finally {
+      setSearching(false);
     }
   };
 
@@ -449,6 +474,65 @@ export function Knowledge() {
           </Button>
         </Card>
       ) : (
+        <>
+          {projectId ? (
+          <Card className="mt-6 p-4">
+            <CardHeader title={t('retrieval.title')} />
+            <p className="mt-1 text-xs text-muted-soft">{t('retrieval.hint')}</p>
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void runSearch();
+                }}
+                placeholder={t('retrieval.placeholder')}
+                className="w-full rounded-lg border border-surface-line px-3 py-2 text-sm text-slate-800 outline-none focus:border-brand-400"
+                dir="auto"
+              />
+              <Button
+                variant="outline"
+                disabled={searching || searchQuery.trim().length === 0}
+                onClick={() => void runSearch()}
+              >
+                {searching ? t('retrieval.searching') : t('retrieval.action')}
+              </Button>
+            </div>
+            {searchError ? <p className="mt-2 text-xs text-rose-600">{searchError}</p> : null}
+            {searchResults.length > 0 ? (
+              <ul className="mt-4 divide-y divide-surface-line rounded-xl border border-surface-line">
+                {searchResults.map((r) => (
+                  <li key={r.position} className="px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="shrink-0 text-xs font-medium text-slate-700">
+                        {t('retrieval.rank')} {r.position}
+                      </span>
+                      <span className="truncate text-xs text-muted-soft" dir="auto">
+                        {r.logicalPath ?? r.document ?? ''}
+                      </span>
+                    </div>
+                    {r.headingContext ? (
+                      <div className="mt-1 truncate text-[11px] text-muted-soft" dir="auto">
+                        {r.headingContext}
+                      </div>
+                    ) : null}
+                    <p className="mt-1 whitespace-pre-wrap text-xs text-slate-700" dir="auto">
+                      {r.text.slice(0, 320)}
+                    </p>
+                    {r.source ? (
+                      <div className="mt-1 text-[11px] text-muted-soft" dir="auto">
+                        {r.source}
+                      </div>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : searchPerformed && !searching ? (
+              <p className="mt-3 text-xs text-muted-soft">{t('retrieval.empty')}</p>
+            ) : null}
+          </Card>
+        ) : null}
+
         <Card className="mt-6">
           <CardHeader title={t('knowledge.sources')} />
           <ul className="divide-y divide-surface-line px-2 pb-2">
@@ -561,6 +645,7 @@ export function Knowledge() {
             })}
           </ul>
         </Card>
+        </>
       )}
 
       {/* How do you want to add knowledge? */}
