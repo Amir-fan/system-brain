@@ -1,94 +1,169 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Plus, Link2, Pencil, Archive, Loader2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Plus,
+  Link2,
+  FileUp,
+  ClipboardPaste,
+  Github,
+  HardDrive,
+  Pencil,
+  Archive,
+  Loader2,
+  X,
+  Upload,
+} from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useProjectContext } from '../contexts/ProjectContext';
 import { apiKip } from '../api/kip';
-import type { KipSource } from '../api/kip';
+import type { KipSource, SourceType, ExternalConnection } from '../api/kip';
 import { Card, CardHeader, Button } from '../ui/primitives';
 
-interface FormState {
-  title: string;
-  externalUri: string;
-  description: string;
-}
+type Mode = 'url' | 'text' | 'file' | 'github' | 'google_drive';
 
-const emptyForm = (): FormState => ({ title: '', externalUri: '', description: '' });
+const ACCEPT = '.pdf,.docx,.txt,.pptx,.md';
 
-function domainOf(url: string): string {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return url;
-  }
-}
+const SOURCE_ICON: Record<SourceType, typeof Link2> = {
+  url: Link2,
+  text: ClipboardPaste,
+  file: FileUp,
+  github: Github,
+  google_drive: HardDrive,
+};
 
 export function Knowledge() {
   const { t } = useI18n();
   const { activeProject } = useProjectContext();
+
   const [sources, setSources] = useState<KipSource[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [editing, setEditing] = useState<KipSource | null>(null);
-  const [form, setForm] = useState<FormState>(emptyForm());
-  const [formError, setFormError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [archivingId, setArchivingId] = useState<string | null>(null);
-  const [confirmId, setConfirmId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
+  const [picker, setPicker] = useState(false);
+  const [mode, setMode] = useState<Mode | null>(null);
+  const [editing, setEditing] = useState<KipSource | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const [title, setTitle] = useState('');
+  const [uri, setUri] = useState('');
+  const [content, setContent] = useState('');
+  const [description, setDescription] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+
+  const [connections, setConnections] = useState<ExternalConnection[]>([]);
+  const [connNotice, setConnNotice] = useState<string | null>(null);
+
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [archivingId, setArchivingId] = useState<string | null>(null);
+
+  const projectId = activeProject?.id;
+
   const load = useCallback(async () => {
-    if (!activeProject) return;
+    if (!projectId) return;
     setLoading(true);
     setError(null);
     try {
-      setSources(await apiKip().listSources(activeProject.id));
+      setSources(await apiKip().listSources(projectId));
     } catch (e) {
       setError(e instanceof Error ? e.message : t('knowledge.error.load'));
       setSources([]);
     } finally {
       setLoading(false);
     }
-  }, [activeProject?.id, t]);
+  }, [projectId, t]);
+
+  const loadConnections = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      setConnections(await apiKip().listConnections(projectId));
+    } catch {
+      setConnections([]);
+    }
+  }, [projectId]);
 
   useEffect(() => {
     setSources([]);
-    if (activeProject) load();
-  }, [activeProject?.id, load]);
+    setConnections([]);
+    if (projectId) {
+      load();
+      loadConnections();
+    }
+  }, [projectId, load, loadConnections]);
 
-  const openAdd = () => {
-    setEditing(null);
-    setForm(emptyForm());
+  const resetForm = () => {
+    setTitle('');
+    setUri('');
+    setContent('');
+    setDescription('');
+    setFile(null);
     setFormError(null);
-    setDrawerOpen(true);
+    setConnNotice(null);
+  };
+
+  const openPicker = () => {
+    resetForm();
+    setPicker(true);
+  };
+
+  const choose = (m: Mode) => {
+    setPicker(false);
+    setEditing(null);
+    resetForm();
+    setMode(m);
   };
 
   const openEdit = (s: KipSource) => {
     setEditing(s);
-    setForm({ title: s.title, externalUri: s.externalUri, description: s.description ?? '' });
+    setMode('url');
+    setTitle(s.title);
+    setUri(s.externalUri ?? '');
+    setDescription(s.description ?? '');
+    setContent('');
+    setFile(null);
     setFormError(null);
-    setDrawerOpen(true);
+  };
+
+  const closeDrawer = () => {
+    setMode(null);
+    setEditing(null);
+    resetForm();
   };
 
   const submit = async () => {
-    const title = form.title.trim();
-    const externalUri = form.externalUri.trim();
-    const description = form.description.trim() || undefined;
-    if (!title) return setFormError(t('knowledge.form.titleRequired'));
-    if (!/^https?:\/\/.+/i.test(externalUri)) return setFormError(t('knowledge.form.urlRequired'));
-    if (!activeProject) return;
-    setSubmitting(true);
+    if (!projectId || !mode) return;
     setFormError(null);
+    const cleanTitle = title.trim();
+    const cleanDesc = description.trim() || undefined;
+    if (mode !== 'file' && !cleanTitle) return setFormError(t('knowledge.form.titleRequired'));
+
+    setSubmitting(true);
     try {
       if (editing) {
-        await apiKip().updateSource(activeProject.id, editing.id, { title, externalUri, description });
+        await apiKip().updateSource(projectId, editing.id, {
+          title: cleanTitle,
+          description,
+          ...(mode === 'url' ? { externalUri: uri.trim() } : {}),
+        });
         setToast(t('knowledge.toast.updated'));
-      } else {
-        await apiKip().createSource(activeProject.id, { sourceType: 'url', title, externalUri, description });
+      } else if (mode === 'url') {
+        const cleanUri = uri.trim();
+        if (!/^https?:\/\/.+/i.test(cleanUri)) return setFormError(t('knowledge.form.urlRequired'));
+        await apiKip().createUrlSource(projectId, { title: cleanTitle, externalUri: cleanUri, description: cleanDesc });
+        setToast(t('knowledge.toast.created'));
+      } else if (mode === 'text') {
+        const cleanContent = content.trim();
+        if (!cleanContent) return setFormError(t('knowledge.form.contentRequired'));
+        await apiKip().createTextSource(projectId, { title: cleanTitle, content: cleanContent, description: cleanDesc });
+        setToast(t('knowledge.toast.created'));
+      } else if (mode === 'file') {
+        if (!file) return setFormError(t('knowledge.form.fileRequired'));
+        await apiKip().uploadFileSource(projectId, file, { title: cleanTitle || file.name, description: cleanDesc });
         setToast(t('knowledge.toast.created'));
       }
-      setDrawerOpen(false);
+      closeDrawer();
       await load(); // authoritative refetch — never optimistic
+      await loadConnections();
     } catch (e) {
       setFormError(e instanceof Error ? e.message : t('knowledge.error.save'));
     } finally {
@@ -97,10 +172,10 @@ export function Knowledge() {
   };
 
   const doArchive = async (id: string) => {
-    if (!activeProject) return;
+    if (!projectId) return;
     setArchivingId(id);
     try {
-      await apiKip().archiveSource(activeProject.id, id);
+      await apiKip().archiveSource(projectId, id);
       setConfirmId(null);
       setToast(t('knowledge.toast.archived'));
       await load();
@@ -111,26 +186,57 @@ export function Knowledge() {
     }
   };
 
+  const connectionFor = (p: 'github' | 'google_drive') => connections.find((c) => c.provider === p) ?? null;
+
+  const tryBrowse = async (provider: 'github' | 'google_drive') => {
+    if (!projectId) return;
+    setConnNotice(null);
+    try {
+      await apiKip().listConnectionItems(projectId, provider);
+    } catch (e) {
+      // Honest: the connector genuinely cannot browse until its credentials exist.
+      setConnNotice(e instanceof Error ? e.message : t('knowledge.conn.notConfigured'));
+    }
+  };
+
+  const subtitleOf = useMemo(
+    () => (s: KipSource) => {
+      if (s.sourceType === 'url') {
+        try {
+          return new URL(s.externalUri ?? '').hostname;
+        } catch {
+          return s.externalUri ?? '';
+        }
+      }
+      if (s.sourceType === 'file') {
+        const size = s.rawArtifact?.byteSize;
+        const ext = (s.rawArtifact?.originalName ?? '').split('.').pop()?.toUpperCase() ?? '';
+        return size ? `${ext} · ${formatBytes(size)}` : ext;
+      }
+      if (s.sourceType === 'text') return t('knowledge.type.text.pasted');
+      if (s.sourceType === 'github') return s.externalReference?.externalUri ?? 'GitHub';
+      if (s.sourceType === 'google_drive') return t('knowledge.type.drive');
+      return s.sourceType;
+    },
+    [t],
+  );
+
   const projectMissing = !activeProject;
 
   return (
     <main className="mx-auto w-full max-w-4xl px-6 py-8">
-      {/* Page header */}
       <div className="flex items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">{t('knowledge.title')}</h1>
           <p className="mt-1.5 max-w-xl text-sm text-muted">{t('knowledge.subtitle')}</p>
         </div>
-        <Button variant="primary" onClick={openAdd} disabled={projectMissing}>
+        <Button variant="primary" onClick={openPicker} disabled={projectMissing}>
           <Plus className="h-4 w-4" /> {t('knowledge.add')}
         </Button>
       </div>
 
-      {toast ? (
-        <div className="mt-4 rounded-lg bg-success-100 px-3 py-2 text-sm text-success-700">{toast}</div>
-      ) : null}
+      {toast ? <div className="mt-4 rounded-lg bg-success-100 px-3 py-2 text-sm text-success-700">{toast}</div> : null}
 
-      {/* States */}
       {projectMissing ? (
         <Card className="mt-6 p-10 text-center text-muted-soft">{t('project.none')}</Card>
       ) : loading ? (
@@ -143,7 +249,7 @@ export function Knowledge() {
         <Card className="mt-6 p-12 text-center">
           <p className="text-base font-medium text-slate-700">{t('knowledge.empty.title')}</p>
           <p className="mt-1 text-sm text-muted-soft">{t('knowledge.empty.subtitle')}</p>
-          <Button variant="primary" className="mt-5" onClick={openAdd}>
+          <Button variant="primary" className="mt-5" onClick={openPicker}>
             <Plus className="h-4 w-4" /> {t('knowledge.add')}
           </Button>
         </Card>
@@ -151,86 +257,293 @@ export function Knowledge() {
         <Card className="mt-6">
           <CardHeader title={t('knowledge.sources')} />
           <ul className="divide-y divide-surface-line px-2 pb-2">
-            {sources.map((s) => (
-              <li key={s.id} className="flex items-center gap-3 px-4 py-3.5">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-700">
-                  <Link2 className="h-[18px] w-[18px]" />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium text-slate-800">{s.title}</div>
-                  <div className="flex items-center gap-2 text-xs text-muted-soft">
-                    <span dir="ltr">{domainOf(s.externalUri)}</span>
-                    <span>·</span>
-                    <span>{new Date(s.createdAt).toLocaleDateString()}</span>
+            {sources.map((s) => {
+              const Icon = SOURCE_ICON[s.sourceType] ?? Link2;
+              return (
+                <li key={s.id} className="flex items-center gap-3 px-4 py-3.5">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-700">
+                    <Icon className="h-[18px] w-[18px]" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-slate-800">{s.title}</div>
+                    <div className="truncate text-xs text-muted-soft" dir="auto">
+                      {subtitleOf(s)}
+                    </div>
+                    {s.description ? <p className="mt-0.5 truncate text-xs text-muted">{s.description}</p> : null}
                   </div>
-                  {s.description ? <p className="mt-0.5 truncate text-xs text-muted">{s.description}</p> : null}
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button variant="ghost" onClick={() => openEdit(s)} title={t('knowledge.edit')}>
-                    <Pencil className="h-4 w-4" /> {t('knowledge.edit')}
-                  </Button>
-                  {confirmId === s.id ? (
-                    <span className="flex items-center gap-1 text-xs text-rose-600">
-                      {t('knowledge.confirm')}
-                      <Button variant="ghost" disabled={archivingId === s.id} onClick={() => doArchive(s.id)}>
-                        {t('knowledge.archive')}
+                  <div className="flex shrink-0 items-center gap-1">
+                    {s.sourceType === 'url' ? (
+                      <Button variant="ghost" onClick={() => openEdit(s)} title={t('knowledge.edit')}>
+                        <Pencil className="h-4 w-4" /> {t('knowledge.edit')}
                       </Button>
-                      <Button variant="ghost" onClick={() => setConfirmId(null)}>
-                        {t('knowledge.cancel')}
+                    ) : null}
+                    {confirmId === s.id ? (
+                      <span className="flex items-center gap-1 text-xs text-rose-600">
+                        {t('knowledge.confirm')}
+                        <Button variant="ghost" disabled={archivingId === s.id} onClick={() => doArchive(s.id)}>
+                          {t('knowledge.archive')}
+                        </Button>
+                        <Button variant="ghost" onClick={() => setConfirmId(null)}>
+                          {t('knowledge.cancel')}
+                        </Button>
+                      </span>
+                    ) : (
+                      <Button variant="ghost" onClick={() => setConfirmId(s.id)} title={t('knowledge.archive')}>
+                        <Archive className="h-4 w-4" /> {t('knowledge.archive')}
                       </Button>
-                    </span>
-                  ) : (
-                    <Button variant="ghost" onClick={() => setConfirmId(s.id)} title={t('knowledge.archive')}>
-                      <Archive className="h-4 w-4" /> {t('knowledge.archive')}
-                    </Button>
-                  )}
-                </div>
-              </li>
-            ))}
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </Card>
       )}
 
-      {/* Add / Edit drawer */}
-      {drawerOpen ? (
+      {/* How do you want to add knowledge? */}
+      {picker ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/25 p-4" onClick={() => setPicker(false)}>
+          <div className="w-full max-w-lg rounded-xl2 bg-white p-6 shadow-lift" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between">
+              <h2 className="text-lg font-semibold text-slate-900">{t('knowledge.picker.title')}</h2>
+              <button type="button" onClick={() => setPicker(false)} className="text-muted-soft hover:text-slate-700">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="mt-4 space-y-2">
+              <Choice icon={FileUp} title={t('knowledge.type.file')} hint={t('knowledge.type.file.hint')} onClick={() => choose('file')} />
+              <Choice icon={ClipboardPaste} title={t('knowledge.type.text')} hint={t('knowledge.type.text.hint')} onClick={() => choose('text')} />
+              <Choice icon={Link2} title={t('knowledge.type.url')} hint={t('knowledge.type.url.hint')} onClick={() => choose('url')} />
+              <Choice
+                icon={Github}
+                title="GitHub"
+                hint={t('knowledge.type.github.hint')}
+                onClick={() => choose('github')}
+              />
+              <Choice
+                icon={HardDrive}
+                title="Google Drive"
+                hint={t('knowledge.type.drive.hint')}
+                onClick={() => choose('google_drive')}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Add / edit drawer */}
+      {mode ? (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/20">
           <div className="h-full w-full max-w-md overflow-y-auto border-s border-surface-line bg-white p-6 shadow-lift">
-            <h2 className="text-lg font-semibold text-slate-900">
-              {editing ? t('knowledge.form.editTitle') : t('knowledge.form.addTitle')}
-            </h2>
+            <h2 className="text-lg font-semibold text-slate-900">{t(`knowledge.form.title.${mode}`)}</h2>
             {formError ? <p className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-600">{formError}</p> : null}
-            <label className="mt-5 block text-sm font-medium text-slate-700">{t('knowledge.form.title')}</label>
-            <input
-              value={form.title}
-              onChange={(e) => setForm({ ...form, title: e.target.value })}
-              className="mt-1 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm outline-none focus:border-brand-400"
-            />
-            <label className="mt-4 block text-sm font-medium text-slate-700">{t('knowledge.form.url')}</label>
-            <input
-              dir="ltr"
-              value={form.externalUri}
-              onChange={(e) => setForm({ ...form, externalUri: e.target.value })}
-              placeholder="https://example.com"
-              className="mt-1 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm outline-none focus:border-brand-400"
-            />
-            <label className="mt-4 block text-sm font-medium text-slate-700">{t('knowledge.form.description')}</label>
-            <textarea
-              value={form.description}
-              onChange={(e) => setForm({ ...form, description: e.target.value })}
-              rows={3}
-              className="mt-1 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm outline-none focus:border-brand-400"
-            />
+            {connNotice ? <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">{connNotice}</p> : null}
+
+            {mode === 'github' || mode === 'google_drive' ? (
+              <ConnectorPanel
+                provider={mode}
+                connection={connectionFor(mode)}
+                onBrowse={() => tryBrowse(mode)}
+                projectId={projectId}
+                onRegistered={async () => {
+                  setToast(t('knowledge.toast.created'));
+                  closeDrawer();
+                  await load();
+                }}
+                onError={setConnNotice}
+              />
+            ) : (
+              <>
+                {mode === 'file' ? (
+                  <>
+                    <label className="mt-5 block text-sm font-medium text-slate-700">{t('knowledge.form.file')}</label>
+                    <input
+                      type="file"
+                      accept={ACCEPT}
+                      onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                      className="mt-1 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm"
+                    />
+                    <p className="mt-1 text-xs text-muted-soft">{t('knowledge.form.fileHint')}</p>
+                  </>
+                ) : null}
+
+                <label className="mt-5 block text-sm font-medium text-slate-700">
+                  {t('knowledge.form.title')}
+                  {mode === 'file' ? <span className="text-muted-soft"> — {t('knowledge.optional')}</span> : null}
+                </label>
+                <input
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm outline-none focus:border-brand-400"
+                />
+
+                {mode === 'url' ? (
+                  <>
+                    <label className="mt-4 block text-sm font-medium text-slate-700">{t('knowledge.form.url')}</label>
+                    <input
+                      dir="ltr"
+                      value={uri}
+                      onChange={(e) => setUri(e.target.value)}
+                      placeholder="https://example.com"
+                      className="mt-1 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm outline-none focus:border-brand-400"
+                    />
+                  </>
+                ) : null}
+
+                {mode === 'text' ? (
+                  <>
+                    <label className="mt-4 block text-sm font-medium text-slate-700">{t('knowledge.form.content')}</label>
+                    <textarea
+                      value={content}
+                      onChange={(e) => setContent(e.target.value)}
+                      rows={10}
+                      className="mt-1 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm outline-none focus:border-brand-400"
+                    />
+                  </>
+                ) : null}
+
+                <label className="mt-4 block text-sm font-medium text-slate-700">
+                  {t('knowledge.form.description')} <span className="text-muted-soft">— {t('knowledge.optional')}</span>
+                </label>
+                <textarea
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  rows={3}
+                  className="mt-1 w-full rounded-lg border border-surface-line bg-white px-3 py-2 text-sm outline-none focus:border-brand-400"
+                />
+              </>
+            )}
+
             <div className="mt-6 flex justify-end gap-2">
-              <Button variant="ghost" onClick={() => setDrawerOpen(false)}>
+              <Button variant="ghost" onClick={closeDrawer}>
                 {t('knowledge.cancel')}
               </Button>
-              <Button variant="primary" disabled={submitting} onClick={submit}>
-                {submitting ? t('knowledge.saving') : t('knowledge.save')}
-              </Button>
+              {mode === 'github' || mode === 'google_drive' ? null : (
+                <Button variant="primary" disabled={submitting} onClick={submit}>
+                  {submitting ? t('knowledge.saving') : t('knowledge.save')}
+                </Button>
+              )}
             </div>
           </div>
         </div>
       ) : null}
     </main>
   );
+}
+
+function Choice({ icon: Icon, title, hint, onClick }: { icon: typeof Link2; title: string; hint: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center gap-3 rounded-xl border border-surface-line bg-white px-4 py-3 text-start transition hover:border-brand-300 hover:bg-brand-50/40"
+    >
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-700">
+        <Icon className="h-5 w-5" />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-sm font-medium text-slate-800">{title}</span>
+        <span className="block truncate text-xs text-muted-soft">{hint}</span>
+      </span>
+    </button>
+  );
+}
+
+/** Connection state for a provider. Browsing needs a configured connector. */
+function ConnectorPanel({
+  provider,
+  connection,
+  projectId,
+  onBrowse,
+  onRegistered,
+  onError,
+}: {
+  provider: 'github' | 'google_drive';
+  connection: ExternalConnection | null;
+  projectId?: string;
+  onBrowse: () => void;
+  onRegistered: () => Promise<void>;
+  onError: (m: string) => void;
+}) {
+  const { t } = useI18n();
+  const [items, setItems] = useState<Array<{ id: string; name: string; type: string; uri?: string; detail?: string }>>([]);
+  const [busy, setBusy] = useState(false);
+  const connected = connection?.status === 'connected';
+
+  const browse = async () => {
+    if (!projectId) return;
+    setBusy(true);
+    try {
+      setItems(await apiKip().listConnectionItems(projectId, provider));
+    } catch (e) {
+      onError(e instanceof Error ? e.message : t('knowledge.conn.notConfigured'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const register = async (item: { id: string; name: string; type: string; uri?: string; detail?: string }) => {
+    if (!projectId) return;
+    setBusy(true);
+    try {
+      await apiKip().registerExternalSource(projectId, provider, {
+        itemId: item.id,
+        itemType: item.type,
+        name: item.name,
+        uri: item.uri,
+        detail: item.detail,
+      });
+      await onRegistered();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : t('knowledge.error.save'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-6">
+      <div className="rounded-xl border border-surface-line bg-surface p-4">
+        <div className="text-sm font-medium text-slate-800">
+          {provider === 'github' ? 'GitHub' : 'Google Drive'}
+        </div>
+        <div className="mt-1 text-xs text-muted-soft">
+          {connected ? (connection?.accountLabel ?? t('knowledge.conn.connected')) : t('knowledge.conn.notConnected')}
+        </div>
+        <div className="mt-3 flex gap-2">
+          {connected ? (
+            <Button variant="primary" onClick={browse} disabled={busy}>
+              <Upload className="h-4 w-4" /> {t('knowledge.conn.choose')}
+            </Button>
+          ) : (
+            <Button variant="default" onClick={() => { onBrowse(); browse(); }} disabled={busy}>
+              {provider === 'github' ? t('knowledge.conn.connectGithub') : t('knowledge.conn.connectDrive')}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {items.length > 0 ? (
+        <ul className="mt-4 divide-y divide-surface-line rounded-xl border border-surface-line">
+          {items.map((it) => (
+            <li key={it.id} className="flex items-center justify-between gap-3 px-4 py-3">
+              <span className="min-w-0">
+                <span className="block truncate text-sm text-slate-800">{it.name}</span>
+                <span className="block truncate text-xs text-muted-soft">{it.detail ?? it.type}</span>
+              </span>
+              <Button variant="outline" onClick={() => register(it)} disabled={busy}>
+                {t('knowledge.conn.select')}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
