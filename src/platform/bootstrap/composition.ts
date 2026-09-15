@@ -166,6 +166,10 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     index: retrievalStorage,
     resolver: assignmentResolver,
     gateway,
+    resolveSourceIdsByRole: async (projectId: string, roles: string[]) =>
+      (await sourceStorage.listByProject(projectId))
+        .filter((src) => roles.includes(src.role))
+        .map((src) => src.id),
   });
   const embeddingPersistence = createEmbeddingPersistence(db);
   const embeddingService = new EmbeddingService({
@@ -219,6 +223,8 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     },
     retrieval: {
       service: retrievalService,
+      rolesAvailable: async (projectId: string) =>
+        [...new Set((await sourceStorage.listByProject(projectId)).map((src) => src.role))],
       labels: {
         sources: async (projectId: string, sourceIds: string[]) => {
           const { data } = (await db

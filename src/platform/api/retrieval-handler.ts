@@ -18,6 +18,16 @@ import type { Actor } from '../../core/authorization/actor.ts';
 import { MAX_TOP_K, RetrievalFailure } from '../../core/retrieval/retrieval.ts';
 import type { RetrievalErrorCode } from '../../core/retrieval/retrieval.ts';
 import type { RetrievalService, SearchOutcome } from '../../core/retrieval/retrieval.service.ts';
+import { progressiveRetrieve } from '../../core/retrieval/role-policy.ts';
+import type { RetrievalStage } from '../../core/retrieval/role-policy.ts';
+import { ANSWER_SUFFICIENCY } from '../../core/knowledge/knowledge-answer.ts';
+
+const SOURCE_ROLE_VALUES = ['primary', 'supporting', 'reference'] as const;
+function asRoleList(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  if (!value.every((v) => (SOURCE_ROLE_VALUES as readonly string[]).includes(v as string))) return null;
+  return [...new Set(value as string[])];
+}
 
 export interface RetrievalApiDeps {
   service: RetrievalService;
@@ -27,6 +37,8 @@ export interface RetrievalApiDeps {
     documents(projectId: string, documentIds: string[]): Promise<Map<string, string>>;
   };
   boundary: ProjectBoundaryReaders;
+  /** Roles that actually exist in the project (for progressive scope). */
+  rolesAvailable?: (projectId: string) => Promise<string[]>;
 }
 
 export type RetrievalApiResult =
@@ -53,6 +65,8 @@ interface SearchBody {
   topK?: unknown;
   sourceIds?: unknown;
   documentIds?: unknown;
+  sourceRoles?: unknown;
+  progressive?: unknown;
   debug?: unknown;
 }
 
@@ -82,17 +96,43 @@ export async function handleRetrievalSearch(
   const topK = rawTopK === undefined ? undefined : Math.min(Math.max(rawTopK, 1), MAX_TOP_K);
   const debug = body.debug === true;
 
+  const requestRoles = asRoleList(body.sourceRoles);
+  const progressive = body.progressive === true && deps.rolesAvailable !== undefined;
+
   let outcome: SearchOutcome;
+  let roleStage: { retrievalStage: RetrievalStage; sourceRolesUsed: string[] } | null = null;
   try {
-    outcome = await deps.service.search({
-      projectId,
-      query,
-      ...(topK !== undefined ? { topK } : {}),
-      filters: {
-        ...(asIdList(body.sourceIds) ? { sourceIds: asIdList(body.sourceIds) as string[] } : {}),
-        ...(asIdList(body.documentIds) ? { documentIds: asIdList(body.documentIds) as string[] } : {}),
-      },
-    });
+    if (progressive) {
+      const available = new Set(await deps.rolesAvailable!(projectId));
+      let lastScoped: SearchOutcome | null = null;
+      const planned = await progressiveRetrieve({
+        availableRoles: available,
+        semanticFloor: ANSWER_SUFFICIENCY.semanticFloor,
+        search: async (roles) => {
+          const scoped = await deps.service.search({
+            projectId,
+            query,
+            ...(topK !== undefined ? { topK } : {}),
+            filters: { sourceRoles: roles },
+          });
+          lastScoped = scoped;
+          return { semanticTop: scoped.rawBest.semantic };
+        },
+      });
+      outcome = lastScoped as unknown as SearchOutcome;
+      roleStage = { retrievalStage: planned.retrievalStage, sourceRolesUsed: planned.sourceRolesUsed };
+    } else {
+      outcome = await deps.service.search({
+        projectId,
+        query,
+        ...(topK !== undefined ? { topK } : {}),
+        filters: {
+          ...(asIdList(body.sourceIds) ? { sourceIds: asIdList(body.sourceIds) as string[] } : {}),
+          ...(asIdList(body.documentIds) ? { documentIds: asIdList(body.documentIds) as string[] } : {}),
+          ...(requestRoles ? { sourceRoles: requestRoles } : {}),
+        },
+      });
+    }
   } catch (error) {
     if (error instanceof RetrievalFailure) {
       return fail(error.message, 'retrieval', FAILURE_STATUS[error.code], error.code);
@@ -122,6 +162,7 @@ export async function handleRetrievalSearch(
   return ok({
     query: outcome.query,
     resultCount: results.length,
+    ...(roleStage ? { retrievalStage: roleStage.retrievalStage, sourceRolesUsed: roleStage.sourceRolesUsed } : {}),
     results,
     ...(debug
       ? {

@@ -61,6 +61,8 @@ export interface RetrievalServiceDeps {
   index: RetrievalIndexReader;
   resolver: ModelAssignmentResolver;
   gateway: ModelGateway;
+  /** Resolves project-scoped source ids for a set of roles (K17 role scope). */
+  resolveSourceIdsByRole?: (projectId: string, roles: string[]) => Promise<string[]>;
   onObservation?: (observation: RetrievalObservation) => void;
 }
 
@@ -100,7 +102,20 @@ export class RetrievalService {
     if (query.length === 0) throw new RetrievalFailure('RETRIEVAL_QUERY_EMPTY');
 
     const topK = Math.min(Math.max(input.topK ?? DEFAULT_TOP_K, 1), MAX_TOP_K);
-    const filters = input.filters ?? {};
+    const filters: RetrievalFilters = { ...(input.filters ?? {}) };
+
+    // K17 role scope: resolve declared roles to concrete project-scoped source ids
+    // and narrow the existing filter. Same vector/lexical path — no second engine.
+    if (filters.sourceRoles && filters.sourceRoles.length > 0) {
+      if (!this.deps.resolveSourceIdsByRole) {
+        throw new RetrievalFailure('RETRIEVAL_FAILED', 'role scope requested but no resolver wired');
+      }
+      const byRole = await this.deps.resolveSourceIdsByRole(input.projectId, filters.sourceRoles);
+      filters.sourceIds = filters.sourceIds
+        ? filters.sourceIds.filter((id) => byRole.includes(id))
+        : byRole;
+      delete filters.sourceRoles;
+    }
 
     // Guard: query vectors must come from the SAME model as the stored vectors.
     let modelId: string;

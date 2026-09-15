@@ -59,6 +59,12 @@ export class RetrievalFailure extends Error {
 export interface RetrievalFilters {
   sourceIds?: string[];
   documentIds?: string[];
+  /**
+   * Source-role scope (K17). Restricts retrieval to sources whose project-assigned
+   * role is in this list. Roles are SEARCH PRIORITY only — never truth or authority.
+   * Resolved to project-scoped source ids by the service (no second engine).
+   */
+  sourceRoles?: string[];
 }
 
 export interface CandidateChunk {
