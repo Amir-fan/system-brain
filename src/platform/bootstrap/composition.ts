@@ -33,6 +33,8 @@ import type { SupabaseStorageClient } from '../storage/raw-storage.ts';
 import { createIngestionPersistence, createIngestionSourceReader } from '../provider/ingestion.storage.ts';
 import { createEmbeddingPersistence } from '../provider/embedding.storage.ts';
 import { createRetrievalStorage } from '../provider/retrieval.storage.ts';
+import { createMemoryStorage } from '../provider/memory.storage.ts';
+import { MemoryService } from '../../core/memory/memory.service.ts';
 import { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
 import { KnowledgeAnswerService } from '../../core/knowledge/knowledge-answer.service.ts';
 import { EmbeddingService } from '../../core/embedding/embedding.service.ts';
@@ -172,6 +174,7 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
         .map((src) => src.id),
   });
   const embeddingPersistence = createEmbeddingPersistence(db);
+  const memoryService = new MemoryService(createMemoryStorage(db));
   const embeddingService = new EmbeddingService({
     persistence: embeddingPersistence,
     sources: {
@@ -221,6 +224,7 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
       }),
       boundary: persistence,
     },
+    memory: { service: memoryService, boundary: persistence },
     retrieval: {
       service: retrievalService,
       rolesAvailable: async (projectId: string) =>

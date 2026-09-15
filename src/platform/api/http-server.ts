@@ -53,6 +53,15 @@ import { handleGetChunk, handleListDocumentChunks } from './chunk-handler.ts';
 import { handleGetEmbeddingJob, handleIndexSource, handleIndexStatus } from './embedding-handler.ts';
 import { handleRetrievalSearch } from './retrieval-handler.ts';
 import { handleKnowledgeAnswer } from './knowledge-answer-handler.ts';
+import type { MemoryApiDeps } from './memory-handler.ts';
+import {
+  handleMemoryArchive,
+  handleMemoryHistory,
+  handleMemoryRecall,
+  handleMemoryRemember,
+  handleMemoryRetrieve,
+  handleMemorySupersede,
+} from './memory-handler.ts';
 import type { IngestionApiDeps } from './ingestion-handler.ts';
 import {
   handleCreateIngestion,
@@ -86,6 +95,7 @@ export interface HttpApiDeps {
   embeddings?: EmbeddingApiDeps;
   retrieval?: RetrievalApiDeps;
   knowledgeAnswer?: KnowledgeAnswerApiDeps;
+  memory?: MemoryApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -144,6 +154,9 @@ async function handleProject(
   }
   if (url.includes('/knowledge/answer')) {
     return handleKnowledgeAnswerRoute(req, res, url, deps);
+  }
+  if (url.includes('/memory')) {
+    return handleMemory(req, res, url, deps);
   }
   if (url.includes('/retrieval/search')) {
     return handleRetrieval(req, res, url, deps);
@@ -478,6 +491,38 @@ async function handleKnowledgeAnswerRoute(
     res,
     await handleKnowledgeAnswer(deps.knowledgeAnswer, decodeURIComponent(match[1]), actor, body),
   );
+}
+
+async function handleMemory(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.memory) return notFound(res);
+  const base = /^\/v1\/projects\/([^/]+)\/memory\/(remember|recall|supersede|archive|retrieve|history)$/.exec(url.split('?')[0]);
+  if (!base) return notFound(res);
+  const [, rawProjectId, action] = base;
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+
+  if ((action === 'recall' || action === 'history') && req.method !== 'GET') return notFound(res);
+  if ((action === 'remember' || action === 'supersede' || action === 'archive' || action === 'retrieve') && req.method !== 'POST') return notFound(res);
+
+  let result;
+  if (action === 'recall') {
+    result = await handleMemoryRecall(deps.memory, decodeURIComponent(rawProjectId), actor, new URLSearchParams(url.split('?')[1] ?? ''));
+  } else if (action === 'history') {
+    result = await handleMemoryHistory(deps.memory, decodeURIComponent(rawProjectId), actor, new URLSearchParams(url.split('?')[1] ?? ''));
+  } else {
+    const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
+    const projectId = decodeURIComponent(rawProjectId);
+    if (action === 'remember') result = await handleMemoryRemember(deps.memory, projectId, actor, body);
+    else if (action === 'supersede') result = await handleMemorySupersede(deps.memory, projectId, actor, body);
+    else if (action === 'archive') result = await handleMemoryArchive(deps.memory, projectId, actor, body);
+    else result = await handleMemoryRetrieve(deps.memory, projectId, actor, body);
+  }
+  return sendSourceResult(res, result);
 }
 
 async function handleRetrieval(
