@@ -41,6 +41,7 @@ import { UnderstandingService } from '../../core/understanding/understanding.ser
 import { MapSkillRegistry } from '../../core/skill/skill-registry.ts';
 import { SkillsRuntime } from '../../core/skill/skill-runtime.ts';
 import { demoContextSummary } from '../../core/skill/demo-context-summary.ts';
+import { naqaaScanner } from '../../domain/naqaa/scanner-skill.ts';
 import { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
 import { KnowledgeAnswerService } from '../../core/knowledge/knowledge-answer.service.ts';
 import { EmbeddingService } from '../../core/embedding/embedding.service.ts';
@@ -190,11 +191,13 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   const understandingService = new UnderstandingService();
   const skillRegistry = new MapSkillRegistry();
   skillRegistry.register(demoContextSummary);
+  skillRegistry.register(naqaaScanner);
   const skillsRuntime = new SkillsRuntime({
     persistence,
     registry: skillRegistry,
     understanding: understandingService,
     memory: { fetchBounded: memoryFetcher },
+    modelGateway: gateway,
   });
   const embeddingService = new EmbeddingService({
     persistence: embeddingPersistence,

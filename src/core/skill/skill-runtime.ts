@@ -16,9 +16,10 @@ import type { Actor } from '../authorization/actor.ts';
 import type { UnderstandingService } from '../understanding/understanding.service.ts';
 import type { BoundedUnderstandingContext, UnderstandingInput, UnderstandingResult } from '../understanding/understanding.ts';
 import type { MemoryReference } from '../understanding/understanding.ts';
-import type { SkillDefinition, SkillExecutionResult, SkillExecutionContext } from './skill.ts';
+import type { SkillDefinition, SkillExecutionResult, SkillExecutionContext, SkillModelCapability } from './skill.ts';
 import { SkillFailure } from './skill.ts';
 import type { SkillRegistry } from './skill-registry.ts';
+import type { ModelGateway, ModelGatewayInput } from '../model-gateway/model-gateway.ts';
 
 export interface SkillRuntimeDeps {
   persistence: RuntimePersistence & ProjectBoundaryReaders;
@@ -29,6 +30,8 @@ export interface SkillRuntimeDeps {
   memory?: {
     fetchBounded(projectId: string, ids: { subjectId?: string; conversationId?: string; caseId?: string }): Promise<BoundedUnderstandingContext>;
   };
+  /** Existing Model Gateway (resolving gateway) for Skills that declare model:true. */
+  modelGateway?: ModelGateway;
 }
 
 export interface SkillExecutionInput {
@@ -82,7 +85,7 @@ export class SkillsRuntime {
   }
 
   private async executeSkill(input: SkillExecutionInput, skill: SkillDefinition, runId: string): Promise<SkillExecutionResult> {
-    const ctx: SkillExecutionContext = { projectId: input.projectId, actor: input.actor };
+    const ctx: SkillExecutionContext = { projectId: input.projectId, actor: input.actor, input: input.payload };
 
     // Bounded memory (only when declared).
     let memory: MemoryReference[] = [];
@@ -121,6 +124,24 @@ export class SkillsRuntime {
           clarification: understanding.clarification,
         };
       }
+    }
+
+    // Narrow model capability (only when declared) via the existing gateway.
+    if (skill.requirements.model) {
+      if (!this.deps.modelGateway) throw new SkillFailure('SKILL_INVALID_OUTPUT', 'model required but not wired');
+      const capability: SkillModelCapability = {
+        generateText: async ({ workload, parts, message }) => {
+          const out = await this.deps.modelGateway!.generateText({
+            projectId: input.projectId,
+            runId,
+            capability: skill.id,
+            model: { profile: workload } as ModelGatewayInput['model'],
+            input: parts && parts.length > 0 ? { parts } : { message: message ?? '' },
+          });
+          return { text: out.text, provider: out.provider, model: out.model, usage: out.usage };
+        },
+      };
+      ctx.model = capability;
     }
 
     const output = await skill.execute(ctx);

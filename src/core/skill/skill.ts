@@ -15,6 +15,7 @@
 
 import type { UnderstandingResult } from '../understanding/understanding.ts';
 import type { MemoryReference } from '../understanding/understanding.ts';
+import type { ModelContentPart, ModelUsage } from '../model-gateway/model-gateway.ts';
 
 export interface SkillRequirements {
   understanding: boolean;
@@ -25,15 +26,31 @@ export interface SkillRequirements {
 
 export type ValidationOutcome = { ok: true } | { ok: false; message: string };
 
+/**
+ * Narrow, provider-neutral model capability handed to a Skill that declares
+ * `model: true`. It goes through the existing Model Gateway + Model Assignment
+ * (the Skill never sees a provider adapter, API key, DB or gateway object).
+ */
+export interface SkillModelCapability {
+  generateText(input: { workload: string; parts?: ModelContentPart[]; message?: string }): Promise<{
+    text: string;
+    provider?: string;
+    model?: string;
+    usage?: ModelUsage;
+  }>;
+}
+
 export interface SkillExecutionContext {
   projectId: string;
   actor: string;
+  /** The validated Skill input payload. */
+  input?: unknown;
   /** Structured Understanding (present when requirements.understanding). */
   understanding?: UnderstandingResult;
   /** Bounded relevant memory (present when requirements.memory). */
   memory?: MemoryReference[];
-  /** Reserved for future model access via Model Gateway + Assignment. */
-  model?: never;
+  /** Narrow Model Gateway capability (present when requirements.model). */
+  model?: SkillModelCapability;
 }
 
 export interface SkillDefinition {
