@@ -16,6 +16,7 @@
 import type { UnderstandingResult } from '../understanding/understanding.ts';
 import type { MemoryReference } from '../understanding/understanding.ts';
 import type { ModelContentPart, ModelUsage } from '../model-gateway/model-gateway.ts';
+import type { DecisionRequirement, ReadinessResult } from '../readiness/readiness.ts';
 
 export interface SkillRequirements {
   understanding: boolean;
@@ -51,6 +52,8 @@ export interface SkillExecutionContext {
   memory?: MemoryReference[];
   /** Narrow Model Gateway capability (present when requirements.model). */
   model?: SkillModelCapability;
+  /** Decision Readiness result (present when the skill declares readiness requirements). */
+  readiness?: ReadinessResult;
 }
 
 export interface SkillDefinition {
@@ -58,12 +61,18 @@ export interface SkillDefinition {
   version: number;
   description: string;
   requirements: SkillRequirements;
+  /**
+   * Optional K22 Decision Readiness gate. When declared, the Skills Runtime evaluates
+   * readiness BEFORE the skill body runs and blocks execution unless READY_FOR_DECISION.
+   * The DOMAIN supplies the material requirements; the gate stays project-agnostic.
+   */
+  readiness?: { requirements: DecisionRequirement[] };
   validateInput(input: unknown): ValidationOutcome;
   validateOutput(output: unknown): ValidationOutcome;
   execute(ctx: SkillExecutionContext): Promise<unknown>;
 }
 
-export type SkillExecutionStatus = 'completed' | 'needs_clarification' | 'failed';
+export type SkillExecutionStatus = 'completed' | 'needs_clarification' | 'needs_information' | 'failed';
 
 export interface SkillExecutionResult {
   status: SkillExecutionStatus;
@@ -72,6 +81,8 @@ export interface SkillExecutionResult {
   runId?: string;
   output?: unknown;
   clarification?: { reason: string; question: string; candidates?: string[] };
+  /** Present when readiness was evaluated (K22). */
+  readiness?: ReadinessResult;
   error?: { message: string; code?: string };
 }
 

@@ -20,6 +20,7 @@ import type { SkillDefinition, SkillExecutionResult, SkillExecutionContext, Skil
 import { SkillFailure } from './skill.ts';
 import type { SkillRegistry } from './skill-registry.ts';
 import type { ModelGateway, ModelGatewayInput } from '../model-gateway/model-gateway.ts';
+import type { DecisionRequirement, KnownContextItem, ReadinessResult } from '../readiness/readiness.ts';
 
 export interface SkillRuntimeDeps {
   persistence: RuntimePersistence & ProjectBoundaryReaders;
@@ -32,6 +33,8 @@ export interface SkillRuntimeDeps {
   };
   /** Existing Model Gateway (resolving gateway) for Skills that declare model:true. */
   modelGateway?: ModelGateway;
+  /** K22 Decision Readiness evaluator for Skills that declare readiness requirements. */
+  readiness?: { evaluate(input: { requirements: DecisionRequirement[]; known: KnownContextItem[] }): ReadinessResult };
 }
 
 export interface SkillExecutionInput {
@@ -126,6 +129,23 @@ export class SkillsRuntime {
       }
     }
 
+    // K22 Decision Readiness gate — the code-level boundary. If the skill declares
+    // readiness requirements and they are not satisfied, the body MUST NOT execute.
+    if (skill.readiness) {
+      if (!this.deps.readiness) throw new SkillFailure('SKILL_INVALID_OUTPUT', 'readiness required but not wired');
+      const payloadObj = input.payload && typeof input.payload === 'object' && !Array.isArray(input.payload) ? (input.payload as Record<string, unknown>) : {};
+      const userContext = payloadObj.context && typeof payloadObj.context === 'object' && !Array.isArray(payloadObj.context) ? (payloadObj.context as Record<string, unknown>) : {};
+      const known: KnownContextItem[] = [
+        ...memory.map((m) => ({ key: m.memoryKey, value: (m.payload as Record<string, unknown>).value, source: 'memory' as const })),
+        ...Object.entries(userContext).map(([key, value]) => ({ key, value, source: 'user' as const })),
+      ];
+      const readiness: ReadinessResult = this.deps.readiness.evaluate({ requirements: skill.readiness.requirements, known });
+      ctx.readiness = readiness;
+      if (readiness.status !== 'READY_FOR_DECISION') {
+        return { status: 'needs_information', skillId: skill.id, skillVersion: skill.version, runId, readiness };
+      }
+    }
+
     // Narrow model capability (only when declared) via the existing gateway.
     if (skill.requirements.model) {
       if (!this.deps.modelGateway) throw new SkillFailure('SKILL_INVALID_OUTPUT', 'model required but not wired');
@@ -150,7 +170,14 @@ export class SkillsRuntime {
       // The execute() catch marks the run failed when this rethrows.
       throw new SkillFailure('SKILL_INVALID_OUTPUT', outputCheck.message);
     }
-    return { status: 'completed', skillId: skill.id, skillVersion: skill.version, runId, output };
+    return {
+      status: 'completed',
+      skillId: skill.id,
+      skillVersion: skill.version,
+      runId,
+      output,
+      ...(ctx.readiness ? { readiness: ctx.readiness } : {}),
+    };
   }
 
   private async boundedForUnderstanding(input: SkillExecutionInput): Promise<BoundedUnderstandingContext> {

@@ -41,6 +41,8 @@ import { UnderstandingService } from '../../core/understanding/understanding.ser
 import { MapSkillRegistry } from '../../core/skill/skill-registry.ts';
 import { SkillsRuntime } from '../../core/skill/skill-runtime.ts';
 import { demoContextSummary } from '../../core/skill/demo-context-summary.ts';
+import { decisionReadinessFixture } from '../../core/skill/decision-readiness-fixture.ts';
+import { DecisionReadinessService } from '../../core/readiness/readiness.service.ts';
 import { naqaaScanner } from '../../domain/naqaa/scanner-skill.ts';
 import { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
 import { KnowledgeAnswerService } from '../../core/knowledge/knowledge-answer.service.ts';
@@ -192,12 +194,15 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   const skillRegistry = new MapSkillRegistry();
   skillRegistry.register(demoContextSummary);
   skillRegistry.register(naqaaScanner);
+  skillRegistry.register(decisionReadinessFixture);
+  const readinessService = new DecisionReadinessService();
   const skillsRuntime = new SkillsRuntime({
     persistence,
     registry: skillRegistry,
     understanding: understandingService,
     memory: { fetchBounded: memoryFetcher },
     modelGateway: gateway,
+    readiness: readinessService,
   });
   const embeddingService = new EmbeddingService({
     persistence: embeddingPersistence,
