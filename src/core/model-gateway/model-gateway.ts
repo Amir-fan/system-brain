@@ -86,6 +86,22 @@ export interface ModelGateway {
   embedTexts(input: EmbedTextsInput): Promise<EmbedTextsOutput>;
 }
 
+/**
+ * K21 multimodal content part — the smallest project-agnostic shape a caller can
+ * pass as `ModelGatewayInput.input.parts` for a vision-capable model. Provider-
+ * specific conversion (e.g. OpenRouter/OpenAI `image_url`) lives ONLY in the
+ * provider adapter. `image` is carried as a data URL (no public bucket, no raw
+ * media persistence; never stored in Memory).
+ */
+export type ModelContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; dataUrl: string };
+
+/** Convenience input shape accepted by the OpenRouter adapter for multimodal calls. */
+export interface MultimodalInput {
+  parts: ModelContentPart[];
+}
+
 /** Trace metadata a capability may attach to a completed run (provider-neutral). */
 export type RunModelMetadata = {
   provider?: string;

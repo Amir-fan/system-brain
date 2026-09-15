@@ -82,16 +82,29 @@ export class OpenRouterGateway implements ModelGateway {
 
   async generateText(input: ModelGatewayInput): Promise<ModelGatewayOutput> {
     const started = Date.now();
-    const message = String((input.input as { message?: unknown } | undefined)?.message ?? '');
     // The control-plane resolver supplies the model id. If none was resolved,
     // fall back to this adapter's configured default model (the boot default).
     const model = input.modelId ?? this.defaultModel;
+
+    // K21 multimodal: when the caller passes `input.parts` (text + image content
+    // parts), build an OpenAI/OpenRouter content array. Provider-specific
+    // conversion lives here, never in a Skill or the Core gateway.
+    const raw = (input.input ?? {}) as Record<string, unknown>;
+    const parts = raw.parts as Array<{ type: string; text?: string; dataUrl?: string }> | undefined;
+    const content: unknown =
+      Array.isArray(parts) && parts.length > 0
+        ? parts.map((p) =>
+            p.type === 'image'
+              ? { type: 'image_url', image_url: { url: p.dataUrl } }
+              : { type: 'text', text: p.text ?? '' },
+          )
+        : String((input.input as { message?: unknown } | undefined)?.message ?? '');
 
     const res = await this.raw('/chat/completions', {
       method: 'POST',
       body: JSON.stringify({
         model,
-        messages: [{ role: 'user', content: message }],
+        messages: [{ role: 'user', content }],
       }),
     });
 
