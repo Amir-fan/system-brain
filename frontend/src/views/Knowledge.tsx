@@ -666,6 +666,9 @@ export function Knowledge() {
                       {subtitleOf(s)}
                     </div>
                     {s.description ? <p className="mt-0.5 truncate text-xs text-muted">{s.description}</p> : null}
+                    {ingestions[s.id]?.status === 'failed' && ingestions[s.id]?.errorMessage ? (
+                      <p className="mt-0.5 truncate text-xs text-rose-600">{ingestions[s.id]?.errorMessage}</p>
+                    ) : null}
                   </div>
                   <select
                     value={s.role}
