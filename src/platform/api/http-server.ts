@@ -64,6 +64,8 @@ import {
 } from './memory-handler.ts';
 import type { UnderstandingApiDeps } from './understanding-handler.ts';
 import { handleUnderstandingEvaluate } from './understanding-handler.ts';
+import type { SkillsApiDeps } from './skill-handler.ts';
+import { handleSkillExecute, handleSkillList } from './skill-handler.ts';
 import type { IngestionApiDeps } from './ingestion-handler.ts';
 import {
   handleCreateIngestion,
@@ -99,6 +101,7 @@ export interface HttpApiDeps {
   knowledgeAnswer?: KnowledgeAnswerApiDeps;
   memory?: MemoryApiDeps;
   understanding?: UnderstandingApiDeps;
+  skills?: SkillsApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -163,6 +166,9 @@ async function handleProject(
   }
   if (url.includes('/understanding')) {
     return handleUnderstanding(req, res, url, deps);
+  }
+  if (url.includes('/skills')) {
+    return handleSkills(req, res, url, deps);
   }
   if (url.includes('/retrieval/search')) {
     return handleRetrieval(req, res, url, deps);
@@ -548,6 +554,30 @@ async function handleUnderstanding(
     res,
     await handleUnderstandingEvaluate(deps.understanding, decodeURIComponent(match[1]), actor, body),
   );
+}
+
+async function handleSkills(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.skills) return notFound(res);
+  const listRe = /^\/v1\/projects\/([^/]+)\/skills$/.exec(url.split('?')[0]);
+  const execRe = /^\/v1\/projects\/([^/]+)\/skills\/([^/]+)\/execute$/.exec(url.split('?')[0]);
+  if (!listRe && !execRe) return notFound(res);
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+  let result;
+  if (listRe) {
+    if (req.method !== 'GET') return notFound(res);
+    result = await handleSkillList(deps.skills, decodeURIComponent(listRe[1]), actor);
+  } else {
+    if (req.method !== 'POST') return notFound(res);
+    const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
+    result = await handleSkillExecute(deps.skills, decodeURIComponent(execRe![1]), actor, decodeURIComponent(execRe![2]), body);
+  }
+  return sendSourceResult(res, result);
 }
 
 async function handleRetrieval(
