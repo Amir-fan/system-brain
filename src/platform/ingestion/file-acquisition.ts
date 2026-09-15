@@ -46,6 +46,11 @@ export function createFileAcquisitionAdapter(sources: IngestionSourceReader): So
           provenance: { kind: 'file', detail: 'pptx', byteCount: raw.bytes.length },
         };
       }
+      if (ext === 'pdf' || (raw.bytes[0] === 0x25 && raw.bytes[1] === 0x50 && raw.bytes[2] === 0x44)) {
+        // Scanned/image-only PDF: no usable text layer. Explicit, retryable
+        // requirement — never a generic failure, never binary-as-text garbage.
+        throw new IngestionFailure('OCR_REQUIRED', 'pdf without a usable text layer');
+      }
       if (!(TEXT_FILE_EXTENSIONS as readonly string[]).includes(ext)) {
         // Explicit, safe failure: no fake extraction, no binary-as-text garbage.
         throw new IngestionFailure('ACQUISITION_FAILED', `unsupported file format: ${ext || 'unknown'}`);

@@ -68,6 +68,9 @@ export interface ActorProject {
 
 export type SourceType = 'url' | 'file' | 'text' | 'github' | 'google_drive';
 
+/** K17 SourceRole — retrieval-policy metadata only (how the project uses the source). */
+export type SourceRole = 'primary' | 'supporting' | 'reference';
+
 export interface KipSource {
   id: string;
   sourceType: SourceType;
@@ -75,6 +78,7 @@ export interface KipSource {
   description?: string;
   externalUri?: string;
   status: string;
+  role: SourceRole;
   createdAt: string;
   updatedAt: string;
   archivedAt?: string;
@@ -216,7 +220,7 @@ export function apiKip() {
 
     listSources: (projectId: string) => call<KipSource[]>(`/v1/projects/${projectId}/sources`),
     getSource: (projectId: string, sourceId: string) => call<KipSource>(`/v1/projects/${projectId}/sources/${sourceId}`),
-    updateSource: (projectId: string, sourceId: string, body: { title?: string; description?: string; externalUri?: string }) =>
+    updateSource: (projectId: string, sourceId: string, body: { title?: string; description?: string; externalUri?: string; role?: SourceRole }) =>
       call<KipSource>(`/v1/projects/${projectId}/sources/${sourceId}`, json('PATCH', body)),
     archiveSource: (projectId: string, sourceId: string) =>
       call<KipSource>(`/v1/projects/${projectId}/sources/${sourceId}`, { method: 'DELETE' }),

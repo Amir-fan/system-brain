@@ -24,6 +24,12 @@ export const INGESTION_ERROR_CODES = [
   'RAW_ARTIFACT_MISSING',
   'UNSUPPORTED_SOURCE_TYPE',
   'ACQUISITION_FAILED',
+  /**
+   * K17 supported terminal state: the source is a scanned/image-only document with
+   * no usable text layer. This is NOT a generic failure — it is an explicit,
+   * retryable requirement for OCR, which K17 does not implement.
+   */
+  'OCR_REQUIRED',
   'NORMALIZATION_FAILED',
   'INGESTION_ALREADY_RUNNING',
   'INGESTION_NOT_FOUND',
@@ -139,6 +145,7 @@ const USER_MESSAGES: Record<IngestionErrorCode, string> = {
   RAW_ARTIFACT_MISSING: 'لا يوجد محتوى أصلي محفوظ لهذا المصدر.',
   UNSUPPORTED_SOURCE_TYPE: 'نوع هذا المصدر غير مدعوم للمعالجة بعد.',
   ACQUISITION_FAILED: 'تعذر قراءة محتوى المصدر.',
+  OCR_REQUIRED: 'PDF مصور، يحتاج OCR قبل إضافته للمعرفة.',
   NORMALIZATION_FAILED: 'تعذر تجهيز محتوى المصدر.',
   INGESTION_ALREADY_RUNNING: 'توجد معالجة قيد التنفيذ لهذا المصدر.',
   INGESTION_NOT_FOUND: 'سجل المعالجة غير موجود.',

@@ -19,7 +19,7 @@ import {
 import { useI18n } from '../i18n';
 import { useProjectContext } from '../contexts/ProjectContext';
 import { apiKip } from '../api/kip';
-import type { KipSource, SourceType, ExternalConnection, IngestionJobView, ChunkView, DocumentView, IndexStatusView, RetrievalHitView, KnowledgeAnswerView } from '../api/kip';
+import type { KipSource, SourceType, SourceRole, ExternalConnection, IngestionJobView, ChunkView, DocumentView, IndexStatusView, RetrievalHitView, KnowledgeAnswerView } from '../api/kip';
 import { Card, CardHeader, Button } from '../ui/primitives';
 
 type Mode = 'url' | 'text' | 'file' | 'github' | 'google_drive';
@@ -207,6 +207,20 @@ export function Knowledge() {
       setFormError(e instanceof Error ? e.message : t('knowledge.error.save'));
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const changeRole = async (source: KipSource, role: SourceRole) => {
+    if (!projectId || role === source.role) return;
+    const previous = source.role;
+    // Optimistic: role is policy metadata only — never triggers ingestion/indexing.
+    setSources((list) => list.map((x) => (x.id === source.id ? { ...x, role } : x)));
+    try {
+      await apiKip().updateSource(projectId, source.id, { role });
+      setToast(t('sources.role.saved'));
+    } catch (e) {
+      setSources((list) => list.map((x) => (x.id === source.id ? { ...x, role: previous } : x)));
+      setError(e instanceof Error ? e.message : t('sources.role.error'));
     }
   };
 
@@ -653,6 +667,16 @@ export function Knowledge() {
                     </div>
                     {s.description ? <p className="mt-0.5 truncate text-xs text-muted">{s.description}</p> : null}
                   </div>
+                  <select
+                    value={s.role}
+                    onChange={(e) => changeRole(s, e.target.value as SourceRole)}
+                    title={t('sources.role.help.' + s.role)}
+                    className="shrink-0 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                  >
+                    <option value="primary">{t('sources.role.primary')}</option>
+                    <option value="supporting">{t('sources.role.supporting')}</option>
+                    <option value="reference">{t('sources.role.reference')}</option>
+                  </select>
                   {ingestible(s.sourceType) ? (
                     <div className="flex shrink-0 items-center gap-2">
                       <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${statusClass(ingestions[s.id]?.status)}`}>

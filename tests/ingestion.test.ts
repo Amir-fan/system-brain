@@ -286,8 +286,10 @@ test('file source: TXT normalizes; binary PDF fails explicitly with no fake text
     projectId: 'p1', sourceId: 's1', actor: 'a',
   });
   assert.equal(badOut.job.status, 'failed');
-  assert.equal(badOut.job.errorCode, 'ACQUISITION_FAILED');
-  assert.equal(fpBad.outputs.length, 0, 'no output for an unsupported format');
+  // K17: a scanned/PDF file is an explicit, retryable OCR_REQUIRED terminal state —
+  // not a generic failure, and never binary-as-text garbage.
+  assert.equal(badOut.job.errorCode, 'OCR_REQUIRED');
+  assert.equal(fpBad.outputs.length, 0, 'no output for a source that needs OCR');
 });
 
 test('retry creates a new attempt and can succeed after a failure', async () => {
