@@ -42,7 +42,10 @@ import { MapSkillRegistry } from '../../core/skill/skill-registry.ts';
 import { SkillsRuntime } from '../../core/skill/skill-runtime.ts';
 import { demoContextSummary } from '../../core/skill/demo-context-summary.ts';
 import { decisionReadinessFixture } from '../../core/skill/decision-readiness-fixture.ts';
+import { conversationEligibilityFixture } from '../../core/skill/conversation-eligibility-fixture.ts';
 import { DecisionReadinessService } from '../../core/readiness/readiness.service.ts';
+import { ConversationService } from '../../core/conversation/conversation.service.ts';
+import { createConversationStorage } from '../provider/conversation.storage.ts';
 import { naqaaScanner } from '../../domain/naqaa/scanner-skill.ts';
 import { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
 import { KnowledgeAnswerService } from '../../core/knowledge/knowledge-answer.service.ts';
@@ -195,6 +198,7 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   skillRegistry.register(demoContextSummary);
   skillRegistry.register(naqaaScanner);
   skillRegistry.register(decisionReadinessFixture);
+  skillRegistry.register(conversationEligibilityFixture);
   const readinessService = new DecisionReadinessService();
   const skillsRuntime = new SkillsRuntime({
     persistence,
@@ -203,6 +207,29 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     memory: { fetchBounded: memoryFetcher },
     modelGateway: gateway,
     readiness: readinessService,
+  });
+  const conversationService = new ConversationService({
+    persistence: createConversationStorage(db),
+    understanding: understandingService,
+    skills: { execute: (input) => skillsRuntime.execute(input) },
+    memory: {
+      fetchBounded: async (projectId: string, ids: { subjectId?: string }) => ({
+        user: ids.subjectId ? (await memoryService.retrieveRelevant({ projectId, scope: 'user', subjectId: ids.subjectId, limit: 5 })).map(toRef) : [],
+        conversation: [],
+        case: [],
+      }),
+    },
+    defaultSkillId: 'demo.conversation-eligibility',
+    interactionsFor: (skillId: string) => {
+      const skill = skillRegistry.get(skillId);
+      const map: Record<string, { type: never; options?: string[]; allowOther?: boolean }> = {};
+      for (const r of skill?.readiness?.requirements ?? []) {
+        if (r.interaction) {
+          map[r.key] = { type: r.interaction.type as never, ...(r.interaction.options ? { options: r.interaction.options } : {}), ...(r.interaction.allowOther !== undefined ? { allowOther: r.interaction.allowOther } : {}) };
+        }
+      }
+      return map;
+    },
   });
   const embeddingService = new EmbeddingService({
     persistence: embeddingPersistence,
@@ -264,6 +291,7 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
       registry: skillRegistry,
       boundary: persistence,
     },
+    conversation: { service: conversationService, boundary: persistence },
     retrieval: {
       service: retrievalService,
       rolesAvailable: async (projectId: string) =>

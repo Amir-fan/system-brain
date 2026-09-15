@@ -66,6 +66,8 @@ import type { UnderstandingApiDeps } from './understanding-handler.ts';
 import { handleUnderstandingEvaluate } from './understanding-handler.ts';
 import type { SkillsApiDeps } from './skill-handler.ts';
 import { handleSkillExecute, handleSkillList } from './skill-handler.ts';
+import type { ConversationApiDeps } from './conversation-handler.ts';
+import { handleConversationMessage, handleCreateConversation } from './conversation-handler.ts';
 import type { IngestionApiDeps } from './ingestion-handler.ts';
 import {
   handleCreateIngestion,
@@ -102,6 +104,7 @@ export interface HttpApiDeps {
   memory?: MemoryApiDeps;
   understanding?: UnderstandingApiDeps;
   skills?: SkillsApiDeps;
+  conversation?: ConversationApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -169,6 +172,9 @@ async function handleProject(
   }
   if (url.includes('/skills')) {
     return handleSkills(req, res, url, deps);
+  }
+  if (url.includes('/conversations')) {
+    return handleConversations(req, res, url, deps);
   }
   if (url.includes('/retrieval/search')) {
     return handleRetrieval(req, res, url, deps);
@@ -577,6 +583,25 @@ async function handleSkills(
     const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
     result = await handleSkillExecute(deps.skills, decodeURIComponent(execRe![1]), actor, decodeURIComponent(execRe![2]), body);
   }
+  return sendSourceResult(res, result);
+}
+
+async function handleConversations(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.conversation) return notFound(res);
+  const createRe = /^\/v1\/projects\/([^/]+)\/conversations$/.exec(url.split('?')[0]);
+  const msgRe = /^\/v1\/projects\/([^/]+)\/conversations\/([^/]+)\/messages$/.exec(url.split('?')[0]);
+  if (!createRe && !msgRe) return notFound(res);
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+  const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
+  const result = createRe
+    ? await handleCreateConversation(deps.conversation, decodeURIComponent(createRe[1]), actor, body)
+    : await handleConversationMessage(deps.conversation, decodeURIComponent(msgRe![1]), actor, decodeURIComponent(msgRe![2]), body);
   return sendSourceResult(res, result);
 }
 

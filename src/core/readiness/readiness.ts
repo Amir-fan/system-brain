@@ -44,6 +44,12 @@ export interface DecisionRequirement {
    * context provider that is unavailable (INSUFFICIENT_CONTEXT).
    */
   question?: QuestionSpec;
+  /**
+   * Optional structured-interaction hint (K23). The conversation layer renders the
+   * missing requirement as a client-appropriate interaction of this type. Additive and
+   * optional — the readiness gate itself never reads it.
+   */
+  interaction?: { type: string; options?: string[]; allowOther?: boolean };
 }
 
 export interface KnownContextItem {
