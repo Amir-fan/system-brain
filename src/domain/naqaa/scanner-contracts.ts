@@ -4,12 +4,12 @@
  * @layer domain
  * @owner naqaa
  * @feature K21
- * @purpose Naqaa Scanner Foundation V1 contracts. Domain contracts ONLY — the generic
- *          Core, Memory, Understanding and Skills Runtime know nothing about these.
+ * @purpose Naqaa Scanner Foundation V1 contracts. Production boundary: KIP receives
+ *          DERIVED scan evidence (NaqaaScanEvidenceV1), NOT raw media. Raw images are
+ *          ephemeral/on-device. Context is SEPARATE from scan evidence.
  *
- * Boundaries: SCAN OBSERVATION != FIQH DECISION. This module contains NO religious
- * ruling fields (hayd/istihada/nifas/purity/prayer/fasting). UNKNOWN != FALSE: an
- * `unavailable` feature has a null value, never false/0/"".
+ * THE SCANNER OBSERVES. KIP INTERPRETS AND DECIDES (fiqh is NOT here).
+ * No religious ruling fields. UNKNOWN/UNAVAILABLE NEVER MEANS FALSE.
  */
 
 export type FeatureStatus = 'observed' | 'inferred' | 'user_provided' | 'unavailable';
@@ -27,66 +27,74 @@ export interface FeatureValue<T = unknown> {
 
 export type QualityRating = 'usable' | 'limited' | 'unusable';
 
-export interface ScanQuality {
-  rating: QualityRating;
-  usable: boolean;
-  reasons?: string[];
-}
-
-export interface ColorFeatures {
-  dominantColor?: FeatureValue<string>;
-  hue?: FeatureValue<string>;
-  saturation?: FeatureValue<string>;
+/** Group 1 — Color. */
+export interface ColorEvidence {
+  primaryColor?: FeatureValue<string>;
+  secondaryColor?: FeatureValue<string>;
   brightness?: FeatureValue<string>;
+  saturation?: FeatureValue<string>;
   contrast?: FeatureValue<string>;
   colorUniformity?: FeatureValue<string>;
+  rgb?: FeatureValue<[number, number, number]>;
 }
 
-export interface PhysicalFeatures {
-  /** Non-visual properties an image cannot reliably MEASURE — never `observed`. */
-  viscosity?: FeatureValue<string>;
-  density?: FeatureValue<string>;
-  fluidity?: FeatureValue<string>;
+/** Group 2 — Physical, VISUALLY-ESTIMATED ONLY. Never a direct measurement. */
+export interface PhysicalEvidence {
+  apparentFluidity?: FeatureValue<string>;
+  apparentViscosity?: FeatureValue<string>;
+  apparentDensity?: FeatureValue<string>;
   wateriness?: FeatureValue<string>;
-  /** Visually observable when the model genuinely sees them. */
-  clotting?: FeatureValue<string>;
+  apparentClotting?: FeatureValue<string>;
+  masses?: FeatureValue<string>;
+  strings?: FeatureValue<string>;
   homogeneity?: FeatureValue<string>;
 }
 
-export interface TextureFeatures {
+/** Group 3 — Texture. */
+export interface TextureEvidence {
   smoothness?: FeatureValue<string>;
+  roughness?: FeatureValue<string>;
   granularity?: FeatureValue<string>;
   clustering?: FeatureValue<string>;
   textureUniformity?: FeatureValue<string>;
 }
 
-export interface SpatialFeatures {
+/** Group 4 — Spatial. */
+export interface SpatialEvidence {
   stainArea?: FeatureValue<string>;
   stainShape?: FeatureValue<string>;
   droplets?: FeatureValue<string>;
+  streaks?: FeatureValue<string>;
   spreadRatio?: FeatureValue<string>;
-  edgeThickness?: FeatureValue<string>;
+  edgeCharacteristics?: FeatureValue<string>;
+  distribution?: FeatureValue<string>;
 }
 
-export interface ContextualFeatures {
-  occurredAt?: FeatureValue<string>;
-  cycleDay?: FeatureValue<string>;
-  pregnancyStatus?: FeatureValue<string>;
-  duration?: FeatureValue<string>;
+/** Group 5 — Quality + Confidence. Feature-level confidence lives on features. */
+export interface ScanQualityEvidence {
+  rating: QualityRating;
+  usable: boolean;
+  lightingQuality?: string;
+  focusClarity?: string;
+  reasons?: string[];
 }
 
-export interface NaqaaScanObservationV1 {
+/**
+ * Derived scan evidence. Raw media is NEVER part of this contract.
+ * schemaVersion: 1; five groups = color / physical / texture / spatial / quality.
+ * Context (cycle day, pregnancy, ...) is NOT evidence — it is separate.
+ */
+export interface NaqaaScanEvidenceV1 {
   schemaVersion: 1;
-  observationId?: string;
+  evidenceId?: string;
   occurredAt: string;
   scannerVersion: string;
-  color: ColorFeatures;
-  physical: PhysicalFeatures;
-  texture: TextureFeatures;
-  spatial: SpatialFeatures;
-  contextual: ContextualFeatures;
-  quality: ScanQuality;
-  provenance: { scanSource: FeatureSource; modelInfo?: { provider?: string; model?: string } };
+  color: ColorEvidence;
+  physical: PhysicalEvidence;
+  texture: TextureEvidence;
+  spatial: SpatialEvidence;
+  quality: ScanQualityEvidence;
+  provenance: { scanSource: FeatureSource; note?: string };
 }
 
 export type ScannerStatus = 'completed' | 'needs_information' | 'unusable' | 'failed';
@@ -104,14 +112,21 @@ export interface ScannerQuestion {
   reason: string;
 }
 
+/** Bounded user/case context combined WITHOUT contaminating the scan evidence. */
+export interface ScannerContextUsage {
+  userCount: number;
+  conversationCount: number;
+  caseCount: number;
+}
+
 export interface NaqaaScannerResultV1 {
   status: ScannerStatus;
-  observation?: NaqaaScanObservationV1;
+  evidence?: NaqaaScanEvidenceV1;
   sufficiency: ScannerSufficiency;
   missingInformation: MissingInformation[];
   questionNeeded: boolean;
   question?: ScannerQuestion;
   scannerVersion: string;
-  modelInfo?: { provider?: string; model?: string };
-  observability: { runId?: string; visionCalls: number; memoryItemsUsed: number };
+  contextUsed: ScannerContextUsage;
+  observability: { runId?: string; memoryItemsUsed: number };
 }

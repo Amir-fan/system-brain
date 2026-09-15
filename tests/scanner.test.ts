@@ -1,81 +1,74 @@
 /**
- * K21 Naqaa Scanner — deterministic scanner logic tests (mocked model capability).
- * The REAL vision path (media -> gateway -> vision_scan -> model) is proven live in
- * scripts/_k21scanner.mjs and the vision feasibility gate.
+ * K21 Naqaa Scanner — production evidence-contract tests (deterministic; no media/model).
+ * Real API + Memory + isolation are proven live in scripts/_k21evidence.mjs.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { naqaaScanner } from '../src/domain/naqaa/scanner-skill.ts';
-import { SkillFailure } from '../src/core/skill/skill.ts';
-import type { SkillExecutionContext, SkillModelCapability } from '../src/core/skill/skill.ts';
+import type { SkillExecutionContext } from '../src/core/skill/skill.ts';
 import type { NaqaaScannerResultV1 } from '../src/domain/naqaa/scanner-contracts.ts';
 
-const img = 'data:image/png;base64,AAA=';
-const model = (text: string): SkillModelCapability => ({
-  async generateText() { return { text, provider: 'openrouter', model: 'gemini-3.5-flash' }; },
-});
-const visionJson = {
-  quality: { rating: 'usable', reasons: [] },
-  color: { dominantColor: 'red', saturation: 'high', brightness: 'medium', colorUniformity: 'uniform' },
-  physical: { clotting: 'none_visible' },
-  texture: { smoothness: 'smooth', granularity: 'fine' },
-  spatial: { stainArea: 'medium', stainShape: 'irregular', spreadRatio: 'low' },
+const evidence = {
+  schemaVersion: 1, occurredAt: '2026-09-15T10:00:00Z', scannerVersion: 'naqaa.ondevice@1',
+  color: { primaryColor: { value: 'dark red', status: 'observed', source: 'vision', confidence: 0.9 } },
+  physical: { apparentClotting: { value: 'none_visible', status: 'inferred', source: 'vision' } },
+  texture: { smoothness: { value: 'smooth', status: 'observed', source: 'vision' } },
+  spatial: { stainShape: { value: 'irregular', status: 'observed', source: 'vision' } },
+  quality: { rating: 'usable' },
+  provenance: { scanSource: 'vision' },
 };
 const ctx = (over: Partial<SkillExecutionContext>): SkillExecutionContext => ({
-  projectId: 'p', actor: 'a', input: { media: { dataUrl: img } }, memory: [], model: model(JSON.stringify(visionJson)), ...over,
+  projectId: 'p', actor: 'a', input: { evidence, context: { cycleDay: '4' } }, memory: [], ...over,
 });
 
-test('A skill registration/resolution', () => {
+test('A skill registration + requirements (no model, memory yes)', () => {
   assert.equal(naqaaScanner.id, 'naqaa.scanner');
   assert.equal(naqaaScanner.version, 1);
-  assert.deepEqual(naqaaScanner.requirements, { understanding: false, memory: true, knowledge: false, model: true });
+  assert.deepEqual(naqaaScanner.requirements, { understanding: false, memory: true, knowledge: false, model: false });
 });
 
-test('B complete structured observation: five groups present', async () => {
-  const r = await naqaaScanner.execute(ctx({ input: { media: { dataUrl: img }, context: { cycleDay: '3' } } })) as NaqaaScannerResultV1;
-  assert.equal(r.status, 'completed');
-  const o = r.observation!;
-  for (const g of ['color', 'physical', 'texture', 'spatial', 'contextual']) assert.ok(o[g as keyof typeof o], g);
+test('B final five groups: color/physical/texture/spatial/quality', async () => {
+  const r = await naqaaScanner.execute(ctx({})) as NaqaaScannerResultV1;
+  for (const g of ['color', 'physical', 'texture', 'spatial', 'quality']) assert.ok(r.evidence![g as keyof typeof r.evidence], g);
 });
 
-test('C provenance: vision vs memory vs user distinguishable', async () => {
-  const memory = [
-    { id: 'm1', scope: 'user', memoryType: 'preference', memoryKey: 'pregnancy_status', payload: { value: 'unknown' } },
-  ] as never[];
-  const r = await naqaaScanner.execute(ctx({
-    input: { media: { dataUrl: img }, context: { cycleDay: '5' } },
-    memory,
-  })) as NaqaaScannerResultV1;
-  const o = r.observation!;
-  assert.equal(o.color.dominantColor?.source, 'vision');
-  assert.equal(o.contextual.cycleDay?.source, 'user');
-  assert.equal(o.contextual.pregnancyStatus?.source, 'memory');
+test('C provenance preserved: evidence source=vision, memory context separate', async () => {
+  const memory = [{ id: 'm1', scope: 'user', memoryType: 'preference', memoryKey: 'cycle_day', payload: { value: '2' } }] as never[];
+  const r = await naqaaScanner.execute(ctx({ input: { evidence }, memory })) as NaqaaScannerResultV1;
+  assert.equal(r.evidence!.color.primaryColor?.source, 'vision'); // evidence provenance untouched
+  assert.equal(r.contextUsed.userCount, 1);                       // memory combined, not into evidence
+  assert.equal(r.observability.memoryItemsUsed, 1);
 });
 
-test('D unavailable image-only physical property is null, never observed', async () => {
-  const r = await naqaaScanner.execute(ctx({ input: { media: { dataUrl: img }, context: { cycleDay: '3' } } })) as NaqaaScannerResultV1;
-  const v = r.observation!.physical.viscosity;
-  assert.equal(v?.status, 'unavailable');
-  assert.equal(v?.value, null);
+test('D apparent physical props are visually-estimated, never direct measurement', async () => {
+  const r = await naqaaScanner.execute(ctx({ input: { evidence, context: { cycleDay: '4' } } })) as NaqaaScannerResultV1;
+  assert.equal(r.evidence!.physical.apparentClotting?.status, 'inferred'); // not 'observed'
 });
 
-test('E UNKNOWN != FALSE: pregnancy status unavailable is null not false', async () => {
-  const r = await naqaaScanner.execute(ctx({ input: { media: { dataUrl: img }, context: { cycleDay: '3' } } })) as NaqaaScannerResultV1;
-  const c = r.observation!.contextual;
-  assert.equal(c.pregnancyStatus ?? undefined, undefined); // absent, not false
-  assert.equal(JSON.stringify(c).includes('"false"'), false);
+test('E unknown != false', async () => {
+  const r = await naqaaScanner.execute(ctx({ input: { evidence, context: { cycleDay: '4' } } })) as NaqaaScannerResultV1;
+  const phys = r.evidence!.physical as Record<string, unknown>;
+  assert.equal('apparentViscosity' in phys, false); // absent, not false/0/''
 });
 
-test('G missing required information -> needs_information + question', async () => {
-  const r = await naqaaScanner.execute(ctx({ input: { media: { dataUrl: img } } })) as NaqaaScannerResultV1;
+test('F bounded memory combined without contaminating evidence', async () => {
+  const memory = [{ id: 'm1', scope: 'user', memoryType: 'preference', memoryKey: 'pregnancy_status', payload: { value: 'unknown' } }] as never[];
+  const r = await naqaaScanner.execute(ctx({ input: { evidence }, memory })) as NaqaaScannerResultV1;
+  assert.equal(r.evidence!.quality.rating, 'usable');          // evidence unchanged
+  assert.equal(r.contextUsed.userCount, 1);                    // memory counted separately
+  assert.equal(r.observability.memoryItemsUsed, 1);
+});
+
+test('G missing required context -> needs_information + question', async () => {
+  const r = await naqaaScanner.execute(ctx({ input: { evidence } })) as NaqaaScannerResultV1;
   assert.equal(r.status, 'needs_information');
   assert.equal(r.questionNeeded, true);
   assert.ok(r.missingInformation.some((m) => m.key === 'cycle_day'));
   assert.equal(r.question?.key, 'cycle_day');
 });
 
-test('H sufficient scanner input with cycleDay -> completed, no question, NO fiqh', async () => {
-  const r = await naqaaScanner.execute(ctx({ input: { media: { dataUrl: img }, context: { cycleDay: '3' } } })) as NaqaaScannerResultV1;
+test('H sufficient evidence + context -> completed/sufficient, no fiqh', async () => {
+  const r = await naqaaScanner.execute(ctx({ input: { evidence, context: { cycleDay: '4' } } })) as NaqaaScannerResultV1;
   assert.equal(r.status, 'completed');
   assert.equal(r.sufficiency, 'sufficient');
   assert.equal(r.questionNeeded, false);
@@ -83,21 +76,34 @@ test('H sufficient scanner input with cycleDay -> completed, no question, NO fiq
   assert.equal(/hayd|istihada|nifas|purity|prayer|fasting|حيض|استحاضة|نفاس/.test(s), false, 'no fiqh fields');
 });
 
-test('I unusable media -> unusable, no fabricated features', async () => {
-  const bad = { quality: { rating: 'unusable', reasons: ['too dark'] }, color: {} };
-  const r = await naqaaScanner.execute(ctx({ model: model(JSON.stringify(bad)) })) as NaqaaScannerResultV1;
+test('I unusable scan quality -> unusable safely, no fabricated evidence', async () => {
+  const bad = { ...evidence, quality: { rating: 'unusable', reasons: ['too dark'] } };
+  const r = await naqaaScanner.execute(ctx({ input: { evidence: bad } })) as NaqaaScannerResultV1;
   assert.equal(r.status, 'unusable');
   assert.equal(r.sufficiency, 'unusable');
-  assert.equal(r.observation, undefined);
 });
 
-test('J malformed vision output -> safe failure (throws)', async () => {
-  await assert.rejects(naqaaScanner.execute(ctx({ model: model('here is some prose, not json') })), (e: unknown) => (e as Error) instanceof SkillFailure);
+test('J malformed evidence payload -> validateInput rejects (safe failure)', () => {
+  assert.equal(naqaaScanner.validateInput({ evidence: { color: {} } }).ok, false); // missing groups
+  assert.equal(naqaaScanner.validateInput({}).ok, false);                          // no evidence
+  assert.equal(naqaaScanner.validateInput(null).ok, false);
 });
 
-test('N no memory pollution (result only; no memory writes) + bounded memory used', async () => {
-  const memory = [{ id: 'm1', scope: 'user', memoryType: 'preference', memoryKey: 'cycle_day', payload: { value: '2' } }] as never[];
-  const r = await naqaaScanner.execute(ctx({ input: { media: { dataUrl: img } }, memory })) as NaqaaScannerResultV1;
-  assert.equal(r.observability.memoryItemsUsed, 1);
-  assert.equal(r.observation!.contextual.cycleDay?.source, 'memory');
+test('M LearningExampleV1 representable from a completed scan (not persisted)', async () => {
+  const r = await naqaaScanner.execute(ctx({ input: { evidence, context: { cycleDay: '4' } } })) as NaqaaScannerResultV1;
+  const ex = { projectId: 'p', task: 'naqaa.scan.assessment', occurredAt: r.evidence?.occurredAt, observation: r.evidence, modelVersion: 'naqaa.ondevice@1', modelOutput: r.evidence, labelProvenance: 'unverified', verificationStatus: 'unverified', quality: r.evidence?.quality.rating, eligibility: { consentGranted: true, eligible: true } };
+  assert.equal(ex.task, 'naqaa.scan.assessment');
+  assert.ok(ex.observation && ex.eligibility);
+  // NOT persisted to any Learning Dataset (no such table/API here)
+});
+
+test('N no memory pollution (result only; no writes)', async () => {
+  const r = await naqaaScanner.execute(ctx({ input: { evidence, context: { cycleDay: '4' } } })) as NaqaaScannerResultV1;
+  assert.equal(r.observability.memoryItemsUsed, 0); // read-only
+});
+
+test('O zero religious decision fields', async () => {
+  const r = await naqaaScanner.execute(ctx({ input: { evidence, context: { cycleDay: '4' } } })) as NaqaaScannerResultV1;
+  const keys = Object.keys(r).join(',');
+  assert.equal(/hayd|istihada|nifas|purity|prayer|fasting/i.test(keys), false);
 });
