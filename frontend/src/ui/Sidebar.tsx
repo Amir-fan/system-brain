@@ -8,6 +8,7 @@ import {
   Plug,
   FileText,
   Settings,
+  FlaskConical,
   Hexagon,
   Crown,
 } from 'lucide-react';
@@ -21,6 +22,7 @@ const ITEMS = [
   { key: 'nav.knowledge', icon: BookOpen, to: '/knowledge' },
   { key: 'nav.skills', icon: Sparkles },
   { key: 'nav.ai', icon: BrainCircuit, to: '/ai-models' },
+  { key: 'nav.tests', icon: FlaskConical, to: '/tests' },
   { key: 'nav.users', icon: Users },
   { key: 'nav.integrations', icon: Plug },
   { key: 'nav.reports', icon: FileText },

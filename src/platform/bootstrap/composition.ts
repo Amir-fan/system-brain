@@ -46,6 +46,7 @@ import { conversationEligibilityFixture } from '../../core/skill/conversation-el
 import { DecisionReadinessService } from '../../core/readiness/readiness.service.ts';
 import { ConversationService } from '../../core/conversation/conversation.service.ts';
 import { createConversationStorage } from '../provider/conversation.storage.ts';
+import { createEvaluationStorage } from '../provider/evaluation.storage.ts';
 import { naqaaScanner } from '../../domain/naqaa/scanner-skill.ts';
 import { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
 import { KnowledgeAnswerService } from '../../core/knowledge/knowledge-answer.service.ts';
@@ -291,7 +292,11 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
       registry: skillRegistry,
       boundary: persistence,
     },
-    conversation: { service: conversationService, boundary: persistence },
+    conversation: {
+      service: conversationService,
+      boundary: persistence,
+      evaluation: { storage: createEvaluationStorage(db), boundary: persistence },
+    },
     retrieval: {
       service: retrievalService,
       rolesAvailable: async (projectId: string) =>

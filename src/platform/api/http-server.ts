@@ -67,7 +67,7 @@ import { handleUnderstandingEvaluate } from './understanding-handler.ts';
 import type { SkillsApiDeps } from './skill-handler.ts';
 import { handleSkillExecute, handleSkillList } from './skill-handler.ts';
 import type { ConversationApiDeps } from './conversation-handler.ts';
-import { handleConversationMessage, handleCreateConversation } from './conversation-handler.ts';
+import { handleConversationMessage, handleCreateConversation, handleSaveConversationEvaluation, handleListConversationEvaluations } from './conversation-handler.ts';
 import type { IngestionApiDeps } from './ingestion-handler.ts';
 import {
   handleCreateIngestion,
@@ -593,17 +593,36 @@ async function handleConversations(
   deps: HttpApiDeps,
 ): Promise<void> {
   if (!deps.conversation) return notFound(res);
-  const createRe = /^\/v1\/projects\/([^/]+)\/conversations$/.exec(url.split('?')[0]);
-  const msgRe = /^\/v1\/projects\/([^/]+)\/conversations\/([^/]+)\/messages$/.exec(url.split('?')[0]);
-  if (!createRe && !msgRe) return notFound(res);
-  const actor = await resolveActor(req, res, deps);
-  if (!actor) return;
-  const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
-  const result = createRe
-    ? await handleCreateConversation(deps.conversation, decodeURIComponent(createRe[1]), actor, body)
-    : await handleConversationMessage(deps.conversation, decodeURIComponent(msgRe![1]), actor, decodeURIComponent(msgRe![2]), body);
-  return sendSourceResult(res, result);
-}
+    const createRe = /^\/v1\/projects\/([^/]+)\/conversations$/.exec(url.split('?')[0]);
+    const msgRe = /^\/v1\/projects\/([^/]+)\/conversations\/([^/]+)\/messages$/.exec(url.split('?')[0]);
+    const evalListRe = /^\/v1\/projects\/([^/]+)\/conversations\/evaluations$/.exec(url.split('?')[0]);
+    const evalSaveRe = /^\/v1\/projects\/([^/]+)\/conversations\/([^/]+)\/evaluation$/.exec(url.split('?')[0]);
+    if (!createRe && !msgRe && !evalListRe && !evalSaveRe) return notFound(res);
+    const actor = await resolveActor(req, res, deps);
+    if (!actor) return;
+    const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
+
+    if (evalListRe) {
+      if (req.method !== 'GET') return notFound(res);
+      return sendSourceResult(res, await handleListConversationEvaluations(deps.conversation, decodeURIComponent(evalListRe[1]), actor));
+    }
+    if (evalSaveRe) {
+      if (req.method !== 'POST') return notFound(res);
+      return sendSourceResult(
+        res,
+        await handleSaveConversationEvaluation(deps.conversation, decodeURIComponent(evalSaveRe[1]), actor, decodeURIComponent(evalSaveRe[2]), body),
+      );
+    }
+    if (createRe) {
+      if (req.method !== 'POST') return notFound(res);
+      return sendSourceResult(res, await handleCreateConversation(deps.conversation, decodeURIComponent(createRe[1]), actor, body));
+    }
+    if (msgRe) {
+      if (req.method !== 'POST') return notFound(res);
+      return sendSourceResult(res, await handleConversationMessage(deps.conversation, decodeURIComponent(msgRe[1]), actor, decodeURIComponent(msgRe[2]), body));
+    }
+    return notFound(res);
+  }
 
 async function handleRetrieval(
   req: import('node:http').IncomingMessage,

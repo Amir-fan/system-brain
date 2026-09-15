@@ -13,10 +13,12 @@ import type { ProjectBoundaryReaders } from '../../core/authorization/project-bo
 import type { Actor } from '../../core/authorization/actor.ts';
 import { ConversationFailure, type ConversationMode } from '../../core/conversation/conversation.ts';
 import type { ConversationService } from '../../core/conversation/conversation.service.ts';
+import type { EvaluationStorage, ProblemCategory } from '../provider/evaluation.storage.ts';
 
 export interface ConversationApiDeps {
   service: ConversationService;
   boundary: ProjectBoundaryReaders;
+  evaluation?: { storage: EvaluationStorage; boundary: ProjectBoundaryReaders };
 }
 
 export type ConversationApiResult =
@@ -25,7 +27,9 @@ export type ConversationApiResult =
 
 const ok = (data: unknown, status = 200): ConversationApiResult => ({ ok: true, status, data });
 const fail = (message: string, category: string, status = 400, code?: string): ConversationApiResult => ({
-  ok: false, status, error: { message, category, ...(code ? { code } : {}) },
+  ok: false,
+  status,
+  error: { message, category, ...(code ? { code } : {}) },
 });
 
 const isMode = (v: unknown): v is ConversationMode => v === 'contextual' || v === 'private';
@@ -68,5 +72,60 @@ export async function handleConversationMessage(
       return fail(e.message, 'conversation', e.code === 'CONVERSATION_NOT_FOUND' ? 404 : 400, e.code);
     }
     return fail('تعذر معالجة الرسالة.', 'conversation', 500);
+  }
+}
+
+const CATEGORIES: ProblemCategory[] = ['understanding', 'clarification', 'context', 'source', 'result', 'wording', 'other'];
+
+/** POST /v1/projects/{p}/conversations/{id}/evaluation — tiny admin test evaluation. */
+export async function handleSaveConversationEvaluation(
+  deps: ConversationApiDeps,
+  projectId: string,
+  actor: Actor,
+  conversationId: string,
+  body: Record<string, unknown>,
+): Promise<ConversationApiResult> {
+  if (!deps.evaluation) return fail('evaluation storage not configured', 'runtime', 500);
+  const auth = await authorizeProject(deps.evaluation.boundary, projectId, actor, 'write');
+  if (!auth.ok) return fail(auth.message, auth.kind === 'not_found' ? 'not_found' : 'authorization', auth.kind === 'not_found' ? 404 : 403);
+  if (typeof body.isCorrect !== 'boolean') return fail('isCorrect must be boolean', 'validation');
+  const rawCategory = body.problemCategory;
+  const problemCategory = typeof rawCategory === 'string' && CATEGORIES.includes(rawCategory as ProblemCategory)
+    ? (rawCategory as ProblemCategory)
+    : undefined;
+  const note = typeof body.note === 'string' && body.note.trim() ? body.note.trim() : undefined;
+  const runId = typeof body.runId === 'string' && body.runId ? body.runId : undefined;
+  try {
+    const record = await deps.evaluation.storage.save({
+      id: crypto.randomUUID(),
+      projectId,
+      conversationId,
+      runId,
+      testerSubject: actor,
+      isCorrect: body.isCorrect,
+      problemCategory,
+      note,
+      createdAt: new Date().toISOString(),
+    });
+    return ok({ id: record.id, ...(record.problemCategory ? { problemCategory: record.problemCategory } : {}) }, 201);
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : 'تعذر حفظ التقييم', 'runtime', 500);
+  }
+}
+
+/** GET /v1/projects/{p}/conversations/evaluations — recent evaluations for this tester. */
+export async function handleListConversationEvaluations(
+  deps: ConversationApiDeps,
+  projectId: string,
+  actor: Actor,
+): Promise<ConversationApiResult> {
+  if (!deps.evaluation) return fail('evaluation storage not configured', 'runtime', 500);
+  const auth = await authorizeProject(deps.evaluation.boundary, projectId, actor, 'read');
+  if (!auth.ok) return fail(auth.message, auth.kind === 'not_found' ? 'not_found' : 'authorization', auth.kind === 'not_found' ? 404 : 403);
+  try {
+    const items = await deps.evaluation.storage.listRecent(projectId, actor, 10);
+    return ok(items);
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : 'تعذر جلب التقييمات', 'runtime', 500);
   }
 }
