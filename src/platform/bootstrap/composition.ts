@@ -35,6 +35,9 @@ import { createEmbeddingPersistence } from '../provider/embedding.storage.ts';
 import { createRetrievalStorage } from '../provider/retrieval.storage.ts';
 import { createMemoryStorage } from '../provider/memory.storage.ts';
 import { MemoryService } from '../../core/memory/memory.service.ts';
+import type { MemoryRecord } from '../../core/memory/memory.ts';
+import type { MemoryReference } from '../../core/understanding/understanding.ts';
+import { UnderstandingService } from '../../core/understanding/understanding.service.ts';
 import { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
 import { KnowledgeAnswerService } from '../../core/knowledge/knowledge-answer.service.ts';
 import { EmbeddingService } from '../../core/embedding/embedding.service.ts';
@@ -175,6 +178,8 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   });
   const embeddingPersistence = createEmbeddingPersistence(db);
   const memoryService = new MemoryService(createMemoryStorage(db));
+  const toRef = (r: MemoryRecord): MemoryReference => ({ id: r.id, scope: r.scope, memoryType: r.memoryType, memoryKey: r.memoryKey, payload: r.payload });
+  const understandingService = new UnderstandingService();
   const embeddingService = new EmbeddingService({
     persistence: embeddingPersistence,
     sources: {
@@ -225,6 +230,15 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
       boundary: persistence,
     },
     memory: { service: memoryService, boundary: persistence },
+    understanding: {
+      service: understandingService,
+      contextFetcher: async (projectId: string, ids: { subjectId?: string; conversationId?: string; caseId?: string }) => ({
+        user: ids.subjectId ? (await memoryService.retrieveRelevant({ projectId, scope: 'user', subjectId: ids.subjectId, limit: 5 })).map(toRef) : [],
+        conversation: ids.conversationId ? (await memoryService.retrieveRelevant({ projectId, scope: 'conversation', subjectId: ids.conversationId, limit: 5 })).map(toRef) : [],
+        case: ids.caseId ? (await memoryService.retrieveRelevant({ projectId, scope: 'case', subjectId: ids.caseId, limit: 5 })).map(toRef) : [],
+      }),
+      boundary: persistence,
+    },
     retrieval: {
       service: retrievalService,
       rolesAvailable: async (projectId: string) =>

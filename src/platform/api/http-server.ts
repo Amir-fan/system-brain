@@ -62,6 +62,8 @@ import {
   handleMemoryRetrieve,
   handleMemorySupersede,
 } from './memory-handler.ts';
+import type { UnderstandingApiDeps } from './understanding-handler.ts';
+import { handleUnderstandingEvaluate } from './understanding-handler.ts';
 import type { IngestionApiDeps } from './ingestion-handler.ts';
 import {
   handleCreateIngestion,
@@ -96,6 +98,7 @@ export interface HttpApiDeps {
   retrieval?: RetrievalApiDeps;
   knowledgeAnswer?: KnowledgeAnswerApiDeps;
   memory?: MemoryApiDeps;
+  understanding?: UnderstandingApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -157,6 +160,9 @@ async function handleProject(
   }
   if (url.includes('/memory')) {
     return handleMemory(req, res, url, deps);
+  }
+  if (url.includes('/understanding')) {
+    return handleUnderstanding(req, res, url, deps);
   }
   if (url.includes('/retrieval/search')) {
     return handleRetrieval(req, res, url, deps);
@@ -523,6 +529,25 @@ async function handleMemory(
     else result = await handleMemoryRetrieve(deps.memory, projectId, actor, body);
   }
   return sendSourceResult(res, result);
+}
+
+async function handleUnderstanding(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (!deps.understanding) return notFound(res);
+  if (req.method !== 'POST') return notFound(res);
+  const match = /^\/v1\/projects\/([^/]+)\/understanding\/evaluate$/.exec(url.split('?')[0]);
+  if (!match) return notFound(res);
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+  const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
+  return sendSourceResult(
+    res,
+    await handleUnderstandingEvaluate(deps.understanding, decodeURIComponent(match[1]), actor, body),
+  );
 }
 
 async function handleRetrieval(

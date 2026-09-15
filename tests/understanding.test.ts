@@ -1,0 +1,102 @@
+/**
+ * K19 Understanding Foundation V1 — deterministic engine tests.
+ * The service is deterministic (0 model calls). Memory integration/isolation and
+ * "no silent mutation" are additionally proven live in scripts/k19-acceptance.mjs.
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { UnderstandingService } from '../src/core/understanding/understanding.service.ts';
+import type { BoundedUnderstandingContext, MemoryReference } from '../src/core/understanding/understanding.ts';
+
+const svc = new UnderstandingService();
+const ref = (over: Partial<MemoryReference> = {}): MemoryReference => ({
+  id: 'm1', scope: 'user', memoryType: 'preference', memoryKey: 'preferred_time', payload: { value: '09:00' }, ...over,
+});
+const ctx = (arr: MemoryReference[] = []): BoundedUnderstandingContext => ({ user: arr, conversation: [], case: [] });
+
+test('dialogue acts', async () => {
+  assert.equal((await svc.evaluate({ projectId: 'p', text: 'What time is my appointment?' })).dialogueAct, 'QUESTION');
+  assert.equal((await svc.evaluate({ projectId: 'p', text: 'The weather is nice.' })).dialogueAct, 'STATEMENT');
+  assert.equal((await svc.evaluate({ projectId: 'p', text: 'No, I meant 10:00.' })).dialogueAct, 'CORRECTION');
+  assert.equal((await svc.evaluate({ projectId: 'p', text: 'Yes, that is what I meant.' })).dialogueAct, 'CONFIRMATION');
+  assert.equal((await svc.evaluate({ projectId: 'p', text: 'No, not that one.' })).dialogueAct, 'REJECTION');
+  assert.equal((await svc.evaluate({ projectId: 'p', text: 'And what about tomorrow?' })).dialogueAct, 'FOLLOW_UP');
+  assert.equal((await svc.evaluate({ projectId: 'p', text: 'Book the appointment.' })).dialogueAct, 'COMMAND');
+});
+
+test('A simple question -> QUESTION, CLEAR, one issue', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: 'What time is my appointment?' });
+  assert.equal(r.status, 'CLEAR');
+  assert.equal(r.dialogueAct, 'QUESTION');
+  assert.equal(r.issues.length, 1);
+});
+
+test('B multi-issue -> two issues, no answer', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: 'What time is my appointment, and what documents do I need?' });
+  assert.equal(r.issues.length, 2);
+});
+
+test('C correction + memory -> structured 09:00 -> 10:00, no silent write', async () => {
+  const inputCtx = ctx([ref()]);
+  const r = await svc.evaluate({ projectId: 'p', text: 'No, I meant 10:00.', context: inputCtx });
+  assert.equal(r.dialogueAct, 'CORRECTION');
+  assert.equal(r.corrections.length, 1);
+  assert.equal(r.corrections[0].target, 'preferred_time');
+  assert.equal(r.corrections[0].old, '09:00');
+  assert.equal(r.corrections[0].new, '10:00');
+  // No silent mutation: the provided context is untouched, corrections are returned only.
+  assert.equal((inputCtx.user[0].payload as Record<string, unknown>).value, '09:00');
+});
+
+test('D confirmation -> CONFIRMATION, CLEAR', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: 'Yes, that is what I meant.' });
+  assert.equal(r.dialogueAct, 'CONFIRMATION');
+  assert.equal(r.status, 'CLEAR');
+});
+
+test('E rejection without resolvable alternative -> NEEDS_CLARIFICATION', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: 'No, not that one.', context: ctx([]) });
+  assert.equal(r.dialogueAct, 'REJECTION');
+  assert.equal(r.status, 'NEEDS_CLARIFICATION');
+  assert.ok(r.clarification);
+});
+
+test('F resolvable reference -> CLEAR', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: 'What about that one?', context: ctx([ref({ id: 'only', memoryKey: 'appointment' })]) });
+  assert.equal(r.status, 'CLEAR');
+  assert.equal(r.references.resolved, true);
+});
+
+test('G unresolved material reference -> NEEDS_CLARIFICATION, no guessed referent', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: 'What about that one?', context: ctx([]) });
+  assert.equal(r.status, 'NEEDS_CLARIFICATION');
+  assert.equal(r.references.resolved, false);
+  assert.equal(r.references.referent, undefined);
+  assert.equal(r.ambiguity.material, true);
+});
+
+test('H temporal normalization against explicit timestamp', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: 'My appointment is tomorrow at 10.', requestTimestamp: '2026-09-15T10:00:00Z' });
+  const date = r.facts.find((f) => f.key === 'date');
+  const time = r.facts.find((f) => f.key === 'time');
+  assert.equal(date?.value, '2026-09-16');
+  assert.equal(date?.original, 'tomorrow');
+  assert.equal(time?.value, '10:00');
+});
+
+test('I bounded memory context is reported, never a dump', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: 'What time is my appointment?', context: ctx([ref(), ref({ id: 'm2', memoryKey: 'preferred_language' }), ref({ id: 'm3', memoryKey: 'theme' })]) });
+  assert.equal(r.contextUsed.userCount, 3);
+  assert.deepEqual(r.contextUsed.scopes, ['user']);
+});
+
+test('J project isolation at the service level (empty cross-project context)', async () => {
+  const r = await svc.evaluate({ projectId: 'other', text: 'What about that one?', context: ctx([]) });
+  // Nothing from project A is injected; the cross-project evaluation sees no referents.
+  assert.equal(r.contextUsed.userCount, 0);
+  assert.equal(r.references.resolved, false);
+});
+
+test('invalid input rejected', async () => {
+  await assert.rejects(svc.evaluate({ projectId: 'p', text: '   ' }), /النص مطلوب/);
+});
