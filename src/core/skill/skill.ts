@@ -41,6 +41,50 @@ export interface SkillModelCapability {
   }>;
 }
 
+/**
+ * One retrieved knowledge passage handed to a Skill. Provenance is complete enough
+ * for later citation validation (project-scoped source, document, chunk identity).
+ */
+export interface SkillKnowledgePassage {
+  chunkId: string;
+  documentId: string;
+  sourceId: string;
+  sourceTitle: string;
+  chunkIndex: number;
+  text: string;
+  logicalPath?: string;
+  headingContext?: string;
+  /** Ranking signal already produced by the existing retriever (never a new score). */
+  score?: number;
+}
+
+/**
+ * Project-scoped Knowledge capability for Skills that declare `knowledge: true`.
+ * The runtime BINDS the project id, so a Skill can only search its own project's
+ * knowledge — it can never widen or cross the project boundary. The Skill chooses
+ * queries and (optionally) which already-approved sources to search.
+ */
+export interface SkillKnowledgeCapability {
+  search(input: { query: string; topK?: number; sourceIds?: string[] }): Promise<SkillKnowledgePassage[]>;
+  /** Resolve source titles to this project's source ids (empty when not found). */
+  resolveSources(titles: string[]): Promise<Array<{ id: string; title: string }>>;
+  /** Bounded adjacent context of a passage (same document, ±window chunks). */
+  adjacent(chunkId: string, window?: number): Promise<SkillKnowledgePassage[]>;
+}
+
+/**
+ * Bounded, non-reasoning structured trace a Skill may attach for admin inspection.
+ * NEVER chain-of-thought, prompts, or raw model output: only auditable references.
+ */
+export interface SkillTraceSummary {
+  issue?: string;
+  status?: string;
+  approvedSourceIds?: string[];
+  evidence?: Array<{ chunkId: string; sourceId: string; note?: string }>;
+  requirementKeys?: string[];
+  notes?: string[];
+}
+
 export interface SkillExecutionContext {
   projectId: string;
   actor: string;
@@ -52,6 +96,8 @@ export interface SkillExecutionContext {
   memory?: MemoryReference[];
   /** Narrow Model Gateway capability (present when requirements.model). */
   model?: SkillModelCapability;
+  /** Project-scoped Knowledge retrieval (present when requirements.knowledge). */
+  knowledge?: SkillKnowledgeCapability;
   /** Decision Readiness result (present when the skill declares readiness requirements). */
   readiness?: ReadinessResult;
 }
@@ -83,6 +129,8 @@ export interface SkillExecutionResult {
   clarification?: { reason: string; question: string; candidates?: string[] };
   /** Present when readiness was evaluated (K22). */
   readiness?: ReadinessResult;
+  /** Present when the skill attached a bounded, non-reasoning admin trace. */
+  trace?: SkillTraceSummary;
   error?: { message: string; code?: string };
 }
 

@@ -62,6 +62,12 @@ export interface MissingMaterialInformation {
   key: string;
   description: string;
   question?: QuestionSpec;
+  /**
+   * The requirement's OWN structured-interaction hint (K23), carried through so a
+   * caller can render the question's control without a separate static lookup.
+   * Additive and optional — the gate itself never reads it.
+   */
+  interaction?: { type: string; options?: string[]; allowOther?: boolean };
 }
 
 export interface ReadinessResult {

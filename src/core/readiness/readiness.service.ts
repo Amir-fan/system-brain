@@ -47,6 +47,7 @@ export class DecisionReadinessService {
           key: req.key,
           description: req.description,
           ...(req.question ? { question: req.question } : {}),
+          ...(req.interaction ? { interaction: req.interaction } : {}),
         });
       }
     }

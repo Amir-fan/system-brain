@@ -13,6 +13,8 @@
  * no domain/fiqh concepts here.
  */
 
+import type { SkillTraceSummary } from '../skill/skill.ts';
+
 export type ConversationMode = 'contextual' | 'private';
 export type ConversationStatus = 'active' | 'closed';
 export type ConversationTurnStatus = 'completed' | 'needs_information' | 'insufficient_context' | 'needs_clarification' | 'failed';
@@ -106,6 +108,8 @@ export interface ConversationResponse {
   interaction?: InteractionSpec;
   stages: ConversationStage[];
   runId?: string;
+  /** Bounded, non-reasoning skill trace (admin inspection); never chain-of-thought. */
+  trace?: SkillTraceSummary;
 }
 
 export type ConversationErrorCode = 'CONVERSATION_NOT_FOUND' | 'CONVERSATION_FORBIDDEN' | 'CONVERSATION_INPUT_INVALID';

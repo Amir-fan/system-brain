@@ -16,7 +16,7 @@ import type { Actor } from '../authorization/actor.ts';
 import type { UnderstandingService } from '../understanding/understanding.service.ts';
 import type { BoundedUnderstandingContext, UnderstandingInput, UnderstandingResult } from '../understanding/understanding.ts';
 import type { MemoryReference } from '../understanding/understanding.ts';
-import type { SkillDefinition, SkillExecutionResult, SkillExecutionContext, SkillModelCapability } from './skill.ts';
+import type { SkillDefinition, SkillExecutionResult, SkillExecutionContext, SkillModelCapability, SkillKnowledgeCapability, SkillTraceSummary } from './skill.ts';
 import { SkillFailure } from './skill.ts';
 import type { SkillRegistry } from './skill-registry.ts';
 import type { ModelGateway, ModelGatewayInput } from '../model-gateway/model-gateway.ts';
@@ -33,6 +33,11 @@ export interface SkillRuntimeDeps {
   };
   /** Existing Model Gateway (resolving gateway) for Skills that declare model:true. */
   modelGateway?: ModelGateway;
+  /**
+   * Project-scoped Knowledge capability factory for Skills that declare knowledge:true.
+   * The factory binds the project id, so a Skill can never reach another project.
+   */
+  knowledge?: (projectId: string) => SkillKnowledgeCapability;
   /** K22 Decision Readiness evaluator for Skills that declare readiness requirements. */
   readiness?: { evaluate(input: { requirements: DecisionRequirement[]; known: KnownContextItem[] }): ReadinessResult };
 }
@@ -98,6 +103,13 @@ export class SkillsRuntime {
       const bounded = await this.deps.memory.fetchBounded(input.projectId, ids);
       memory = [...bounded.user, ...bounded.conversation, ...bounded.case];
       ctx.memory = memory;
+    }
+
+    // Project-scoped Knowledge retrieval (only when declared). The project id is
+    // bound HERE, so the Skill cannot widen or cross the project boundary.
+    if (skill.requirements.knowledge) {
+      if (!this.deps.knowledge) throw new SkillFailure('SKILL_INVALID_OUTPUT', 'knowledge required but not wired');
+      ctx.knowledge = this.deps.knowledge(input.projectId);
     }
 
     // Structured Understanding (only when declared) — reused from K19, never reimplemented.
@@ -170,13 +182,18 @@ export class SkillsRuntime {
       // The execute() catch marks the run failed when this rethrows.
       throw new SkillFailure('SKILL_INVALID_OUTPUT', outputCheck.message);
     }
+    // A skill that declares NO static readiness requirements may still reason about
+    // its OWN material requirements and return the verdict it computed (K22 stays the
+    // only readiness evaluator). It may also attach a bounded admin trace.
+    const lifted = liftFromOutput(output);
     return {
       status: 'completed',
       skillId: skill.id,
       skillVersion: skill.version,
       runId,
       output,
-      ...(ctx.readiness ? { readiness: ctx.readiness } : {}),
+      ...(ctx.readiness ? { readiness: ctx.readiness } : lifted.readiness ? { readiness: lifted.readiness } : {}),
+      ...(lifted.trace ? { trace: lifted.trace } : {}),
     };
   }
 
@@ -219,4 +236,99 @@ export class SkillsRuntime {
       errorCategory,
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded lift of skill-provided structured state (never raw model reasoning).
+// ---------------------------------------------------------------------------
+
+const READINESS_STATUSES = ['READY_FOR_DECISION', 'NEEDS_INFORMATION', 'INSUFFICIENT_CONTEXT'] as const;
+
+const str = (v: unknown, max: number): string | undefined =>
+  typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined;
+
+const strList = (v: unknown, max: number, maxLen: number): string[] | undefined => {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.filter((x): x is string => typeof x === 'string' && x.trim() !== '').slice(0, max).map((x) => x.trim().slice(0, maxLen));
+  return out.length ? out : undefined;
+};
+
+/**
+ * A skill may return `{ readiness?, trace? }` inside its output. This narrows and
+ * bounds both so nothing but auditable references can reach the conversation/trace:
+ * no prompts, no chain-of-thought, no raw model text.
+ */
+function liftFromOutput(output: unknown): { readiness?: ReadinessResult; trace?: SkillTraceSummary } {
+  const o = (output && typeof output === 'object' ? output : {}) as Record<string, unknown>;
+  const out: { readiness?: ReadinessResult; trace?: SkillTraceSummary } = {};
+
+  const r = o.readiness;
+  if (r && typeof r === 'object') {
+    const rr = r as Record<string, unknown>;
+    const status = str(rr.status, 40);
+    if (status && (READINESS_STATUSES as readonly string[]).includes(status)) {
+      const missing = Array.isArray(rr.missing)
+        ? (rr.missing as Array<Record<string, unknown>>)
+            .filter((m) => m && typeof m === 'object' && typeof m.key === 'string')
+            .slice(0, 12)
+            .map((m) => ({
+              key: String(m.key).slice(0, 64),
+              description: str(m.description, 300) ?? String(m.key).slice(0, 64),
+              ...(m.question && typeof m.question === 'object'
+                ? (() => {
+                    const q = m.question as Record<string, unknown>;
+                    const wording = str(q.wording, 300);
+                    return wording ? { question: { key: String(m.key).slice(0, 64), wording } } : {};
+                  })()
+                : {}),
+              ...(m.interaction && typeof m.interaction === 'object'
+                ? (() => {
+                    const i = m.interaction as Record<string, unknown>;
+                    const type = str(i.type, 24);
+                    const options = strList(i.options, 8, 80);
+                    return type
+                      ? { interaction: { type, ...(options ? { options } : {}), ...(typeof i.allowOther === 'boolean' ? { allowOther: i.allowOther } : {}) } }
+                      : {};
+                  })()
+                : {}),
+            }))
+        : [];
+      out.readiness = {
+        status: status as ReadinessResult['status'],
+        satisfied: strList(rr.satisfied, 12, 64) ?? [],
+        missing,
+        ...(rr.nextQuestion && typeof rr.nextQuestion === 'object'
+          ? (() => {
+              const q = rr.nextQuestion as Record<string, unknown>;
+              const wording = str(q.wording, 300);
+              const key = str(q.key, 64);
+              return wording && key ? { nextQuestion: { key, wording } } : {};
+            })()
+          : {}),
+        knownContextUsed: typeof rr.knownContextUsed === 'number' ? rr.knownContextUsed : 0,
+      } as ReadinessResult;
+    }
+  }
+
+  const t = o.trace;
+  if (t && typeof t === 'object') {
+    const tt = t as Record<string, unknown>;
+    const evidence = Array.isArray(tt.evidence)
+      ? (tt.evidence as Array<Record<string, unknown>>)
+          .filter((e) => e && typeof e === 'object' && typeof e.chunkId === 'string' && typeof e.sourceId === 'string')
+          .slice(0, 12)
+          .map((e) => ({ chunkId: String(e.chunkId).slice(0, 64), sourceId: String(e.sourceId).slice(0, 64), ...(str(e.note, 120) ? { note: str(e.note, 120)! } : {}) }))
+      : undefined;
+    const trace: SkillTraceSummary = {
+      ...(str(tt.issue, 300) ? { issue: str(tt.issue, 300)! } : {}),
+      ...(str(tt.status, 60) ? { status: str(tt.status, 60)! } : {}),
+      ...(strList(tt.approvedSourceIds, 10, 64) ? { approvedSourceIds: strList(tt.approvedSourceIds, 10, 64)! } : {}),
+      ...(evidence && evidence.length ? { evidence } : {}),
+      ...(strList(tt.requirementKeys, 12, 64) ? { requirementKeys: strList(tt.requirementKeys, 12, 64)! } : {}),
+      ...(strList(tt.notes, 6, 200) ? { notes: strList(tt.notes, 6, 200)! } : {}),
+    };
+    if (Object.keys(trace).length > 0) out.trace = trace;
+  }
+
+  return out;
 }

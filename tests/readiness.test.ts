@@ -139,3 +139,16 @@ test('C(bounded memory) memory value satisfies requirement across runtime', asyn
   assert.equal(r.status, 'completed');
   assert.equal(r.readiness?.status, 'READY_FOR_DECISION');
 });
+
+test('K25: a requirement-owned interaction hint is carried into the missing item', () => {
+  const withControl: DecisionRequirement[] = [{
+    key: 'bleeding_stopped', description: 'شرط الاتصال', material: true,
+    question: { key: 'bleeding_stopped', wording: 'هل توقف الدم قبل هذا السائل؟' },
+    interaction: { type: 'single_choice', options: ['توقف', 'كان ينزل'] },
+  }];
+  const r = svc.evaluate({ requirements: withControl, known: [] });
+  assert.equal(r.status, 'NEEDS_INFORMATION');
+  assert.equal(r.missing[0].interaction?.type, 'single_choice');
+  assert.deepEqual(r.missing[0].interaction?.options, ['توقف', 'كان ينزل']);
+  assert.equal(r.missing[0].question?.wording, 'هل توقف الدم قبل هذا السائل؟');
+});

@@ -24,6 +24,20 @@ export interface InteractionSpec {
   required?: boolean;
 }
 
+/**
+ * Bounded, NON-reasoning trace a domain skill may attach for admin inspection
+ * (issue, approved source ids, citation ids, derived requirement keys). It never
+ * carries model prompts or hidden reasoning.
+ */
+export interface SkillTraceSummary {
+  issue?: string;
+  status?: string;
+  approvedSourceIds?: string[];
+  evidence?: Array<{ chunkId: string; sourceId: string; note?: string }>;
+  requirementKeys?: string[];
+  notes?: string[];
+}
+
 /** Exact shape of the real K23 ConversationService.handleMessage response. */
 export interface ConversationResponse {
   conversationId: string;
@@ -35,6 +49,14 @@ export interface ConversationResponse {
   interaction?: InteractionSpec;
   stages: ConversationStage[];
   runId?: string;
+  trace?: SkillTraceSummary;
+}
+
+export interface SkillListItem {
+  id: string;
+  version: number;
+  description: string;
+  requirements?: { understanding?: boolean; memory?: boolean; knowledge?: boolean; model?: boolean };
 }
 
 export interface CreateConversationResult {
@@ -74,4 +96,7 @@ export const conversationApi = {
 
   listEvaluations: (projectId: string) =>
     call<EvaluationListItem[]>(`/v1/projects/${projectId}/conversations/evaluations`),
+
+  /** Existing skill registry surface (used to pick which skill the test drives). */
+  listSkills: (projectId: string) => call<SkillListItem[]>(`/v1/projects/${projectId}/skills`),
 };

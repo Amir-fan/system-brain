@@ -10,6 +10,7 @@ import type {
   InteractionSpec,
   InteractionType,
   EvaluationListItem,
+  SkillListItem,
 } from '../api/conversation';
 
 const PROGRESS_TXT: Record<string, string> = {
@@ -38,6 +39,7 @@ interface Msg {
   status?: ConversationTurnStatus;
   understanding?: ConversationResponse['understanding'];
   readiness?: ConversationResponse['readiness'];
+  trace?: ConversationResponse['trace'];
 }
 
 /**
@@ -171,10 +173,15 @@ export function TestsConsole() {
   const [evalCategory, setEvalCategory] = useState<string>('');
   const [evalNote, setEvalNote] = useState<string>('');
   const [evaluations, setEvaluations] = useState<EvaluationListItem[]>([]);
+  // Which registered skill the test drives (the conversation default is the demo
+  // fixture; a domain skill such as naqaa.fiqh-hayd is chosen explicitly here).
+  const [skills, setSkills] = useState<SkillListItem[]>([]);
+  const [skillId, setSkillId] = useState<string>('');
 
   useEffect(() => {
     if (!activeProject) return;
     conversationApi.listEvaluations(activeProject.id).then(setEvaluations).catch(() => {});
+    conversationApi.listSkills(activeProject.id).then(setSkills).catch(() => {});
   }, [activeProject]);
 
   const lastAssistant = useMemo<Msg | null>(() => {
@@ -220,7 +227,11 @@ export function TestsConsole() {
     setBusy(true);
     setMsgs((m) => [...m, { role: 'user', text: clean, at: '' }]);
     try {
-      const res = await conversationApi.sendMessage(projectId, conversationId, { text: clean, ...(answers ? { answers } : {}) });
+      const res = await conversationApi.sendMessage(projectId, conversationId, {
+        text: clean,
+        ...(answers ? { answers } : {}),
+        ...(skillId ? { skillId } : {}),
+      });
       setMsgs((m) => [
         ...m,
         {
@@ -233,6 +244,7 @@ export function TestsConsole() {
           status: res.status,
           understanding: res.understanding,
           readiness: res.readiness,
+          trace: res.trace,
         },
       ]);
     } catch (e) {
@@ -300,6 +312,26 @@ export function TestsConsole() {
               ? 'يقرأ الذكاء سياق المستخدم الشخصي (الذاكرة) عند الحاجة.'
               : 'معزول عن الذاكرة الشخصية — لا يقرأ ولا يكتب فيها.'}
           </div>
+          {skills.length > 1 ? (
+            <div className="mt-5">
+              <div className="text-sm font-semibold text-slate-700">المهارة المُختبرة</div>
+              <select
+                className="mt-2 w-full max-w-sm rounded-lg border border-surface-line bg-white px-3 py-2 text-sm text-slate-700"
+                value={skillId || skills[0].id}
+                onChange={(e) => setSkillId(e.target.value)}
+                dir="ltr"
+              >
+                {skills.map((sk) => (
+                  <option key={sk.id} value={sk.id}>
+                    {sk.id}{sk.requirements?.knowledge ? ' · مصادر معتمدة' : ''}
+                  </option>
+                ))}
+              </select>
+              <div className="mt-2 text-xs text-muted-soft" dir="auto">
+                {skills.find((sk) => sk.id === (skillId || skills[0].id))?.description ?? ''}
+              </div>
+            </div>
+          ) : null}
           <Button variant="primary" disabled={busy} className="mt-4" onClick={startConversation}>
             {busy ? 'جارٍ البدء…' : 'محادثة جديدة'}
           </Button>
@@ -445,6 +477,16 @@ export function TestsConsole() {
                   <Row k="مفتاح ناقص" v={lastAssistant.readiness.missingKeys.join('، ')} />
                 ) : null}
               </TraceSection>
+              {lastAssistant?.trace ? (
+                <TraceSection title="المسألة والمصادر">
+                  <Row k="المسألة" v={lastAssistant.trace.issue ?? '—'} />
+                  <Row k="حالة المهارة" v={lastAssistant.trace.status ?? '—'} />
+                  <Row k="مصادر معتمدة" v={lastAssistant.trace.approvedSourceIds?.length ? lastAssistant.trace.approvedSourceIds.join('، ') : '—'} />
+                  <Row k="مقاطع مستشهد بها" v={lastAssistant.trace.evidence?.length ? lastAssistant.trace.evidence.map((e) => e.chunkId).join('، ') : '—'} />
+                  <Row k="متطلبات مشتقة" v={lastAssistant.trace.requirementKeys?.length ? lastAssistant.trace.requirementKeys.join('، ') : '—'} />
+                  {lastAssistant.trace.notes?.length ? <Row k="ملاحظات" v={lastAssistant.trace.notes.join(' · ')} /> : null}
+                </TraceSection>
+              ) : null}
               <TraceSection title="النتيجة">
                 <Row k="interaction" v={lastAssistant?.interaction?.type ?? 'نص حر'} />
                 <Row k="المشروع" v={activeProject.name} />

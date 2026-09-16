@@ -204,3 +204,47 @@ test('a correction never invents a fact when nothing is pending', async () => {
   // no pending requirement and no resolved target => the session gains NO fact
   assert.deepEqual(store.rows.get(s.id)!.sessionContext.facts, {});
 });
+
+/**
+ * K25 seam: a skill that derives its requirements DYNAMICALLY (no static
+ * readiness, no static interaction hints) must still reach the user as a real
+ * question with the right control — the requirement carries its own interaction.
+ */
+test('dynamic requirement: the conversation renders the requirement-owned control and bounded trace', async () => {
+  const store = fakeStore();
+  const requirement = {
+    key: 'bleeding_stopped',
+    description: 'شرط الاتصال',
+    material: true,
+    question: { key: 'bleeding_stopped', wording: 'قبل ما تشوفين هذا السائل، كان الدم وقف تمامًا أو كان ما زال ينزل؟' },
+    interaction: { type: 'single_choice', options: ['توقف تمامًا', 'كان ينزل'], allowOther: true },
+  };
+  const dynamic = new ConversationService({
+    persistence: store,
+    understanding: { evaluate: async ({ text }) => ({ status: 'CLEAR', dialogueAct: 'QUESTION', language: 'ar', issues: [text], references: { resolved: true }, corrections: [], facts: [], ambiguity: { material: false }, contextUsed: { userCount: 0, conversationCount: 0, caseCount: 0, scopes: [] } }) },
+    skills: {
+      execute: async () => {
+        const r = readiness.evaluate({ requirements: [requirement], known: [] });
+        return {
+          status: 'needs_information', skillId: 'naqaa.fiqh-hayd', skillVersion: 1, runId: 'run9', readiness: r,
+          trace: { issue: 'حكم إفرازة في آخر أيام الحيض', status: 'NEEDS_INFORMATION+SOURCE_GAP', approvedSourceIds: ['s1'], requirementKeys: ['bleeding_stopped'], notes: ['observation_not_defined_by_approved_source'] },
+        };
+      },
+    },
+    memory: { fetchBounded: async () => ({ user: [], conversation: [], case: [] }) },
+    defaultSkillId: 'naqaa.fiqh-hayd',
+    interactionsFor: () => ({}), // NO static hints: the requirement must carry the control
+  });
+  const s = await dynamic.create('p', 'a', 'private');
+  const t1 = await dynamic.handleMessage('p', 'a', s.id, { text: 'نزل علي سائل شفاف مع لمعة حمراء خفيفة .. هل هذا حيض ؟' });
+  assert.equal(t1.status, 'needs_information');
+  assert.equal(t1.interaction?.key, 'bleeding_stopped');
+  assert.equal(t1.interaction?.type, 'single_choice');
+  assert.deepEqual(t1.interaction?.options, ['توقف تمامًا', 'كان ينزل']);
+  assert.equal(t1.interaction?.allowOther, true);
+  assert.match(t1.interaction!.question, /كان الدم وقف/);
+  assert.equal(t1.runId, 'run9');
+  // the bounded skill trace reaches the admin surface (no reasoning, no prompts)
+  assert.equal(t1.trace?.issue, 'حكم إفرازة في آخر أيام الحيض');
+  assert.deepEqual(t1.trace?.requirementKeys, ['bleeding_stopped']);
+});

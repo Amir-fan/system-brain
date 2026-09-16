@@ -128,8 +128,20 @@ export class ConversationService {
     }
 
     // 4. Invoke the skill (K22 readiness gate runs inside the Skills Runtime).
+    // The skill receives the turn text plus a BOUNDED recent-turn window (so a
+    // skill can read the case as the user described it across turns) — never the
+    // full transcript and never the personal Memory store.
     const skillId = input.skillId ?? this.deps.defaultSkillId;
-    const result = await this.deps.skills.execute({ projectId, actor, skillId, payload: { context: facts } });
+    const result = await this.deps.skills.execute({
+      projectId,
+      actor,
+      skillId,
+      payload: {
+        context: facts,
+        text: input.text,
+        recentTurns: session.sessionContext.recentTurns.slice(-MAX_RECENT_TURNS),
+      },
+    });
     if (result.readiness) stages.push('CHECKING_READINESS');
 
     let status: ConversationResponse['status'];
@@ -140,11 +152,15 @@ export class ConversationService {
       status = 'needs_information';
       const first = result.readiness.missing.find((m) => m.question) ?? result.readiness.missing[0];
       const hints = this.deps.interactionsFor?.(skillId) ?? {};
-      const type = (hints[first.key]?.type ?? 'free_text') as InteractionType;
+      // The requirement's OWN interaction hint wins (a skill that derives its
+      // requirements dynamically carries the control with the requirement);
+      // the static per-skill hints remain the fallback.
+      const hint = first.interaction ?? hints[first.key];
+      const type = (hint?.type ?? 'free_text') as InteractionType;
       interaction = {
         type, key: first.key, question: first.question?.wording ?? first.description,
-        ...(hints[first.key]?.options ? { options: hints[first.key]!.options } : {}),
-        ...(hints[first.key]?.allowOther !== undefined ? { allowOther: hints[first.key]!.allowOther } : {}),
+        ...(hint?.options ? { options: hint.options } : {}),
+        ...(hint?.allowOther !== undefined ? { allowOther: hint.allowOther } : {}),
         required: true,
       };
       message = interaction.question;
@@ -184,6 +200,7 @@ export class ConversationService {
       ...(interaction ? { interaction } : {}),
       stages,
       ...(result.runId ? { runId: result.runId } : {}),
+      ...(result.trace ? { trace: result.trace } : {}),
     };
   }
 }

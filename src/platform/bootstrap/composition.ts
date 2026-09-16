@@ -47,7 +47,9 @@ import { DecisionReadinessService } from '../../core/readiness/readiness.service
 import { ConversationService } from '../../core/conversation/conversation.service.ts';
 import { createConversationStorage } from '../provider/conversation.storage.ts';
 import { createEvaluationStorage } from '../provider/evaluation.storage.ts';
+import { createKnowledgeEvidence } from '../provider/knowledge-evidence.ts';
 import { naqaaScanner } from '../../domain/naqaa/scanner-skill.ts';
+import { createFiqhHaydSkill } from '../../domain/naqaa/fiqh-hayd-skill.ts';
 import { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
 import { KnowledgeAnswerService } from '../../core/knowledge/knowledge-answer.service.ts';
 import { EmbeddingService } from '../../core/embedding/embedding.service.ts';
@@ -201,6 +203,9 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   skillRegistry.register(decisionReadinessFixture);
   skillRegistry.register(conversationEligibilityFixture);
   const readinessService = new DecisionReadinessService();
+  // K25 slice 1: the Shafi'i fiqh skill reasons over APPROVED source knowledge and
+  // declares its material requirements dynamically (validated against citations).
+  skillRegistry.register(createFiqhHaydSkill({ readiness: readinessService }));
   const skillsRuntime = new SkillsRuntime({
     persistence,
     registry: skillRegistry,
@@ -208,6 +213,10 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     memory: { fetchBounded: memoryFetcher },
     modelGateway: gateway,
     readiness: readinessService,
+    // Project-scoped knowledge capability (existing K15 retriever + existing chunk
+    // store for bounded adjacency). No second engine, no new table.
+    knowledge: (projectId: string) =>
+      createKnowledgeEvidence({ projectId, retrieval: retrievalService, sources: sourceStorage, chunks: ingestionPersistence }),
   });
   const conversationService = new ConversationService({
     persistence: createConversationStorage(db),
