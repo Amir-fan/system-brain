@@ -13,7 +13,7 @@
  * no domain/fiqh concepts here.
  */
 
-import type { SkillTraceSummary } from '../skill/skill.ts';
+import type { SkillAnswer, SkillTraceSummary } from '../skill/skill.ts';
 
 export type ConversationMode = 'contextual' | 'private';
 export type ConversationStatus = 'active' | 'closed';
@@ -39,6 +39,8 @@ export interface SessionContext {
   pendingKey?: string;
   turnCount: number;
   recentTurns: SessionTurn[];
+  /** Latest grounded terminal result (bounded; cleared by a material correction). */
+  lastGroundedResult?: LastGroundedResult;
 }
 
 export interface ConversationSession {
@@ -98,6 +100,21 @@ export interface ConversationMessageInput {
   skillId?: string;
 }
 
+/**
+ * The latest GROUNDED terminal result in this conversation (session-local, bounded).
+ * NOT Memory, NOT conversation history, NOT a decision store: it only lets a
+ * follow-up ("ليش؟" / "شنو المصدر؟") be answered from the decision that was actually
+ * grounded, instead of restarting the questioning flow.
+ */
+export interface LastGroundedResult {
+  skillId: string;
+  status: string;
+  decision?: string;
+  explanation?: string;
+  sourceTitle?: string;
+  evidenceRefs: string[];
+}
+
 export interface ConversationResponse {
   conversationId: string;
   mode: ConversationMode;
@@ -110,6 +127,8 @@ export interface ConversationResponse {
   runId?: string;
   /** Bounded, non-reasoning skill trace (admin inspection); never chain-of-thought. */
   trace?: SkillTraceSummary;
+  /** Present when the executed skill produced a grounded user-facing answer. */
+  answer?: SkillAnswer;
 }
 
 export type ConversationErrorCode = 'CONVERSATION_NOT_FOUND' | 'CONVERSATION_FORBIDDEN' | 'CONVERSATION_INPUT_INVALID';

@@ -17,6 +17,8 @@ const PASSWORD = process.env.K24_E2E_PASSWORD ?? 'K24Test!pass123';
 const SKILL = 'naqaa.fiqh-hayd';
 const APPROVED = '44bff587';
 const CASE = 'نزل علي سائل شفاف في اليوم الاخير من دورتي مع لمعة حمراء خفيفة جدا .. هل هو حيض ؟';
+const A2 = 'نزل علي دم بسيط لمدة ٦ ساعات فقط ثم توقف تمامًا، وعمري ٢٠ سنة وليس عندي حمل ولا نفاس. هل هو حيض؟';
+const CASE_FOR = (sec) => (sec === 'decided' || sec === 'private' ? A2 : CASE);
 const SECTION = process.argv[2] ?? 'contextual';
 const SHOT = process.argv[3] ?? null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -108,10 +110,25 @@ const answerCurrent = async () => {
     await waitFor(`!!document.querySelector('${COMPOSER}')`, 30000);
 
     // ---- TURN 1: the real case ----
-    await setInput(COMPOSER, CASE);
+    await setInput(COMPOSER, CASE_FOR(SECTION));
     await evalJs(`document.querySelector('${COMPOSER}').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`);
     console.log('  waiting for the real runtime (model + retrieval)…');
-    const gotQ = await waitFor(`(() => { const s = ${SNAP}; return (s.buttons.length > 0 || s.inputs.length > 0) && !!s.question; })()`, 180000);
+    const wantsDecision = SECTION === 'decided' || SECTION === 'private';
+    const gotQ = wantsDecision
+      ? await waitFor(`(() => { const s = ${SNAP}; return (s.buttons.length > 0 || s.inputs.length > 0) && !!s.question; })()`, 180000)
+      : await waitFor(`(() => { const s = ${SNAP}; return (s.buttons.length > 0 || s.inputs.length > 0) && !!s.question; })()`, 180000);
+    if (wantsDecision) {
+      // answer up to 4 structured questions until the grounded answer lands
+      for (let i = 0; i < 4; i++) {
+        const snap = await evalJs(SNAP);
+        const text = snap.cardText || '';
+        if (/ليس حيض|حيضًا|حيضا|الحكم/.test(text) && !snap.inputs.length && !snap.buttons.some((b) => b === 'نعم' || b === 'لا')) break;
+        const a = await answerCurrent();
+        if (!a) break;
+        await waitFor(`(() => { const s = ${SNAP}; return !s.buttons.some(b => b === 'نعم' || b === 'لا') && !!s.question; })()`, 180000);
+        await sleep(800);
+      }
+    }
     await sleep(1000);
     const s1 = await evalJs(SNAP);
     console.log('  T1 card =', s1.cardText.slice(0, 220));

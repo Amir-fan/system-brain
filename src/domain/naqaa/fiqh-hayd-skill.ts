@@ -36,8 +36,14 @@ import {
   type FiqhCaseInput,
   type FiqhEvidenceRef,
   type FiqhMaterialRequirement,
+  type FiqhDecisionProposal,
   type FiqhReasoningPlan,
   type FiqhSourceGap,
+  type FiqhSourceSupport,
+  DECISION_MAX_OUTPUT_TOKENS,
+  REASONING_MAX_OUTPUT_TOKENS,
+  MADHHAB,
+  type FiqhConfidence,
 } from './fiqh-hayd-contracts.ts';
 
 /** Existing K22 evaluator, injected (the skill owns its dynamic requirements). */
@@ -74,6 +80,30 @@ const INTERPRETER_SYSTEM = [
   ' "citations":["chunkId"],"knownFromCase":false}],',
   ' "unresolved":["..."]}',
 ].join('\n');
+
+const DECISION_SYSTEM = [
+  'أنت محلل يستنتج الحكم من نصوص فقهية مُسترجَعة فقط، على منهج الشافعية.',
+  'قواعد صارمة لا يجوز خرقها:',
+  '1) كل حكم يجب أن يكون مُسنَدًا إلى المقاطع المعطاة بأرقامها؛ لا تفتِ من معرفتك العامة.',
+  '2) لا تخترع قاعدة أو شرطًا أو حدًّا غير موجود في المقاطع.',
+  '3) لا تُحوّل وصفًا ذكره المستخدم إلى مفهوم فقهي إن لم يُعرّفه النص؛ ضعه في unresolved.',
+  '4) إن لم تكفِ المقاطع لحسم الحكم: status=SOURCE_GAP (لا تخمّن).',
+  '5) إن نقصت معلومة من المستخدم تمنع الحكم: status=NEEDS_INFORMATION مع سؤال واحد بسيط.',
+  '5أ) كل سؤال يجب أن يحمل حاجة واحدة فقط؛ لا تجمع شرطين أو حاجتين في سؤال واحد.',
+  '5ب) حقائق معروفة تأتي بقيمة مختصرة ومعها الأسئلة التي أجابت عنها؛ فسّر كل قيمة في ضوء سؤالها.',
+  '5ج) إن تعارضت حقيقة معروفة مع وصف الحالة، لا تُصدر حكمًا: status=SOURCE_GAP بسبب صريح.',
+  '6) إن قررت: كن مباشرًا وبسيطًا (يفهمه من عمره ١٢ سنة)، بلا مصطلحات زائدة.',
+  'أجب بـ JSON فقط:',
+  '{"status":"DECIDED|NEEDS_INFORMATION|SOURCE_GAP",',
+  ' "category":"كلمة قصيرة مثل: حيض / ليس حيضًا / طهر",',
+  ' "directAnswer":"جملة أو جملتان", "explanation":"سبب مختصر جدًا",',
+  ' "confidence":"LOW|MEDIUM|HIGH", "sourceSupport":"SUPPORTED|PARTIAL|UNSUPPORTED",',
+  ' "evidenceRefs":["chunkId"],',
+  ' "observationMappings":[{"observation":"...","concept":"...","evidenceRefs":["chunkId"]}],',
+  ' "unresolved":[{"item":"...","material":true,"reason":"..."}],',
+  ' "needsInformation":{"key":"snake_case","whyMaterial":"...","question":{"wording":"..."},"interaction":{"type":"yes_no|single_choice|number|duration|date|free_text","options":["..."]},"evidenceRefs":["chunkId"]}}',
+  'لا تُضف أي حقل آخر، ولا تكتب أي شيء خارج JSON.',
+].join(String.fromCharCode(10));
 
 /** Tolerant JSON extraction: models occasionally wrap JSON in prose or fences. */
 function parseJson<T>(text: string): T | null {
@@ -127,6 +157,55 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
       const known = (input.context ?? {}) as Record<string, unknown>;
       const gaps: FiqhSourceGap = { present: false, observations: [], notes: [] };
 
+      // ---- 0. follow-up on the latest grounded result (no new facts, no model call)
+      // The conversation hands us its bounded session result only while it is still
+      // valid; a material correction clears it before we ever see it.
+      const stored = input.lastGroundedResult;
+      const asked = strOf(input.text);
+      if (stored && stored.skillId === FIQH_HAYD_SKILL_ID && asked.length <= 60) {
+        const wantsSource = /مصدر|من وين|الدليل|المرجع|مرجعك|دليلك/.test(asked);
+        const wantsWhy = /ليش|ليه|لماذا|السبب|سبب|وضح|وضّح|فسر|اشرح/.test(asked);
+        if (wantsSource || wantsWhy) {
+          const refs = (stored.evidenceRefs ?? []).slice(0, 6);
+          const text = wantsSource
+            ? `المصدر المعتمد: «${bounded(strOf(stored.sourceTitle) || 'المصدر المعتمد في المشروع', 160)}».` +
+              (refs.length ? `\nالمقاطع المستشهد بها: ${refs.map((r) => r.slice(0, 8)).join('، ')}.` : '')
+            : (bounded(strOf(stored.explanation) || strOf(stored.decision), 700) ||
+               'الحكم مبني على المصدر المعتمد عندي.');
+          return {
+            status: stored.status === 'DECIDED' ? 'READY_FOR_FIQH_DECISION' : 'SOURCE_GAP',
+            issue: 'متابعة على الحكم السابق',
+            decision: {
+              status: stored.status === 'DECIDED' ? 'DECIDED' : 'SOURCE_GAP',
+              ...(stored.decision ? { category: stored.decision } : {}),
+              sourceSupport: stored.status === 'DECIDED' ? 'SUPPORTED' : 'PARTIAL',
+              evidenceRefs: refs,
+            },
+            requirementKeys: [],
+            sourceGap: gaps,
+            approvedSourceIds: [],
+            evidenceChunkIds: refs,
+            answer: {
+              text,
+              ...(stored.sourceTitle ? { sourceTitle: stored.sourceTitle } : {}),
+              ...(refs.length ? { evidenceIds: refs } : {}),
+              ...(stored.decision ? { label: stored.decision } : {}),
+            },
+            trace: {
+              issue: 'متابعة على الحكم السابق',
+              status: wantsSource ? 'FOLLOWUP_SOURCE' : 'FOLLOWUP_WHY',
+              decisionStatus: stored.status,
+              ...(stored.decision ? { decisionLabel: stored.decision } : {}),
+              sourceSupport: stored.status === 'DECIDED' ? 'SUPPORTED' : 'PARTIAL',
+              acceptedEvidenceRefs: refs,
+              retrievedEvidenceIds: refs,
+              requirementKeys: [],
+              workload: `${WORKLOAD}:followup_answered_from_session_result`,
+            },
+          };
+        }
+      }
+
       // ---- 1. the case as the user described it (bounded) -------------------
       const caseText = bounded(
         [
@@ -147,7 +226,8 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
           sourceGap: gaps,
           approvedSourceIds: [],
           evidenceChunkIds: [],
-          trace: { issue: 'غير محدد', status: 'SOURCE_GAP', notes: ['approved_sources_missing'], requirementKeys: [] },
+          answer: { text: 'المصدر المعتمد عندي ما يكفي لحسم هذه الصورة بدقة.' },
+          trace: { issue: 'غير محدد', status: 'SOURCE_GAP', notes: ['approved_sources_missing'], requirementKeys: [], retrievedEvidenceIds: [], acceptedEvidenceRefs: [], workload: WORKLOAD, sourceSupport: 'UNSUPPORTED' },
         };
       }
       const approvedIds = approved.map((s) => s.id);
@@ -156,6 +236,7 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
       const planRes = await ctx.model.generateText({
         workload: WORKLOAD,
         message: `${PLANNER_SYSTEM}\n\nوصف الحالة (بالعامية):\n${caseText}\n\nحقائق معروفة: ${JSON.stringify(known)}`,
+        maxOutputTokens: REASONING_MAX_OUTPUT_TOKENS,
       });
       const plan = parseJson<{ issue?: string; queries?: unknown[] }>(planRes.text) ?? {};
       const issue = bounded(strOf(plan.issue), 300) || 'مسألة غير محددة';
@@ -185,7 +266,8 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
           sourceGap: gaps,
           approvedSourceIds: approvedIds,
           evidenceChunkIds: [],
-          trace: { issue, status: 'SOURCE_GAP', approvedSourceIds: approvedIds, notes: gaps.notes, requirementKeys: [] },
+          answer: { text: 'المصدر المعتمد عندي ما يكفي لحسم هذه الصورة بدقة.' },
+          trace: { issue, status: 'SOURCE_GAP', approvedSourceIds: approvedIds, notes: gaps.notes, requirementKeys: [], retrievedEvidenceIds: [], acceptedEvidenceRefs: [], workload: WORKLOAD, sourceSupport: 'UNSUPPORTED' },
         };
       }
 
@@ -196,11 +278,14 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
       const interpRes = await ctx.model.generateText({
         workload: WORKLOAD,
         message: `${INTERPRETER_SYSTEM}\n\nوصف الحالة (بالعامية):\n${caseText}\n\nحقائق معروفة: ${JSON.stringify(known)}\n\nالنصوص المُسترجَعة من المصدر المعتمد:\n${evidenceBlock}`,
+        maxOutputTokens: REASONING_MAX_OUTPUT_TOKENS,
       });
       const reasoning = parseJson<FiqhReasoningPlan>(interpRes.text);
       if (!reasoning || !Array.isArray(reasoning.requirements)) {
         gaps.present = true;
-        gaps.notes.push('reasoning_output_unusable');
+        // Bounded, auditable failure note (length + truncation flag only: never the text).
+        const raw = interpRes.text ?? '';
+        gaps.notes.push(`reasoning_output_unusable:len=${raw.length}:closed=${raw.trimEnd().endsWith('}')}`);
         return {
           status: 'SOURCE_GAP',
           issue,
@@ -208,7 +293,8 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
           approvedSourceIds: approvedIds,
           evidenceChunkIds: evidence.map((p) => p.chunkId),
           requirementKeys: [],
-          trace: { issue, status: 'SOURCE_GAP', approvedSourceIds: approvedIds, evidence: evidence.map((p) => ({ chunkId: p.chunkId, sourceId: p.sourceId })), notes: gaps.notes, requirementKeys: [] },
+          answer: { text: 'المصدر المعتمد عندي ما يكفي لحسم هذه الصورة بدقة.' },
+          trace: { issue, status: 'SOURCE_GAP', approvedSourceIds: approvedIds, evidence: evidence.map((p) => ({ chunkId: p.chunkId, sourceId: p.sourceId })), notes: gaps.notes, requirementKeys: [], retrievedEvidenceIds: evidence.map((p) => p.chunkId), acceptedEvidenceRefs: [], workload: WORKLOAD, sourceSupport: 'UNSUPPORTED' },
         };
       }
 
@@ -281,26 +367,279 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         .map(([key, value]) => ({ key, value, source: 'conversation' as const }));
       const readiness = deps.readiness.evaluate({ requirements: decisionRequirements, known: knownItems });
 
-      const status = readiness.status === 'READY_FOR_DECISION' ? 'READY_FOR_FIQH_DECISION' : 'NEEDS_INFORMATION';
-
-      return {
-        status,
+      const baseTrace = (st: string, extra: Record<string, unknown> = {}) => ({
         issue,
-        interpretations: interpretations.map((i) => ({ observation: i.observation, candidateConcept: i.candidateConcept, supported: i.supported, citationIds: i.citations.map((c) => c.chunkId) })),
+        status: st,
+        approvedSourceIds: approvedIds,
+        evidence: evidence.map((p) => ({ chunkId: p.chunkId, sourceId: p.sourceId, ...(p.headingContext ? { note: bounded(p.headingContext, 120) } : {}) })),
         requirementKeys: requirements.map((r) => r.key),
+        retrievedEvidenceIds: evidence.map((p) => p.chunkId),
+        gapKeys: gaps.observations.slice(0, 8),
+        notes: gaps.notes.slice(0, 6),
+        ...extra,
+      });
+
+      // Not decision-ready yet: the material questions ARE the answer.
+      if (readiness.status !== 'READY_FOR_DECISION') {
+        return {
+          status: 'NEEDS_INFORMATION',
+          issue,
+          interpretations: interpretations.map((i) => ({ observation: i.observation, candidateConcept: i.candidateConcept, supported: i.supported, citationIds: i.citations.map((c) => c.chunkId) })),
+          requirementKeys: requirements.map((r) => r.key),
+          sourceGap: gaps,
+          approvedSourceIds: approvedIds,
+          evidenceChunkIds: evidence.map((p) => p.chunkId),
+          readiness,
+          trace: baseTrace(gaps.present ? 'NEEDS_INFORMATION+SOURCE_GAP' : 'NEEDS_INFORMATION'),
+        };
+      }
+
+      // ---- 8. SOURCE-GROUNDED DECISION: the model proposes, CODE validates -----
+      // A bare `true` is only meaningful together with the question it answered, so the
+      // bounded questions that produced the stored facts travel with them.
+      const askedQuestions = (input.recentTurns ?? [])
+        .filter((t) => t.role === 'assistant')
+        .map((t) => bounded(strOf(t.text), 200))
+        .slice(-3);
+      const decisionInput = {
+        madhhab: MADHHAB,
+        issue,
+        caseText,
+        knownFacts: known,
+        /** The questions the user answered to produce knownFacts (bounded). */
+        answeredQuestions: askedQuestions,
+        observations: interpretations.map((i) => ({ observation: i.observation, candidateConcept: i.candidateConcept, supportedBySource: i.supported })),
+        sourceGaps: gaps.observations,
+        approvedSourceTitles: [...APPROVED_SOURCE_TITLES].join('، '),
+        evidence: evidence.map((p) => `[${p.chunkId}] ${bounded(p.text, MAX_PASSAGE_CHARS)}`).join('\n\n'),
+      };
+      const decisionRes = await ctx.model.generateText({
+        workload: WORKLOAD,
+        message: `${DECISION_SYSTEM}\n\nالحالة والمقاطع:\n${JSON.stringify(decisionInput)}`,
+        // A bounded structured ruling: enough room for the JSON contract, and no
+        // provider-side reservation of the model's full output capacity.
+        maxOutputTokens: DECISION_MAX_OUTPUT_TOKENS,
+      });
+      const proposal = parseJson<FiqhDecisionProposal>(decisionRes.text);
+      const verdict = validateDecision({ proposal, evidence, gapObservations: gaps.observations });
+      const modelTag = [decisionRes.provider, decisionRes.model].filter(Boolean).join('/') || undefined;
+
+      if (verdict.kind === 'NEEDS_INFORMATION' && verdict.requirement) {
+        // The reasoning layer found one more materially necessary fact: route it through
+        // the SAME dynamic-requirement path (no second question engine, no new ordering).
+        const merged = [...requirements, verdict.requirement];
+        const mergedReadiness = deps.readiness.evaluate({
+          requirements: merged.map((r) => ({
+            key: r.key,
+            description: r.whyMaterial || r.question.wording,
+            material: true,
+            question: { key: r.key, wording: r.question.wording },
+            interaction: r.interaction,
+          })),
+          known: knownItems,
+        });
+        return {
+          status: 'NEEDS_INFORMATION',
+          issue,
+          interpretations: interpretations.map((i) => ({ observation: i.observation, candidateConcept: i.candidateConcept, supported: i.supported, citationIds: i.citations.map((c) => c.chunkId) })),
+          requirementKeys: merged.map((r) => r.key),
+          sourceGap: gaps,
+          approvedSourceIds: approvedIds,
+          evidenceChunkIds: evidence.map((p) => p.chunkId),
+          readiness: mergedReadiness,
+          trace: baseTrace('NEEDS_INFORMATION', { decisionStatus: 'NEEDS_INFORMATION', workload: WORKLOAD, ...(modelTag ? { model: modelTag } : {}) }),
+        };
+      }
+
+      if (verdict.kind === 'DECIDED' && verdict.directAnswer) {
+        return {
+          status: 'READY_FOR_FIQH_DECISION',
+          issue,
+          interpretations: interpretations.map((i) => ({ observation: i.observation, candidateConcept: i.candidateConcept, supported: i.supported, citationIds: i.citations.map((c) => c.chunkId) })),
+          decision: {
+            status: 'DECIDED',
+            category: verdict.category,
+            confidence: verdict.confidence,
+            sourceSupport: 'SUPPORTED',
+            evidenceRefs: verdict.refs.map((r) => r.chunkId),
+            observationMappings: verdict.mappings,
+            unresolved: verdict.unresolved,
+          },
+          requirementKeys: [],
+          sourceGap: gaps,
+          approvedSourceIds: approvedIds,
+          evidenceChunkIds: evidence.map((p) => p.chunkId),
+          readiness,
+          answer: {
+            text: [verdict.directAnswer, verdict.explanation].filter(Boolean).join('\n'),
+            ...(evidence[0]?.sourceTitle ? { sourceTitle: evidence[0].sourceTitle } : {}),
+            evidenceIds: verdict.refs.map((r) => r.chunkId),
+            ...(verdict.category ? { label: verdict.category } : {}),
+          },
+          trace: baseTrace(gaps.present ? 'DECIDED+UNRESOLVED_NOTE' : 'DECIDED', {
+            decisionStatus: 'DECIDED',
+            ...(verdict.category ? { decisionLabel: verdict.category } : {}),
+            confidence: verdict.confidence,
+            sourceSupport: 'SUPPORTED',
+            acceptedEvidenceRefs: verdict.refs.map((r) => r.chunkId),
+            ...(verdict.codes.length ? { notes: verdict.codes.slice(0, 6) } : {}),
+            workload: WORKLOAD,
+            ...(modelTag ? { model: modelTag } : {}),
+          }),
+        };
+      }
+
+      // No ruling: the approved source (or the user's facts) cannot support one.
+      const sourceSide = verdict.codes.some((c) => /^(source_|mapping_|decision_refs|decision_source|decision_with_material|unaccounted_|model_reported_source_gap)/.test(c));
+      const gapText = sourceSide
+        ? 'المصدر المعتمد عندي ما يكفي لحسم هذه الصورة بدقة.'
+        : 'أحتاج معلومة أوضح قبل ما أحدد الحكم.';
+      const gapDetail = verdict.unresolvedMaterial.length
+        ? `\nالنقطة اللي تحتاج توضيح: ${verdict.unresolvedMaterial.slice(0, 3).join('، ')}.`
+        : '';
+      return {
+        status: 'SOURCE_GAP',
+        issue,
+          interpretations: interpretations.map((i) => ({ observation: i.observation, candidateConcept: i.candidateConcept, supported: i.supported, citationIds: i.citations.map((c) => c.chunkId) })),
+        decision: {
+          status: 'SOURCE_GAP',
+          sourceSupport: verdict.sourceSupport,
+          evidenceRefs: verdict.refs.map((r) => r.chunkId),
+          unresolved: verdict.unresolved,
+        },
+        requirementKeys: [],
         sourceGap: gaps,
         approvedSourceIds: approvedIds,
         evidenceChunkIds: evidence.map((p) => p.chunkId),
         readiness,
-        trace: {
-          issue,
-          status: gaps.present ? `${status}+SOURCE_GAP` : status,
-          approvedSourceIds: approvedIds,
-          evidence: evidence.map((p) => ({ chunkId: p.chunkId, sourceId: p.sourceId, ...(p.headingContext ? { note: bounded(p.headingContext, 120) } : {}) })),
-          requirementKeys: requirements.map((r) => r.key),
-          notes: gaps.notes.slice(0, 6),
+        answer: {
+          text: `${gapText}${gapDetail}`,
+          ...(evidence[0]?.sourceTitle ? { sourceTitle: evidence[0].sourceTitle } : {}),
+          ...(verdict.refs.length ? { evidenceIds: verdict.refs.map((r) => r.chunkId) } : {}),
         },
+        trace: baseTrace('SOURCE_GAP', {
+          decisionStatus: 'SOURCE_GAP',
+          sourceSupport: verdict.sourceSupport,
+          ...(verdict.refs.length ? { acceptedEvidenceRefs: verdict.refs.map((r) => r.chunkId) } : {}),
+          ...(verdict.unresolvedMaterial.length ? { gapKeys: verdict.unresolvedMaterial.slice(0, 8) } : {}),
+          notes: verdict.codes.slice(0, 6),
+          workload: WORKLOAD,
+          ...(modelTag ? { model: modelTag } : {}),
+        }),
       };
     },
+  };
+}
+
+// ---------------------------------------------------------------- decision guard
+//
+// The model PROPOSES; this code decides whether the proposal may reach the user.
+// Fail-closed by construction: every doubt yields SOURCE_GAP (never a ruling).
+
+interface DecisionVerdictBase {
+  codes: string[];
+  refs: FiqhEvidenceRef[];
+  unresolved: Array<{ item: string; material: boolean; reason?: string }>;
+  unresolvedMaterial: string[];
+  sourceSupport: FiqhSourceSupport;
+}
+
+type DecisionVerdict =
+  | (DecisionVerdictBase & { kind: 'DECIDED'; directAnswer: string; explanation?: string; category?: string; confidence: FiqhConfidence; mappings: Array<{ observation: string; concept: string; evidenceRefs: string[] }> })
+  | (DecisionVerdictBase & { kind: 'NEEDS_INFORMATION'; requirement: FiqhMaterialRequirement })
+  | (DecisionVerdictBase & { kind: 'SOURCE_GAP' });
+
+export function validateDecision(args: {
+  proposal: FiqhDecisionProposal | null;
+  evidence: SkillKnowledgePassage[];
+  /** Observations the approved source does not define (from the interpretation step). */
+  gapObservations: string[];
+}): DecisionVerdict {
+  const { evidence, gapObservations } = args;
+  const valid = new Map(evidence.map((e) => [e.chunkId, e]));
+  const mkRefs = (ids: unknown): FiqhEvidenceRef[] =>
+    (Array.isArray(ids) ? ids : [])
+      .map(strOf)
+      .filter((id) => valid.has(id))
+      .slice(0, 4)
+      .map((id) => ({ chunkId: id, sourceId: valid.get(id)!.sourceId, quote: bounded(valid.get(id)!.text, 240) }));
+
+  const p = args.proposal && typeof args.proposal === 'object' ? args.proposal : null;
+  if (!p) return { kind: 'SOURCE_GAP', codes: ['decision_output_unusable'], refs: [], unresolved: [], unresolvedMaterial: [], sourceSupport: 'UNSUPPORTED' };
+  if (!['DECIDED', 'NEEDS_INFORMATION', 'SOURCE_GAP'].includes(strOf(p.status))) {
+    return { kind: 'SOURCE_GAP', codes: ['decision_status_invalid'], refs: [], unresolved: [], unresolvedMaterial: [], sourceSupport: 'UNSUPPORTED' };
+  }
+
+  const unresolved = (Array.isArray(p.unresolved) ? p.unresolved : [])
+    .slice(0, 8)
+    .map((u) => ({ item: bounded(strOf(u?.item), 200), material: u?.material === true, ...(strOf(u?.reason) ? { reason: bounded(strOf(u.reason), 200) } : {}) }))
+    .filter((u) => u.item.length > 0);
+  const unresolvedMaterial = unresolved.filter((u) => u.material).map((u) => u.item);
+  const sourceSupport: FiqhSourceSupport = ['SUPPORTED', 'PARTIAL', 'UNSUPPORTED'].includes(strOf(p.sourceSupport))
+    ? (strOf(p.sourceSupport) as FiqhSourceSupport)
+    : 'UNSUPPORTED';
+
+  if (strOf(p.status) === 'SOURCE_GAP') {
+    return {
+      kind: 'SOURCE_GAP',
+      codes: ['model_reported_source_gap', ...unresolvedMaterial.map((i) => `source_gap:${bounded(i, 120)}`)],
+      refs: mkRefs(p.evidenceRefs), unresolved, unresolvedMaterial, sourceSupport,
+    };
+  }
+
+  if (strOf(p.status) === 'NEEDS_INFORMATION') {
+    const n = p.needsInformation;
+    const key = bounded(strOf(n?.key), 64);
+    const wording = bounded(strOf(n?.question?.wording), 240);
+    const refs = mkRefs(n?.evidenceRefs);
+    if (!key || !wording || refs.length === 0) {
+      return { kind: 'SOURCE_GAP', codes: ['needs_information_unusable'], refs, unresolved, unresolvedMaterial, sourceSupport };
+    }
+    const type = bounded(strOf(n?.interaction?.type), 24) || 'free_text';
+    const options = Array.isArray(n?.interaction?.options) ? n.interaction.options.map(strOf).filter(Boolean).slice(0, 6) : [];
+    return {
+      kind: 'NEEDS_INFORMATION',
+      requirement: {
+        key,
+        whyMaterial: bounded(strOf(n?.whyMaterial), 240),
+        question: { wording },
+        interaction: { type, ...(options.length ? { options } : {}), ...(typeof n?.interaction?.allowOther === 'boolean' ? { allowOther: n.interaction.allowOther } : {}) },
+        citations: refs,
+      },
+      codes: ['model_requested_information'], refs, unresolved, unresolvedMaterial, sourceSupport,
+    };
+  }
+
+  // ---- DECIDED: every guard must pass, otherwise no ruling is returned -----
+  const codes: string[] = [];
+  const directAnswer = bounded(strOf(p.directAnswer), 400);
+  if (!directAnswer) return { kind: 'SOURCE_GAP', codes: ['decision_empty_answer'], refs: [], unresolved, unresolvedMaterial, sourceSupport };
+  const refs = mkRefs(p.evidenceRefs);
+  if (refs.length === 0) return { kind: 'SOURCE_GAP', codes: ['decision_refs_missing_or_not_retrieved'], refs: [], unresolved, unresolvedMaterial, sourceSupport };
+  if (sourceSupport !== 'SUPPORTED') codes.push('decision_source_support_not_supported');
+  if (unresolvedMaterial.length > 0) codes.push('decision_with_material_source_gap');
+  const mappings = (Array.isArray(p.observationMappings) ? p.observationMappings : [])
+    .slice(0, 6)
+    .map((m) => ({ observation: bounded(strOf(m?.observation), 200), concept: bounded(strOf(m?.concept), 160), evidenceRefs: mkRefs(m?.evidenceRefs).map((r) => r.chunkId) }))
+    .filter((m) => m.observation.length > 0 && m.concept.length > 0);
+  if (mappings.some((m) => m.evidenceRefs.length === 0)) codes.push('mapping_without_source_support');
+  // Slice 1's boundary: a user observation the source does not define may not be
+  // silently classified. It must be either mapped WITH source support or explicitly
+  // declared non-material.
+  for (const obs of gapObservations) {
+    const head = obs.slice(0, 18);
+    const mapped = mappings.some((m) => m.evidenceRefs.length > 0 && (m.observation.includes(head) || obs.includes(m.observation.slice(0, 18))));
+    const declaredNonMaterial = unresolved.some((u) => !u.material);
+    if (!mapped && !declaredNonMaterial) { codes.push('unaccounted_unsupported_observation'); break; }
+  }
+  if (codes.length > 0) return { kind: 'SOURCE_GAP', codes, refs, unresolved, unresolvedMaterial, sourceSupport };
+
+  const confidence: FiqhConfidence = ['LOW', 'MEDIUM', 'HIGH'].includes(strOf(p.confidence)) ? (strOf(p.confidence) as FiqhConfidence) : 'LOW';
+  return {
+    kind: 'DECIDED',
+    directAnswer,
+    ...(strOf(p.explanation) ? { explanation: bounded(strOf(p.explanation), 400) } : {}),
+    ...(strOf(p.category) ? { category: bounded(strOf(p.category), 60) } : {}),
+    confidence, refs, mappings, codes, unresolved, unresolvedMaterial, sourceSupport,
   };
 }

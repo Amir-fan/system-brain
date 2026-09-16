@@ -131,7 +131,11 @@ describe('K25 fiqh skill — source-grounded reasoning', () => {
     );
     assert.deepEqual(out.requirementKeys, []);
     assert.ok((out.sourceGap as { notes: string[] }).notes.includes('already_known:bleeding_stopped'));
-    assert.equal(out.status, 'READY_FOR_FIQH_DECISION');
+    // The case is decision-ready, so the skill proceeds to the decision step; with no
+    // usable grounded proposal it returns SOURCE_GAP rather than a ruling.
+    assert.equal((out.readiness as { status: string }).status, 'READY_FOR_DECISION');
+    assert.equal(out.status, 'SOURCE_GAP');
+    assert.equal((out.decision as { status: string }).status, 'SOURCE_GAP');
   });
 
   it('never re-asks a fact the user already stated in the case (knownFromCase)', async () => {
@@ -180,6 +184,8 @@ describe('K25 fiqh skill — source-grounded reasoning', () => {
     assert.ok(gaps.observations.some((o) => o.includes('سائل شفاف')));
     const interps = out.interpretations as Array<{ supported: boolean }>;
     assert.equal(interps[0].supported, false);
+    // the decision step must not produce a ruling out of an undefined observation
+    assert.equal((out.decision as { status: string }).status, 'SOURCE_GAP');
   });
 
   it('treats a missing approved source as SOURCE_GAP (nothing to ground on)', async () => {
@@ -193,7 +199,7 @@ describe('K25 fiqh skill — source-grounded reasoning', () => {
     const { out } = await run('هذا ليس JSON');
     assert.equal(out.status, 'SOURCE_GAP');
     assert.deepEqual(out.requirementKeys, []);
-    assert.ok((out.sourceGap as { notes: string[] }).notes.includes('reasoning_output_unusable'));
+    assert.ok((out.sourceGap as { notes: string[] }).notes.some((n) => n.startsWith('reasoning_output_unusable')));
   });
 
   it('uses bounded adjacent context when a source statement spans chunks', async () => {

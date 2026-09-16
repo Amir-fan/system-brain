@@ -38,6 +38,19 @@ export interface FiqhCaseInput {
   text?: string;
   /** Bounded recent turns, so the case narrative survives across turns. */
   recentTurns?: Array<{ role: 'user' | 'assistant'; text: string }>;
+  /**
+   * The latest grounded terminal result of THIS conversation (bounded session state).
+   * Present only when nothing material changed since; the conversation clears it on a
+   * material correction, so it can never be stale.
+   */
+  lastGroundedResult?: {
+    skillId: string;
+    status: string;
+    decision?: string;
+    explanation?: string;
+    sourceTitle?: string;
+    evidenceRefs: string[];
+  };
 }
 
 /** A citable source reference. Never a paraphrase: the passage text is the source. */
@@ -74,6 +87,58 @@ export interface FiqhReasoningPlan {
   unresolved: string[];
 }
 
+
+/**
+ * Output budget this skill requests for its structured JSON calls. Bounded on
+ * purpose: the answers are small structured objects, and an unbounded request makes
+ * the provider reserve the model's whole output capacity. Domain-owned value — the
+ * Model Gateway only carries it and the provider adapter only maps it.
+ */
+export const DECISION_MAX_OUTPUT_TOKENS = 16384;
+/** Same reasoned bound for the planner/extraction calls (small structured JSON). */
+export const REASONING_MAX_OUTPUT_TOKENS = 16384;
+
+/** V1 is Shafi'i only; the madhhab never leaks into Core. */
+export const MADHHAB = 'shafii' as const;
+
+export type FiqhDecisionStatus = 'DECIDED' | 'NEEDS_INFORMATION' | 'SOURCE_GAP';
+/** Categorical only — never an invented percentage. */
+export type FiqhConfidence = 'LOW' | 'MEDIUM' | 'HIGH';
+export type FiqhSourceSupport = 'SUPPORTED' | 'PARTIAL' | 'UNSUPPORTED';
+
+/** What the reasoning model PROPOSES (never trusted as-is: see validateDecision). */
+export interface FiqhDecisionProposal {
+  status?: string;
+  category?: string;
+  directAnswer?: string;
+  explanation?: string;
+  confidence?: string;
+  sourceSupport?: string;
+  /** Retrieved chunk ids the ruling is grounded in. */
+  evidenceRefs?: string[];
+  /** OBSERVATION -> FIQH CONCEPT, each with its own source support. */
+  observationMappings?: Array<{ observation?: string; concept?: string; evidenceRefs?: string[] }>;
+  unresolved?: Array<{ item?: string; material?: boolean; reason?: string }>;
+  needsInformation?: {
+    key?: string;
+    whyMaterial?: string;
+    question?: { wording?: string };
+    interaction?: { type?: string; options?: string[]; allowOther?: boolean };
+    evidenceRefs?: string[];
+  };
+}
+
+/** Validated, accepted decision (what the skill may expose). */
+export interface FiqhDecision {
+  status: FiqhDecisionStatus;
+  category?: string;
+  confidence?: FiqhConfidence;
+  sourceSupport: FiqhSourceSupport;
+  evidenceRefs: string[];
+  observationMappings?: Array<{ observation: string; concept: string; evidenceRefs: string[] }>;
+  unresolved?: Array<{ item: string; material: boolean; reason?: string }>;
+}
+
 export type FiqhCaseStatus = 'NEEDS_INFORMATION' | 'READY_FOR_FIQH_DECISION' | 'SOURCE_GAP';
 
 export interface FiqhSourceGap {
@@ -94,4 +159,8 @@ export interface FiqhHaydOutput {
   evidenceChunkIds: string[];
   readiness?: unknown;
   trace?: unknown;
+  /** Present when the decision step ran (DECIDED / SOURCE_GAP). */
+  decision?: FiqhDecision;
+  /** User-facing grounded answer (rendered by the conversation). */
+  answer?: { text: string; sourceTitle?: string; evidenceIds?: string[]; label?: string };
 }

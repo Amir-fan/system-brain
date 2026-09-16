@@ -33,7 +33,7 @@ export type ValidationOutcome = { ok: true } | { ok: false; message: string };
  * (the Skill never sees a provider adapter, API key, DB or gateway object).
  */
 export interface SkillModelCapability {
-  generateText(input: { workload: string; parts?: ModelContentPart[]; message?: string }): Promise<{
+  generateText(input: { workload: string; parts?: ModelContentPart[]; message?: string; maxOutputTokens?: number }): Promise<{
     text: string;
     provider?: string;
     model?: string;
@@ -83,6 +83,30 @@ export interface SkillTraceSummary {
   evidence?: Array<{ chunkId: string; sourceId: string; note?: string }>;
   requirementKeys?: string[];
   notes?: string[];
+  /** Result of the skill's own decision step (domain-neutral). */
+  decisionStatus?: string;
+  decisionLabel?: string;
+  confidence?: string;
+  sourceSupport?: string;
+  retrievedEvidenceIds?: string[];
+  acceptedEvidenceRefs?: string[];
+  gapKeys?: string[];
+  /** Model Gateway workload + provider/model actually used (never a prompt). */
+  workload?: string;
+  model?: string;
+}
+
+/**
+ * A skill may return a user-facing answer (domain-neutral). The conversation renders
+ * it instead of a generic placeholder. It carries no internal keys and no reasoning.
+ */
+export interface SkillAnswer {
+  text: string;
+  sourceTitle?: string;
+  /** Bounded evidence references the answer was grounded in. */
+  evidenceIds?: string[];
+  /** Short label for the answer category when a skill has one (e.g. a ruling label). */
+  label?: string;
 }
 
 export interface SkillExecutionContext {
@@ -131,6 +155,8 @@ export interface SkillExecutionResult {
   readiness?: ReadinessResult;
   /** Present when the skill attached a bounded, non-reasoning admin trace. */
   trace?: SkillTraceSummary;
+  /** Present when the skill produced a user-facing answer (domain-neutral). */
+  answer?: SkillAnswer;
   error?: { message: string; code?: string };
 }
 

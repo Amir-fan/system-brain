@@ -248,3 +248,118 @@ test('dynamic requirement: the conversation renders the requirement-owned contro
   assert.equal(t1.trace?.issue, 'حكم إفرازة في آخر أيام الحيض');
   assert.deepEqual(t1.trace?.requirementKeys, ['bleeding_stopped']);
 });
+
+/**
+ * K25 slice 2 seam: when the executed skill returns a grounded user-facing answer,
+ * the conversation renders THAT text (never the generic placeholder) and forwards
+ * the answer (with its source) to the client for display.
+ */
+test('a skill answer replaces the placeholder and is forwarded with its source', async () => {
+  const store = fakeStore();
+  const grounding = new ConversationService({
+    persistence: store,
+    understanding: { evaluate: async ({ text }) => ({ status: 'CLEAR', dialogueAct: 'QUESTION', language: 'ar', issues: [text], references: { resolved: true }, corrections: [], facts: [], ambiguity: { material: false }, contextUsed: { userCount: 0, conversationCount: 0, caseCount: 0, scopes: [] } }) },
+    skills: {
+      execute: async () => ({
+        status: 'completed', skillId: 'naqaa.fiqh-hayd', skillVersion: 1, runId: 'run11',
+        answer: { text: 'هذا السائل ليس حيضًا.\nلأن الحيض له صفات معروفة، وهذا الوصف ليس منها.', sourceTitle: 'الحيض الالوكة', evidenceIds: ['chunk-7', 'chunk-8'], label: 'ليس حيضًا' },
+        trace: { status: 'DECIDED', decisionStatus: 'DECIDED', decisionLabel: 'ليس حيضًا', confidence: 'MEDIUM', sourceSupport: 'SUPPORTED', acceptedEvidenceRefs: ['chunk-7', 'chunk-8'], workload: 'knowledge_answer' },
+      }),
+    },
+    memory: { fetchBounded: async () => ({ user: [], conversation: [], case: [] }) },
+    defaultSkillId: 'naqaa.fiqh-hayd',
+  });
+  const s = await grounding.create('p', 'a', 'contextual');
+  const t = await grounding.handleMessage('p', 'a', s.id, { text: 'نزل سائل شفاف في آخر دورتي .. هل هو حيض؟' });
+  assert.equal(t.status, 'completed');
+  assert.notEqual(t.message, 'تمت معالجة طلبك.');
+  assert.match(t.message, /ليس حيضًا/);
+  assert.equal(t.answer?.sourceTitle, 'الحيض الالوكة');
+  assert.deepEqual(t.answer?.evidenceIds, ['chunk-7', 'chunk-8']);
+  assert.equal(t.trace?.decisionStatus, 'DECIDED');
+  assert.equal(t.trace?.workload, 'knowledge_answer');
+});
+
+test('the generic placeholder is still used when a skill has nothing to say', async () => {
+  const store = fakeStore();
+  const silent = new ConversationService({
+    persistence: store,
+    understanding: { evaluate: async ({ text }) => ({ status: 'CLEAR', dialogueAct: 'STATEMENT', language: 'ar', issues: [text], references: { resolved: true }, corrections: [], facts: [], ambiguity: { material: false }, contextUsed: { userCount: 0, conversationCount: 0, caseCount: 0, scopes: [] } }) },
+    skills: { execute: async () => ({ status: 'completed', skillId: 'demo.context-summary', skillVersion: 1, runId: 'run12' }) },
+    memory: { fetchBounded: async () => ({ user: [], conversation: [], case: [] }) },
+    defaultSkillId: 'demo.context-summary',
+  });
+  const s = await silent.create('p', 'a', 'private');
+  const t = await silent.handleMessage('p', 'a', s.id, { text: 'ملخص' });
+  assert.equal(t.message, 'تمت معالجة طلبك.');
+  assert.equal(t.answer, undefined);
+});
+
+/**
+ * K25 — bounded session result: the latest GROUNDED terminal result is remembered in
+ * the session context so a follow-up can be answered from it, and it is CLEARED the
+ * moment a material fact is corrected (never answered from a stale decision).
+ */
+const understandingFake = (corrections: Array<{ target?: string; previous?: unknown; new: unknown }> = []) => ({
+  evaluate: async ({ text }: { text: string }) => ({
+    status: 'CLEAR', dialogueAct: 'QUESTION', language: 'ar', issues: [text], references: { resolved: true },
+    corrections, facts: [], ambiguity: { material: false }, contextUsed: { userCount: 0, conversationCount: 0, caseCount: 0, scopes: [] },
+  }),
+});
+
+const groundedSkillFake = (seen: Array<Record<string, unknown>>) => ({
+  execute: async (input: { payload?: unknown }) => {
+    seen.push((input.payload ?? {}) as Record<string, unknown>);
+    return {
+      status: 'completed', skillId: 'naqaa.fiqh-hayd', skillVersion: 1, runId: 'run-g',
+      answer: { text: 'هذا الدم ليس حيضًا.', sourceTitle: 'الحيض الالوكة', evidenceIds: ['chunk-7', 'chunk-8'], label: 'ليس حيضًا' },
+      trace: { status: 'DECIDED', decisionStatus: 'DECIDED', decisionLabel: 'ليس حيضًا', sourceSupport: 'SUPPORTED', acceptedEvidenceRefs: ['chunk-7', 'chunk-8'] },
+    };
+  },
+});
+
+test('the grounded result is stored in the session and handed to the next turn', async () => {
+  const store = fakeStore();
+  const seen: Array<Record<string, unknown>> = [];
+  const c = new ConversationService({
+    persistence: store,
+    understanding: understandingFake(),
+    skills: groundedSkillFake(seen),
+    memory: { fetchBounded: async () => ({ user: [], conversation: [], case: [] }) },
+    defaultSkillId: 'naqaa.fiqh-hayd',
+  });
+  const sess = await c.create('p', 'a', 'contextual');
+  const t1 = await c.handleMessage('p', 'a', sess.id, { text: 'نزل دم ٦ ساعات فقط. هل هو حيض؟' });
+  assert.equal(t1.trace?.decisionStatus, 'DECIDED');
+  const stored = store.rows.get(sess.id)!.sessionContext.lastGroundedResult;
+  assert.ok(stored, 'the grounded result is kept in the session context');
+  assert.equal(stored!.skillId, 'naqaa.fiqh-hayd');
+  assert.equal(stored!.decision, 'ليس حيضًا');
+  assert.equal(stored!.sourceTitle, 'الحيض الالوكة');
+  assert.deepEqual(stored!.evidenceRefs, ['chunk-7', 'chunk-8']);
+  // the next turn receives it (so a follow-up can be answered from it)
+  await c.handleMessage('p', 'a', sess.id, { text: 'شنو المصدر؟' });
+  assert.ok(seen[1].lastGroundedResult, 'the bounded result is passed to the skill');
+});
+
+test('a material correction CLEARS the stored grounded result before answering', async () => {
+  const store = fakeStore();
+  const seen: Array<Record<string, unknown>> = [];
+  const c = new ConversationService({
+    persistence: store,
+    understanding: understandingFake([{ target: 'bleeding_stopped', new: 'لم يتوقف' }]),
+    skills: groundedSkillFake(seen),
+    memory: { fetchBounded: async () => ({ user: [], conversation: [], case: [] }) },
+    defaultSkillId: 'naqaa.fiqh-hayd',
+  });
+  const sess = await c.create('p', 'a', 'contextual');
+  await c.handleMessage('p', 'a', sess.id, { text: 'نزل دم ٦ ساعات فقط. هل هو حيض؟' });
+  assert.ok(store.rows.get(sess.id)!.sessionContext.lastGroundedResult, 'stored first');
+  // a correction arrives while the stored result exists
+  await c.handleMessage('p', 'a', sess.id, { text: 'لا، الدم ما توقف بعد ٦ ساعات، استمر يومًا وليلة' });
+  assert.equal(seen[1].lastGroundedResult, undefined, 'the stale result is NOT handed to the skill');
+  // the corrected turn reasons again from the updated facts; whatever it stores is a
+  // NEW result for the NEW case, never the previous decision reused as authority.
+  assert.equal(store.rows.get(sess.id)!.sessionContext.turnCount, 2);
+  assert.equal(seen[1].lastGroundedResult, undefined);
+});

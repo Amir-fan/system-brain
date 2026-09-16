@@ -16,7 +16,7 @@ import type { Actor } from '../authorization/actor.ts';
 import type { UnderstandingService } from '../understanding/understanding.service.ts';
 import type { BoundedUnderstandingContext, UnderstandingInput, UnderstandingResult } from '../understanding/understanding.ts';
 import type { MemoryReference } from '../understanding/understanding.ts';
-import type { SkillDefinition, SkillExecutionResult, SkillExecutionContext, SkillModelCapability, SkillKnowledgeCapability, SkillTraceSummary } from './skill.ts';
+import type { SkillDefinition, SkillExecutionResult, SkillExecutionContext, SkillModelCapability, SkillKnowledgeCapability, SkillTraceSummary, SkillAnswer } from './skill.ts';
 import { SkillFailure } from './skill.ts';
 import type { SkillRegistry } from './skill-registry.ts';
 import type { ModelGateway, ModelGatewayInput } from '../model-gateway/model-gateway.ts';
@@ -162,13 +162,14 @@ export class SkillsRuntime {
     if (skill.requirements.model) {
       if (!this.deps.modelGateway) throw new SkillFailure('SKILL_INVALID_OUTPUT', 'model required but not wired');
       const capability: SkillModelCapability = {
-        generateText: async ({ workload, parts, message }) => {
+        generateText: async ({ workload, parts, message, maxOutputTokens }) => {
           const out = await this.deps.modelGateway!.generateText({
             projectId: input.projectId,
             runId,
             capability: skill.id,
             model: { profile: workload } as ModelGatewayInput['model'],
             input: parts && parts.length > 0 ? { parts } : { message: message ?? '' },
+            ...(typeof maxOutputTokens === 'number' ? { maxOutputTokens } : {}),
           });
           return { text: out.text, provider: out.provider, model: out.model, usage: out.usage };
         },
@@ -194,6 +195,7 @@ export class SkillsRuntime {
       output,
       ...(ctx.readiness ? { readiness: ctx.readiness } : lifted.readiness ? { readiness: lifted.readiness } : {}),
       ...(lifted.trace ? { trace: lifted.trace } : {}),
+      ...(lifted.answer ? { answer: lifted.answer } : {}),
     };
   }
 
@@ -258,9 +260,9 @@ const strList = (v: unknown, max: number, maxLen: number): string[] | undefined 
  * bounds both so nothing but auditable references can reach the conversation/trace:
  * no prompts, no chain-of-thought, no raw model text.
  */
-function liftFromOutput(output: unknown): { readiness?: ReadinessResult; trace?: SkillTraceSummary } {
+function liftFromOutput(output: unknown): { readiness?: ReadinessResult; trace?: SkillTraceSummary; answer?: SkillAnswer } {
   const o = (output && typeof output === 'object' ? output : {}) as Record<string, unknown>;
-  const out: { readiness?: ReadinessResult; trace?: SkillTraceSummary } = {};
+  const out: { readiness?: ReadinessResult; trace?: SkillTraceSummary; answer?: SkillAnswer } = {};
 
   const r = o.readiness;
   if (r && typeof r === 'object') {
@@ -326,8 +328,32 @@ function liftFromOutput(output: unknown): { readiness?: ReadinessResult; trace?:
       ...(evidence && evidence.length ? { evidence } : {}),
       ...(strList(tt.requirementKeys, 12, 64) ? { requirementKeys: strList(tt.requirementKeys, 12, 64)! } : {}),
       ...(strList(tt.notes, 6, 200) ? { notes: strList(tt.notes, 6, 200)! } : {}),
+      ...(str(tt.decisionStatus, 60) ? { decisionStatus: str(tt.decisionStatus, 60)! } : {}),
+      ...(str(tt.decisionLabel, 120) ? { decisionLabel: str(tt.decisionLabel, 120)! } : {}),
+      ...(str(tt.confidence, 16) ? { confidence: str(tt.confidence, 16)! } : {}),
+      ...(str(tt.sourceSupport, 32) ? { sourceSupport: str(tt.sourceSupport, 32)! } : {}),
+      ...(strList(tt.retrievedEvidenceIds, 12, 64) ? { retrievedEvidenceIds: strList(tt.retrievedEvidenceIds, 12, 64)! } : {}),
+      ...(strList(tt.acceptedEvidenceRefs, 8, 64) ? { acceptedEvidenceRefs: strList(tt.acceptedEvidenceRefs, 8, 64)! } : {}),
+      ...(strList(tt.gapKeys, 8, 200) ? { gapKeys: strList(tt.gapKeys, 8, 200)! } : {}),
+      ...(str(tt.workload, 64) ? { workload: str(tt.workload, 64)! } : {}),
+      ...(str(tt.model, 96) ? { model: str(tt.model, 96)! } : {}),
     };
     if (Object.keys(trace).length > 0) out.trace = trace;
+  }
+
+  const a = o.answer;
+  if (a && typeof a === 'object') {
+    const aa = a as Record<string, unknown>;
+    const text = str(aa.text, 1200);
+    if (text) {
+      const evidenceIds = strList(aa.evidenceIds, 6, 64);
+      out.answer = {
+        text,
+        ...(str(aa.sourceTitle, 160) ? { sourceTitle: str(aa.sourceTitle, 160)! } : {}),
+        ...(evidenceIds ? { evidenceIds } : {}),
+        ...(str(aa.label, 80) ? { label: str(aa.label, 80)! } : {}),
+      };
+    }
   }
 
   return out;

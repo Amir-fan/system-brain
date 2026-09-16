@@ -36,6 +36,15 @@ export interface SkillTraceSummary {
   evidence?: Array<{ chunkId: string; sourceId: string; note?: string }>;
   requirementKeys?: string[];
   notes?: string[];
+  decisionStatus?: string;
+  decisionLabel?: string;
+  confidence?: string;
+  sourceSupport?: string;
+  retrievedEvidenceIds?: string[];
+  acceptedEvidenceRefs?: string[];
+  gapKeys?: string[];
+  workload?: string;
+  model?: string;
 }
 
 /** Exact shape of the real K23 ConversationService.handleMessage response. */
@@ -50,6 +59,8 @@ export interface ConversationResponse {
   stages: ConversationStage[];
   runId?: string;
   trace?: SkillTraceSummary;
+  /** Present when the executed skill produced a grounded user-facing answer. */
+  answer?: { text: string; sourceTitle?: string; evidenceIds?: string[]; label?: string };
 }
 
 export interface SkillListItem {

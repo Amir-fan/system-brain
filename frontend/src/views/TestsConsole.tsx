@@ -40,6 +40,7 @@ interface Msg {
   understanding?: ConversationResponse['understanding'];
   readiness?: ConversationResponse['readiness'];
   trace?: ConversationResponse['trace'];
+  answer?: ConversationResponse['answer'];
 }
 
 /**
@@ -245,6 +246,7 @@ export function TestsConsole() {
           understanding: res.understanding,
           readiness: res.readiness,
           trace: res.trace,
+          answer: res.answer,
         },
       ]);
     } catch (e) {
@@ -373,6 +375,7 @@ export function TestsConsole() {
                     <div className="flex justify-start">
                       <div className="max-w-[85%] space-y-2">
                         <div className="rounded-2xl rounded-bl-sm border border-surface-line bg-white px-4 py-2.5 text-sm text-slate-800" dir="auto">{m.text}</div>
+                        <AnswerSource answer={m.answer} />
                       </div>
                     </div>
                   )}
@@ -389,6 +392,7 @@ export function TestsConsole() {
                       <div className="rounded-2xl rounded-bl-sm border border-surface-line bg-white px-4 py-2.5 text-sm text-slate-800" dir="auto">
                         {liveText}
                       </div>
+                      <AnswerSource answer={liveMsg.answer} />
                     </div>
                   </div>
                 ) : null}
@@ -484,7 +488,20 @@ export function TestsConsole() {
                   <Row k="مصادر معتمدة" v={lastAssistant.trace.approvedSourceIds?.length ? lastAssistant.trace.approvedSourceIds.join('، ') : '—'} />
                   <Row k="مقاطع مستشهد بها" v={lastAssistant.trace.evidence?.length ? lastAssistant.trace.evidence.map((e) => e.chunkId).join('، ') : '—'} />
                   <Row k="متطلبات مشتقة" v={lastAssistant.trace.requirementKeys?.length ? lastAssistant.trace.requirementKeys.join('، ') : '—'} />
+                  {lastAssistant.trace.workload ? <Row k="workload" v={lastAssistant.trace.workload} /> : null}
+                  {lastAssistant.trace.model ? <Row k="model" v={lastAssistant.trace.model} /> : null}
                   {lastAssistant.trace.notes?.length ? <Row k="ملاحظات" v={lastAssistant.trace.notes.join(' · ')} /> : null}
+                </TraceSection>
+              ) : null}
+              {lastAssistant?.trace?.decisionStatus ? (
+                <TraceSection title="الحكم">
+                  <Row k="حالة القرار" v={lastAssistant.trace.decisionStatus ?? '—'} />
+                  <Row k="التصنيف" v={lastAssistant.trace.decisionLabel ?? '—'} />
+                  <Row k="الثقة (فئوية)" v={lastAssistant.trace.confidence ?? '—'} />
+                  <Row k="دعم المصدر" v={lastAssistant.trace.sourceSupport ?? '—'} />
+                  <Row k="مراجع مقبولة" v={lastAssistant.trace.acceptedEvidenceRefs?.length ? lastAssistant.trace.acceptedEvidenceRefs.join('، ') : '—'} />
+                  <Row k="مقاطع مُسترجَعة" v={lastAssistant.trace.retrievedEvidenceIds?.length ? lastAssistant.trace.retrievedEvidenceIds.join('، ') : '—'} />
+                  {lastAssistant.trace.gapKeys?.length ? <Row k="فجوات المصدر" v={lastAssistant.trace.gapKeys.join('، ')} /> : null}
                 </TraceSection>
               ) : null}
               <TraceSection title="النتيجة">
@@ -525,6 +542,25 @@ export function TestsConsole() {
         </Card>
       )}
     </main>
+  );
+}
+
+/**
+ * The grounded answer may carry the approved source it rests on. Shown as one
+ * compact line: source name + the cited evidence ids (no raw chunk dump).
+ */
+function AnswerSource({ answer }: { answer?: ConversationResponse['answer'] }) {
+  if (!answer?.sourceTitle) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 ps-1 text-[11px] text-muted-soft">
+      {answer.label ? (
+        <span className="rounded-full bg-brand-50 px-2 py-0.5 font-medium text-brand-700">{answer.label}</span>
+      ) : null}
+      <span>المصدر: <b className="text-slate-600">{answer.sourceTitle}</b></span>
+      {answer.evidenceIds?.length ? (
+        <span dir="ltr" className="font-mono">{answer.evidenceIds.map((id) => id.slice(0, 8)).join('، ')}</span>
+      ) : null}
+    </div>
   );
 }
 

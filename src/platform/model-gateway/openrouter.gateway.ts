@@ -100,11 +100,19 @@ export class OpenRouterGateway implements ModelGateway {
           )
         : String((input.input as { message?: unknown } | undefined)?.message ?? '');
 
+    // The caller's bounded output budget, when it asked for one. This adapter maps
+    // it verbatim and never decides how much output a workload deserves.
+    const maxOutputTokens =
+      typeof input.maxOutputTokens === 'number' && Number.isFinite(input.maxOutputTokens) && input.maxOutputTokens > 0
+        ? Math.trunc(input.maxOutputTokens)
+        : undefined;
+
     const res = await this.raw('/chat/completions', {
       method: 'POST',
       body: JSON.stringify({
         model,
         messages: [{ role: 'user', content }],
+        ...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
       }),
     });
 

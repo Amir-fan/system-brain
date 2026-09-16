@@ -104,9 +104,13 @@ export class ConversationService {
     // "facts supplied in THIS session", so a corrected value replaces that session
     // fact here and readiness recomputes from it. The target is the requirement the
     // conversation last asked for, unless K19 resolved a different known fact.
+    let invalidatedGrounded = false;
     for (const correction of understanding.corrections) {
       const value = correction.new;
       if (value === undefined || value === null || String(value).trim() === '') continue;
+      // A correction means the case changed: any previously grounded result is stale,
+      // even when the fact itself cannot be attributed to a known requirement key.
+      invalidatedGrounded = true;
       const target =
         correction.target && Object.prototype.hasOwnProperty.call(facts, correction.target)
           ? correction.target
@@ -115,6 +119,9 @@ export class ConversationService {
       const previous = facts[target];
       const trimmed = String(value).trim();
       facts[target] = typeof previous === 'number' && /^-?\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
+      // A material fact changed: the previously grounded result is no longer valid.
+      // It must not be reusable by a follow-up, and the case is reasoned again.
+      invalidatedGrounded = true;
     }
 
     // 3. Context assembly — personal Memory ONLY when policy allows.
@@ -140,6 +147,9 @@ export class ConversationService {
         context: facts,
         text: input.text,
         recentTurns: session.sessionContext.recentTurns.slice(-MAX_RECENT_TURNS),
+        ...(invalidatedGrounded || !session.sessionContext.lastGroundedResult
+          ? {}
+          : { lastGroundedResult: session.sessionContext.lastGroundedResult }),
       },
     });
     if (result.readiness) stages.push('CHECKING_READINESS');
@@ -169,7 +179,10 @@ export class ConversationService {
       message = 'لا يمكن إكمال السياق المطلوب حالياً.';
     } else if (result.status === 'completed' || result.status === 'needs_clarification') {
       status = result.status === 'completed' ? 'completed' : 'needs_clarification';
-      message = 'تمت معالجة طلبك.';
+      // The skill owns its user-facing answer (a grounded ruling, a source-gap notice,
+      // or an explanation). The generic placeholder is only the fallback for a skill
+      // that has nothing to say.
+      message = result.answer?.text ?? 'تمت معالجة طلبك.';
       if (result.readiness) stages.push('EXECUTING_SKILL');
     } else {
       status = 'failed';
@@ -178,9 +191,29 @@ export class ConversationService {
     stages.push('PREPARING_RESPONSE');
 
     // 5. Persist bounded session context (bounded recent turns; last question; pending key).
+    const grounded = result.trace?.decisionStatus && result.answer
+      ? {
+          skillId: result.skillId,
+          status: String(result.trace.decisionStatus).slice(0, 60),
+          ...(result.trace.decisionLabel ? { decision: String(result.trace.decisionLabel).slice(0, 120) } : {}),
+          ...(result.answer.text ? { explanation: String(result.answer.text).slice(0, 900) } : {}),
+          ...(result.answer.sourceTitle ? { sourceTitle: String(result.answer.sourceTitle).slice(0, 160) } : {}),
+          evidenceRefs: (result.answer.evidenceIds ?? result.trace.acceptedEvidenceRefs ?? []).slice(0, 6),
+        }
+      : undefined;
+
     const updatedContext: SessionContext = {
       facts,
       ...(status === 'needs_information' && interaction ? { pendingKey: interaction.key } : {}),
+      // A new grounded result replaces the old one; an invalidating turn clears it;
+      // otherwise the existing bounded result is carried forward unchanged.
+      ...(grounded
+        ? { lastGroundedResult: grounded }
+        : invalidatedGrounded
+          ? {}
+          : session.sessionContext.lastGroundedResult
+            ? { lastGroundedResult: session.sessionContext.lastGroundedResult }
+            : {}),
       turnCount: session.sessionContext.turnCount + 1,
       recentTurns: [
         ...session.sessionContext.recentTurns,
@@ -201,6 +234,7 @@ export class ConversationService {
       stages,
       ...(result.runId ? { runId: result.runId } : {}),
       ...(result.trace ? { trace: result.trace } : {}),
+      ...(result.answer ? { answer: result.answer } : {}),
     };
   }
 }

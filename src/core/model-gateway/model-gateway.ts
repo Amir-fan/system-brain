@@ -26,6 +26,13 @@ export interface ModelGatewayInput {
   runId: string;
   capability: string;
   input: unknown;
+  /**
+   * Optional bounded OUTPUT budget. Provider-neutral by design: the caller states
+   * how much output it needs, the provider adapter maps it to its own parameter
+   * (e.g. OpenRouter `max_tokens`). Omitted => the provider's own default, exactly
+   * as before. No workload or provider policy is expressed here.
+   */
+  maxOutputTokens?: number;
   /** Workload intent only — never a hardcoded provider model id. */
   model?: ModelRequirement;
   /** Optional already-resolved model id (from the control-plane assignment resolver). */
