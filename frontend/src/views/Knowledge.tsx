@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Plus,
   Link2,
@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Sparkles,
   FileText,
+  MoreVertical,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useProjectContext } from '../contexts/ProjectContext';
@@ -652,123 +653,182 @@ export function Knowledge() {
 
         <Card className="mt-6">
           <CardHeader title={t('knowledge.sources')} />
+          {/* Column header — desktop only; keeps the six columns legible. */}
+          <div className="hidden px-4 pb-2 xl:grid xl:grid-cols-[2.25rem_minmax(0,1fr)_5.5rem_7.5rem_2.75rem_8rem_9.5rem] xl:gap-x-2">
+            <span />
+            {['sources.col.source', 'sources.col.role', 'sources.col.status', 'sources.col.documents', 'sources.col.indexing', 'sources.col.actions'].map(
+              (k) => (
+                <span key={k} className="text-[11px] font-semibold uppercase tracking-wide text-muted-soft">
+                  {t(k)}
+                </span>
+              ),
+            )}
+          </div>
           <ul className="divide-y divide-surface-line px-2 pb-2">
             {sources.map((s) => {
               const Icon = SOURCE_ICON[s.sourceType] ?? Link2;
+              const job = ingestions[s.id];
+              const done = job?.status === 'completed';
+              const failed = job?.status === 'failed';
+              const sourceBusy = busySourceId === s.id;
+              const idxState = indexBySource[s.id]?.index;
+              const idxFailed = indexBySource[s.id]?.job?.status === 'failed' || idxState?.modelMatches === false;
               return (
-                <li key={s.id} className="flex items-center gap-3 px-4 py-3.5">
-                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-700">
+                <li
+                  key={s.id}
+                  className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-2 px-4 py-3.5 xl:grid-cols-[2.25rem_minmax(0,1fr)_5.5rem_7.5rem_2.75rem_8rem_9.5rem] xl:items-center xl:gap-x-2"
+                >
+                  {/* SOURCE — icon */}
+                  <span className="col-start-1 row-start-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-700">
                     <Icon className="h-[18px] w-[18px]" />
                   </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-slate-800">{s.title}</div>
-                    <div className="truncate text-xs text-muted-soft" dir="auto">
-                      {subtitleOf(s)}
+
+                  {/* SOURCE — name (always visible) + secondary metadata */}
+                  <div className="col-start-2 row-start-1 min-w-0 xl:col-start-2 xl:row-start-1">
+                    <div className="truncate text-sm font-semibold text-slate-800" title={s.title} dir="auto">
+                      {s.title}
                     </div>
-                    {s.description ? <p className="mt-0.5 truncate text-xs text-muted">{s.description}</p> : null}
-                    {ingestions[s.id]?.status === 'failed' && ingestions[s.id]?.errorMessage ? (
-                      <p className="mt-0.5 truncate text-xs text-rose-600">{ingestions[s.id]?.errorMessage}</p>
+                    <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-soft">
+                      <span className="truncate" dir="auto">{subtitleOf(s)}</span>
+                      {s.description ? (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="truncate" dir="auto" title={s.description}>{s.description}</span>
+                        </>
+                      ) : null}
+                    </div>
+                    {/* A failed job's reason is bounded here (never stretches the row). */}
+                    {failed && job?.errorMessage ? (
+                      <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-rose-600" dir="auto" title={job.errorMessage}>
+                        {job.errorMessage}
+                      </p>
                     ) : null}
                   </div>
-                  <select
-                    value={s.role}
-                    onChange={(e) => changeRole(s, e.target.value as SourceRole)}
-                    title={t('sources.role.help.' + s.role)}
-                    className="shrink-0 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                  >
-                    <option value="primary">{t('sources.role.primary')}</option>
-                    <option value="supporting">{t('sources.role.supporting')}</option>
-                    <option value="reference">{t('sources.role.reference')}</option>
-                  </select>
-                  {ingestible(s.sourceType) ? (
-                    <div className="flex shrink-0 items-center gap-2">
-                      <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${statusClass(ingestions[s.id]?.status)}`}>
-                        {ingestions[s.id]?.status === 'completed'
-                          ? t('index.content.done')
-                          : statusLabel(ingestions[s.id]?.status)}
+
+                  {/* ROLE */}
+                  <div className="col-start-2 row-start-2 min-w-0 xl:col-start-3 xl:row-start-1">
+                    <select
+                      value={s.role}
+                      onChange={(e) => changeRole(s, e.target.value as SourceRole)}
+                      title={t('sources.role.help.' + s.role)}
+                      className="w-full max-w-[5.5rem] rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                    >
+                      <option value="primary">{t('sources.role.primary')}</option>
+                      <option value="supporting">{t('sources.role.supporting')}</option>
+                      <option value="reference">{t('sources.role.reference')}</option>
+                    </select>
+                  </div>
+
+                  {/* STATUS */}
+                  <div className="col-start-2 row-start-3 min-w-0 xl:col-start-4 xl:row-start-1">
+                    {ingestible(s.sourceType) ? (
+                      <span className={`inline-flex max-w-full items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${statusClass(job?.status)}`}>
+                        <span className="truncate">{done ? t('index.content.done') : statusLabel(job?.status)}</span>
                       </span>
-                      {ingestions[s.id]?.status === 'failed' ? (
+                    ) : (
+                      <span className="text-xs text-muted-soft">—</span>
+                    )}
+                  </div>
+
+                  {/* DOCUMENTS */}
+                  <div className="col-start-2 row-start-4 min-w-0 xl:col-start-5 xl:row-start-1">
+                    {done ? (
+                      <Button
+                        variant="outline"
+                        className="!h-7 !px-1.5 !py-0"
+                        onClick={() => openDocuments(s)}
+                        title={t('documents.open')}
+                      >
+                        <FileText className="h-3.5 w-3.5" />
+                        <span className="sr-only">{t('documents.open')}</span>
+                      </Button>
+                    ) : (
+                      <span className="text-xs text-muted-soft">—</span>
+                    )}
+                  </div>
+
+                  {/* INDEXING */}
+                  <div className="col-start-2 row-start-5 min-w-0 xl:col-start-6 xl:row-start-1">
+                    {done ? (
+                      <span className={`inline-flex max-w-full items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${indexClass(idxFailed ? 'failed' : idxState?.state)}`}>
+                        <span className="truncate">{indexLabelFor(s.id)}</span>
+                      </span>
+                    ) : (
+                      <span className="text-xs text-muted-soft">—</span>
+                    )}
+                  </div>
+
+                  {/* ACTIONS — one primary action for the current state + secondary menu */}
+                  <div className="col-start-3 row-start-1 flex items-center justify-end gap-1 xl:col-start-7 xl:row-start-1">
+                    {ingestible(s.sourceType) && !done ? (
+                      failed ? (
                         <Button
-                          variant="ghost"
-                          disabled={busySourceId === s.id}
-                          onClick={() => retrySource(ingestions[s.id])}
+                          variant="outline"
+                          className="!px-2.5 !py-1 text-xs"
+                          disabled={sourceBusy}
+                          onClick={() => retrySource(job)}
                           title={t('ingestion.retry')}
                         >
-                          <RefreshCw className="h-4 w-4" /> {t('ingestion.retry')}
+                          <RefreshCw className="h-3.5 w-3.5" /> {t('ingestion.retry')}
                         </Button>
                       ) : (
                         <Button
                           variant="outline"
-                          disabled={busySourceId === s.id || ingestions[s.id]?.status === 'processing' || ingestions[s.id]?.status === 'queued'}
+                          className="!px-2.5 !py-1 text-xs"
+                          disabled={sourceBusy || job?.status === 'processing' || job?.status === 'queued'}
                           onClick={() => processSource(s)}
                           title={t('ingestion.process')}
                         >
-                          <Play className="h-4 w-4" /> {busySourceId === s.id ? t('ingestion.status.processing') : t('ingestion.process')}
+                          <Play className="h-3.5 w-3.5" /> {sourceBusy ? t('ingestion.status.processing') : t('ingestion.process')}
                         </Button>
-                      )}
-                      {ingestions[s.id]?.status === 'completed' ? (
-                        <Button variant="ghost" onClick={() => openDocuments(s)} title={t('documents.open')}>
-                          <FileText className="h-4 w-4" /> {t('documents.open')}
-                        </Button>
-                      ) : null}
-                      {ingestions[s.id]?.status === 'completed' ? (
-                        <>
-                          <span
-                            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${indexClass(
-                              indexBySource[s.id]?.job?.status === 'failed'
-                                ? 'failed'
-                                : indexBySource[s.id]?.index.state,
-                            )}`}
-                          >
-                            {indexLabelFor(s.id)}
-                          </span>
-                          {indexBySource[s.id]?.job?.status === 'failed' ||
-                          indexBySource[s.id]?.index.modelMatches === false ? (
-                            <Button
-                              variant="ghost"
-                              disabled={indexBusyId === s.id}
-                              onClick={() => indexSourceKnowledge(s)}
-                              title={t('index.action')}
-                            >
-                              <RefreshCw className={`h-4 w-4 ${indexBusyId === s.id ? 'animate-spin' : ''}`} />
-                              {indexBusyId === s.id ? t('index.working') : t('index.action')}
-                            </Button>
-                          ) : (
-                            <Button
-                              variant="outline"
-                              disabled={indexBusyId === s.id || indexBySource[s.id]?.index.state === 'indexing'}
-                              onClick={() => indexSourceKnowledge(s)}
-                              title={t('index.action')}
-                            >
-                              <Sparkles className={`h-4 w-4 ${indexBusyId === s.id ? 'animate-spin' : ''}`} />
-                              {indexBusyId === s.id ? t('index.working') : t('index.action')}
-                            </Button>
-                          )}
-                        </>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  <div className="flex shrink-0 items-center gap-1">
-                    {s.sourceType === 'url' ? (
-                      <Button variant="ghost" onClick={() => openEdit(s)} title={t('knowledge.edit')}>
-                        <Pencil className="h-4 w-4" /> {t('knowledge.edit')}
-                      </Button>
+                      )
                     ) : null}
-                    {confirmId === s.id ? (
-                      <span className="flex items-center gap-1 text-xs text-rose-600">
-                        {t('knowledge.confirm')}
-                        <Button variant="ghost" disabled={archivingId === s.id} onClick={() => doArchive(s.id)}>
-                          {t('knowledge.archive')}
-                        </Button>
-                        <Button variant="ghost" onClick={() => setConfirmId(null)}>
-                          {t('knowledge.cancel')}
-                        </Button>
-                      </span>
-                    ) : (
-                      <Button variant="ghost" onClick={() => setConfirmId(s.id)} title={t('knowledge.archive')}>
-                        <Archive className="h-4 w-4" /> {t('knowledge.archive')}
-                      </Button>
-                    )}
+                    <SourceRowMenu
+                      label={t('sources.actions')}
+                      items={[
+                        ...(s.sourceType === 'url'
+                          ? [{
+                              key: 'edit',
+                              label: t('knowledge.edit'),
+                              icon: <Pencil className="h-3.5 w-3.5" />,
+                              onClick: () => openEdit(s),
+                            }]
+                          : []),
+                        ...(done
+                          ? [{
+                              key: 'index',
+                              label: indexBusyId === s.id ? t('index.working') : t('index.action'),
+                              icon: <Sparkles className={`h-3.5 w-3.5 ${indexBusyId === s.id ? 'animate-spin' : ''}`} />,
+                              onClick: () => indexSourceKnowledge(s),
+                              disabled: indexBusyId === s.id || idxState?.state === 'indexing',
+                            }]
+                          : []),
+                        ...(confirmId === s.id
+                          ? [
+                              {
+                                key: 'archive-confirm',
+                                label: t('knowledge.confirm'),
+                                icon: <Archive className="h-3.5 w-3.5" />,
+                                onClick: () => doArchive(s.id),
+                                disabled: archivingId === s.id,
+                                danger: true,
+                              },
+                              {
+                                key: 'archive-cancel',
+                                label: t('knowledge.cancel'),
+                                icon: <X className="h-3.5 w-3.5" />,
+                                onClick: () => setConfirmId(null),
+                              },
+                            ]
+                          : [{
+                              key: 'archive',
+                              label: t('knowledge.archive'),
+                              icon: <Archive className="h-3.5 w-3.5" />,
+                              onClick: () => setConfirmId(s.id),
+                              danger: true,
+                            }]),
+                      ]}
+                    />
                   </div>
                 </li>
               );
@@ -1010,6 +1070,82 @@ export function Knowledge() {
         </div>
       ) : null}
     </main>
+  );
+}
+
+/**
+ * Compact per-row actions menu (⋮). Secondary source actions live here so the
+ * row keeps stable columns; a genuinely primary action stays visible in the row.
+ * The popover opens inward (end-0) and closes on outside click or Escape.
+ */
+interface RowMenuItem {
+  key: string;
+  label: string;
+  icon: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}
+
+function SourceRowMenu({ label, items }: { label: string; items: RowMenuItem[] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative shrink-0">
+      <button
+        type="button"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={label}
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-slate-800"
+      >
+        <MoreVertical className="h-4 w-4" />
+      </button>
+      {open ? (
+        <div
+          role="menu"
+          className="absolute end-0 top-full z-30 mt-1 w-44 overflow-hidden rounded-lg border border-surface-line bg-white py-1 text-start shadow-lift"
+        >
+          {items.map((it) => (
+            <button
+              key={it.key}
+              type="button"
+              role="menuitem"
+              disabled={it.disabled}
+              onClick={() => {
+                setOpen(false);
+                it.onClick();
+              }}
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-xs transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                it.danger ? 'text-rose-600 hover:bg-rose-50' : 'text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              {it.icon}
+              <span className="truncate" dir="auto">{it.label}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
