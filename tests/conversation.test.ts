@@ -302,7 +302,7 @@ test('the generic placeholder is still used when a skill has nothing to say', as
  */
 const understandingFake = (corrections: Array<{ target?: string; previous?: unknown; new: unknown }> = []) => ({
   evaluate: async ({ text }: { text: string }) => ({
-    status: 'CLEAR', dialogueAct: 'QUESTION', language: 'ar', issues: [text], references: { resolved: true },
+    status: 'CLEAR' as const, dialogueAct: 'QUESTION' as const, language: 'ar' as const, issues: [text], references: { resolved: true },
     corrections, facts: [], ambiguity: { material: false }, contextUsed: { userCount: 0, conversationCount: 0, caseCount: 0, scopes: [] },
   }),
 });
@@ -311,9 +311,9 @@ const groundedSkillFake = (seen: Array<Record<string, unknown>>) => ({
   execute: async (input: { payload?: unknown }) => {
     seen.push((input.payload ?? {}) as Record<string, unknown>);
     return {
-      status: 'completed', skillId: 'naqaa.fiqh-hayd', skillVersion: 1, runId: 'run-g',
+      status: 'completed' as const, skillId: 'naqaa.fiqh-hayd', skillVersion: 1, runId: 'run-g',
       answer: { text: 'هذا الدم ليس حيضًا.', sourceTitle: 'الحيض الالوكة', evidenceIds: ['chunk-7', 'chunk-8'], label: 'ليس حيضًا' },
-      trace: { status: 'DECIDED', decisionStatus: 'DECIDED', decisionLabel: 'ليس حيضًا', sourceSupport: 'SUPPORTED', acceptedEvidenceRefs: ['chunk-7', 'chunk-8'] },
+      trace: { status: 'DECIDED' as const, decisionStatus: 'DECIDED' as const, decisionLabel: 'ليس حيضًا', sourceSupport: 'SUPPORTED', acceptedEvidenceRefs: ['chunk-7', 'chunk-8'] },
     };
   },
 });
@@ -323,8 +323,8 @@ test('the grounded result is stored in the session and handed to the next turn',
   const seen: Array<Record<string, unknown>> = [];
   const c = new ConversationService({
     persistence: store,
-    understanding: understandingFake(),
-    skills: groundedSkillFake(seen),
+    understanding: understandingFake() as never,
+    skills: groundedSkillFake(seen) as never,
     memory: { fetchBounded: async () => ({ user: [], conversation: [], case: [] }) },
     defaultSkillId: 'naqaa.fiqh-hayd',
   });
@@ -347,8 +347,8 @@ test('a material correction CLEARS the stored grounded result before answering',
   const seen: Array<Record<string, unknown>> = [];
   const c = new ConversationService({
     persistence: store,
-    understanding: understandingFake([{ target: 'bleeding_stopped', new: 'لم يتوقف' }]),
-    skills: groundedSkillFake(seen),
+    understanding: understandingFake([{ target: 'bleeding_stopped', new: 'لم يتوقف' }]) as never,
+    skills: groundedSkillFake(seen) as never,
     memory: { fetchBounded: async () => ({ user: [], conversation: [], case: [] }) },
     defaultSkillId: 'naqaa.fiqh-hayd',
   });
