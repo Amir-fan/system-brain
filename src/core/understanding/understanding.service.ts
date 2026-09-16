@@ -104,7 +104,10 @@ function detectDialogueAct(text: string, context: BoundedUnderstandingContext): 
 }
 
 function detectCorrections(text: string, context: BoundedUnderstandingContext): UnderstandingCorrection[] {
-  const newValue = extractTime(text) ?? /^\s*لا،?\s*(?:أقصد|أعني|اقصد|اعني|i mean|i meant)\s+(.+)$/i.exec(text)?.[1]?.trim();
+  // The corrected value. The marker alternation mirrors detectDialogueAct (which
+  // already treats قصدي/مقصودي/أعني as a CORRECTION): the value extractor must
+  // recognize the same phrasings, or a correction is announced with no value.
+  const newValue = extractTime(text) ?? /^\s*(?:لا[،,]?\s*)?(?:أقصد|اقصد|أعني|اعني|مقصودي|قصدي|i mean|i meant)\s+(.+)$/i.exec(text)?.[1]?.trim();
   if (newValue === undefined) return [];
   // Find the most relevant active preference in user memory context. When the new
   // value is a time, prefer the preference whose existing value is also a time (e.g.

@@ -99,6 +99,24 @@ export class ConversationService {
     stages.push('UNDERSTANDING');
     const understanding = await this.deps.understanding.evaluate({ projectId, text: input.text, context: factsToContext(facts) });
 
+    // 2b. K19 returns a correction as a STRUCTURED interpretation; the session does
+    // not silently write Memory, but the session context is the explicit owner of
+    // "facts supplied in THIS session", so a corrected value replaces that session
+    // fact here and readiness recomputes from it. The target is the requirement the
+    // conversation last asked for, unless K19 resolved a different known fact.
+    for (const correction of understanding.corrections) {
+      const value = correction.new;
+      if (value === undefined || value === null || String(value).trim() === '') continue;
+      const target =
+        correction.target && Object.prototype.hasOwnProperty.call(facts, correction.target)
+          ? correction.target
+          : session.sessionContext.pendingKey;
+      if (!target) continue;
+      const previous = facts[target];
+      const trimmed = String(value).trim();
+      facts[target] = typeof previous === 'number' && /^-?\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
+    }
+
     // 3. Context assembly — personal Memory ONLY when policy allows.
     stages.push('CONTEXT_RETRIEVAL');
     if (policy.personalMemoryRead && this.deps.memory) {

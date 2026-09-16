@@ -48,6 +48,22 @@ test('C correction + memory -> structured 09:00 -> 10:00, no silent write', asyn
   assert.equal((inputCtx.user[0].payload as Record<string, unknown>).value, '09:00');
 });
 
+test('C2 Arabic correction phrasings carry a value (قصدي/أعني/مقصودي, optional لا)', async () => {
+  // dialogueAct already recognized these; the value extractor must match it.
+  for (const [text, expected] of [
+    ['لا، قصدي 2026-09-10', '2026-09-10'],
+    ['لا، أقصد 2026-09-10', '2026-09-10'],
+    ['أعني 2026-09-10', '2026-09-10'],
+    ['مقصودي 2026-09-10', '2026-09-10'],
+    ['لا، قصدي 9', '9'],
+  ]) {
+    const r = await svc.evaluate({ projectId: 'p', text, context: ctx([]) });
+    assert.equal(r.dialogueAct, 'CORRECTION', text);
+    assert.equal(r.corrections.length, 1, text);
+    assert.equal(r.corrections[0].new, expected, text);
+  }
+});
+
 test('D confirmation -> CONFIRMATION, CLEAR', async () => {
   const r = await svc.evaluate({ projectId: 'p', text: 'Yes, that is what I meant.' });
   assert.equal(r.dialogueAct, 'CONFIRMATION');

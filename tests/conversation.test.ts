@@ -118,3 +118,89 @@ test('invalid input rejected', async () => {
 test('emptySessionContext shape', () => {
   assert.deepEqual(emptySessionContext(), { facts: {}, turnCount: 0, recentTurns: [] });
 });
+
+/**
+ * Correcting a fact the conversation is currently asking for: K19 returns the
+ * correction as a structured interpretation, K23 replaces that SESSION fact
+ * (never personal Memory), readiness recomputes, and the flow reaches its
+ * terminal state instead of dead-ending.
+ */
+test('a structured correction replaces the pending session fact and readiness recomputes', async () => {
+  const store = fakeStore();
+  let turn = 0;
+  const scripted = new ConversationService({
+    persistence: store,
+    understanding: {
+      evaluate: async ({ text }) => ({
+        status: 'CLEAR',
+        dialogueAct: ++turn === 2 ? 'CORRECTION' : 'STATEMENT',
+        language: 'ar',
+        issues: [text],
+        references: { resolved: true },
+        corrections: turn === 2 ? [{ new: '2026-09-10' }] : [],
+        facts: [],
+        ambiguity: { material: false },
+        contextUsed: { userCount: 0, conversationCount: 0, caseCount: 0, scopes: [] },
+      }),
+    },
+    skills: {
+      execute: async ({ payload }) => {
+        const facts = ((payload as Record<string, unknown>).context ?? {}) as Record<string, unknown>;
+        const known = Object.entries(facts).map(([key, value]) => ({ key, value, source: 'user' as const }));
+        const r = readiness.evaluate({ requirements: conversationEligibilityFixture.readiness!.requirements, known });
+        return r.status === 'READY_FOR_DECISION'
+          ? { status: 'completed', skillId: 'demo.conversation-eligibility', skillVersion: 1, runId: 'run1', readiness: r }
+          : { status: 'needs_information', skillId: 'demo.conversation-eligibility', skillVersion: 1, runId: 'run1', readiness: r };
+      },
+    },
+    defaultSkillId: 'demo.conversation-eligibility',
+    interactionsFor: () => ({ event_date: { type: 'date' }, duration_days: { type: 'duration' } }),
+  });
+
+  const s = await scripted.create('p', 'a', 'private');
+  const t1 = await scripted.handleMessage('p', 'a', s.id, { text: 'start' });
+  assert.equal(t1.interaction?.key, 'event_date');
+
+  // The user corrects the fact KIP is asking about (no structured answer sent).
+  const t2 = await scripted.handleMessage('p', 'a', s.id, { text: 'لا، قصدي 2026-09-10' });
+  assert.equal(t2.understanding.dialogueAct, 'CORRECTION');
+  assert.equal(store.rows.get(s.id)!.sessionContext.facts.event_date, '2026-09-10');
+  // readiness recomputes from the corrected facts and asks the next real gap
+  assert.deepEqual(t2.readiness?.missingKeys, ['duration_days']);
+  assert.equal(t2.interaction?.key, 'duration_days');
+  assert.equal(t2.interaction?.question, 'كم يوماً استمر هذا الحدث؟');
+
+  // ... and the conversation still reaches its terminal state.
+  const t3 = await scripted.handleMessage('p', 'a', s.id, { text: '6', answers: [{ key: 'duration_days', value: 6 }] });
+  assert.equal(t3.status, 'completed');
+  assert.equal(t3.readiness?.status, 'READY_FOR_DECISION');
+});
+
+test('a correction never invents a fact when nothing is pending', async () => {
+  const store = fakeStore();
+  const c = new ConversationService({
+    persistence: store,
+    understanding: {
+      evaluate: async ({ text }) => ({
+        status: 'CLEAR', dialogueAct: 'CORRECTION', language: 'ar', issues: [text],
+        references: { resolved: true }, corrections: [{ new: '9' }], facts: [],
+        ambiguity: { material: false },
+        contextUsed: { userCount: 0, conversationCount: 0, caseCount: 0, scopes: [] },
+      }),
+    },
+    skills: {
+      execute: async ({ payload }) => {
+        const facts = ((payload as Record<string, unknown>).context ?? {}) as Record<string, unknown>;
+        const known = Object.entries(facts).map(([key, value]) => ({ key, value, source: 'user' as const }));
+        const r = readiness.evaluate({ requirements: conversationEligibilityFixture.readiness!.requirements, known });
+        return { status: 'needs_information', skillId: 'demo.conversation-eligibility', skillVersion: 1, runId: 'run1', readiness: r };
+      },
+    },
+    defaultSkillId: 'demo.conversation-eligibility',
+    interactionsFor: () => ({}),
+  });
+  const s = await c.create('p', 'a', 'private');
+  await c.handleMessage('p', 'a', s.id, { text: 'لا، قصدي 9' });
+  // no pending requirement and no resolved target => the session gains NO fact
+  assert.deepEqual(store.rows.get(s.id)!.sessionContext.facts, {});
+});

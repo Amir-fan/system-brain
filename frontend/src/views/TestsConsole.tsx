@@ -40,33 +40,25 @@ interface Msg {
   readiness?: ConversationResponse['readiness'];
 }
 
-function Bubble({ msg }: { msg: Msg }) {
-  if (msg.role === 'user') {
-    return (
-      <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-brand-600 px-4 py-2.5 text-sm text-white shadow-sm" dir="auto">
-          {msg.text}
-        </div>
-      </div>
-    );
-  }
+/**
+ * Wraps a structured control with the question it answers, so the tester never
+ * faces an unlabeled input: QUESTION / LABEL + CONTROL.
+ */
+function Control({
+  interaction,
+  showQuestion = true,
+  children,
+}: {
+  interaction: InteractionSpec;
+  showQuestion?: boolean;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="flex justify-start">
-      <div className="max-w-[85%] space-y-2">
-        <div className="rounded-2xl rounded-bl-sm border border-surface-line bg-white px-4 py-2.5 text-sm text-slate-800 shadow-sm" dir="auto">
-          {msg.text}
-        </div>
-        {msg.interaction ? <InteractionComposer interaction={msg.interaction} onSend={(ans) => {}} /> : null}
-        {msg.stages && msg.stages.length > 0 ? (
-          <div className="flex flex-wrap gap-1 ps-1">
-            {msg.stages.map((s) => (
-              <span key={s} className="rounded-full bg-surface px-2 py-0.5 text-[11px] text-muted-soft">
-                {PROGRESS_TXT[s] ?? s}
-              </span>
-            ))}
-          </div>
-        ) : null}
-      </div>
+    <div className="space-y-1.5">
+      {showQuestion && interaction.question ? (
+        <p className="text-xs font-medium text-slate-700" dir="auto">{interaction.question}</p>
+      ) : null}
+      {children}
     </div>
   );
 }
@@ -75,10 +67,13 @@ function InteractionComposer({
   interaction,
   onSend,
   submitting,
+  showQuestion = true,
 }: {
   interaction: InteractionSpec;
   onSend: (value: { key: string; value: unknown; text: string }) => void;
   submitting?: boolean;
+  /** The question is always shown next to its control (never a naked input). */
+  showQuestion?: boolean;
 }) {
   const [input, setInput] = useState('');
   const [showOther, setShowOther] = useState(false);
@@ -106,52 +101,58 @@ function InteractionComposer({
 
   if (interaction.type === 'yes_no') {
     return (
-      <div className="flex flex-wrap gap-2">
-        <Button variant="outline" disabled={submitting} onClick={() => sub(true, 'نعم')}>نعم</Button>
-        <Button variant="outline" disabled={submitting} onClick={() => sub(false, 'لا')}>لا</Button>
-      </div>
+      <Control interaction={interaction} showQuestion={showQuestion}>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" disabled={submitting} onClick={() => sub(true, 'نعم')}>نعم</Button>
+          <Button variant="outline" disabled={submitting} onClick={() => sub(false, 'لا')}>لا</Button>
+        </div>
+      </Control>
     );
   }
 
   if (interaction.type === 'single_choice' && interaction.options && interaction.options.length > 0) {
     return (
-      <div className="flex flex-wrap items-center gap-2">
-        {interaction.options.map((opt) => (
-          <Button key={opt} variant="outline" disabled={submitting} onClick={() => sub(opt, opt)}>
-            {opt}
-          </Button>
-        ))}
-        {interaction.allowOther ? (
-          showOther ? (
-            <input
-              autoFocus
-              value={input}
-              onKeyDown={(e) => e.key === 'Enter' && submitText()}
-              onChange={(e) => setInput(e.target.value)}
-              onBlur={() => input.trim() && submitText()}
-              className="w-40 rounded-lg border border-surface-line bg-white px-3 py-2 text-sm outline-none focus:border-brand-400"
-            />
-          ) : (
-            <Button variant="ghost" onClick={() => setShowOther(true)}>أخرى…</Button>
-          )
-        ) : null}
-      </div>
+      <Control interaction={interaction} showQuestion={showQuestion}>
+        <div className="flex flex-wrap items-center gap-2">
+          {interaction.options.map((opt) => (
+            <Button key={opt} variant="outline" disabled={submitting} onClick={() => sub(opt, opt)}>
+              {opt}
+            </Button>
+          ))}
+          {interaction.allowOther ? (
+            showOther ? (
+              <input
+                autoFocus
+                value={input}
+                onKeyDown={(e) => e.key === 'Enter' && submitText()}
+                onChange={(e) => setInput(e.target.value)}
+                onBlur={() => input.trim() && submitText()}
+                className="w-40 rounded-lg border border-surface-line bg-white px-3 py-2 text-sm outline-none focus:border-brand-400"
+              />
+            ) : (
+              <Button variant="ghost" onClick={() => setShowOther(true)}>أخرى…</Button>
+            )
+          ) : null}
+        </div>
+      </Control>
     );
   }
 
   const isNumeric = interaction.type === 'number' || interaction.type === 'duration';
   return (
-    <div className="flex items-center gap-2">
-      <input
-        value={input}
-        type={interaction.type === 'date' ? 'date' : isNumeric ? 'number' : 'text'}
-        placeholder={interaction.type === 'free_text' ? 'اكتب …' : isNumeric ? 'أدخل قيمة' : 'أدخل التاريخ'}
-        onKeyDown={(e) => e.key === 'Enter' && submitText()}
-        onChange={(e) => setInput(e.target.value)}
-        className="w-56 rounded-lg border border-surface-line bg-white px-3 py-2 text-sm outline-none focus:border-brand-400"
-      />
-      <Button variant="primary" disabled={submitting || !input.trim()} onClick={submitText}>إرسال</Button>
-    </div>
+    <Control interaction={interaction} showQuestion={showQuestion}>
+      <div className="flex items-center gap-2">
+        <input
+          value={input}
+          type={interaction.type === 'date' ? 'date' : isNumeric ? 'number' : 'text'}
+          placeholder={interaction.type === 'free_text' ? 'اكتب …' : isNumeric ? 'أدخل قيمة' : 'أدخل التاريخ'}
+          onKeyDown={(e) => e.key === 'Enter' && submitText()}
+          onChange={(e) => setInput(e.target.value)}
+          className="w-56 rounded-lg border border-surface-line bg-white px-3 py-2 text-sm outline-none focus:border-brand-400"
+        />
+        <Button variant="primary" disabled={submitting || !input.trim()} onClick={submitText}>إرسال</Button>
+      </div>
+    </Control>
   );
 }
 
@@ -176,10 +177,21 @@ export function TestsConsole() {
     conversationApi.listEvaluations(activeProject.id).then(setEvaluations).catch(() => {});
   }, [activeProject]);
 
-  const lastResponse = useMemo<ConversationResponse | null>(() => {
-    for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === 'assistant') return msgs[i] as unknown as ConversationResponse;
+  const lastAssistant = useMemo<Msg | null>(() => {
+    for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === 'assistant') return msgs[i];
     return null;
   }, [msgs]);
+
+  // The newest turn is rendered live (its control stays interactive); history is
+  // everything before it. If the newest message is still an in-flight user turn,
+  // render no live block (the user bubble must not disappear).
+  const liveMsg = msgs.length > 0 && msgs[msgs.length - 1].role === 'assistant' ? msgs[msgs.length - 1] : null;
+  const history = liveMsg ? msgs.slice(0, -1) : msgs;
+  // The question is rendered exactly once: in the bubble, or — when the turn IS
+  // just a structured question — as the control's own label.
+  const liveText = (liveMsg?.text ?? '').trim();
+  const liveQuestion = liveMsg?.interaction?.question ?? '';
+  const showLiveBubble = liveText.length > 0 && liveText !== liveQuestion;
 
   const projectId = activeProject?.id;
 
@@ -300,12 +312,12 @@ export function TestsConsole() {
             </span>
             <span>·</span>
             <span>
-              حالة آخر رد: <b className="text-slate-700">{lastResponse ? (STATUS_TXT[lastResponse.status] ?? lastResponse.status) : '—'}</b>
+              حالة آخر رد: <b className="text-slate-700">{lastAssistant ? (STATUS_TXT[lastAssistant.status ?? 'failed'] ?? lastAssistant.status) : '—'}</b>
             </span>
-            {lastResponse?.runId ? (
+            {lastAssistant?.runId ? (
               <>
                 <span>·</span>
-                <span dir="ltr" className="font-mono text-[11px]">{lastResponse.runId.slice(0, 8)}…</span>
+                <span dir="ltr" className="font-mono text-[11px]">{lastAssistant.runId.slice(0, 8)}…</span>
               </>
             ) : null}
             <span className="ms-auto">
@@ -319,7 +331,7 @@ export function TestsConsole() {
             {msgs.length === 0 ? (
               <div className="py-14 text-center text-sm text-muted-soft">ابدا محادثة… اكتب رسالتك أدناه.</div>
             ) : (
-              msgs.slice(0, -1).map((m, i) => (
+              history.map((m, i) => (
                 <div key={i}>
                   {m.role === 'user' ? (
                     <div className="flex justify-end">
@@ -336,25 +348,27 @@ export function TestsConsole() {
               ))
             )}
 
-            {/* Last assistant bubble with live interaction */}
-            {lastResponse ? (
+            {/* Newest assistant turn — its structured control stays live. */}
+            {liveMsg ? (
               <div className="space-y-2">
-                <div className="flex justify-start">
-                  <div className="max-w-[85%] space-y-2">
-                    <div className="rounded-2xl rounded-bl-sm border border-surface-line bg-white px-4 py-2.5 text-sm text-slate-800" dir="auto">
-                      {lastResponse.message}
-                    </div>
-                    {lastResponse.stages && lastResponse.stages.length > 0 ? (
-                      <div className="flex flex-wrap gap-1 ps-1">
-                        {lastResponse.stages.map((s) => (
-                          <span key={s} className="rounded-full bg-surface px-2 py-0.5 text-[11px] text-muted-soft">{PROGRESS_TXT[s] ?? s}</span>
-                        ))}
+                {showLiveBubble ? (
+                  <div className="flex justify-start">
+                    <div className="max-w-[85%] space-y-2">
+                      <div className="rounded-2xl rounded-bl-sm border border-surface-line bg-white px-4 py-2.5 text-sm text-slate-800" dir="auto">
+                        {liveText}
                       </div>
-                    ) : null}
+                    </div>
                   </div>
-                </div>
-                {lastResponse.interaction ? (
-                  <InteractionComposer interaction={lastResponse.interaction} submitting={busy} onSend={onInteraction} />
+                ) : null}
+                {liveMsg.stages && liveMsg.stages.length > 0 ? (
+                  <div className="flex flex-wrap gap-1 ps-1">
+                    {liveMsg.stages.map((s) => (
+                      <span key={s} className="rounded-full bg-surface px-2 py-0.5 text-[11px] text-muted-soft">{PROGRESS_TXT[s] ?? s}</span>
+                    ))}
+                  </div>
+                ) : null}
+                {liveMsg.interaction ? (
+                  <InteractionComposer interaction={liveMsg.interaction} submitting={busy} onSend={onInteraction} />
                 ) : null}
               </div>
             ) : null}
@@ -375,7 +389,7 @@ export function TestsConsole() {
       )}
 
       {/* Feedback */}
-      {started && lastResponse && !(lastResponse.status === 'needs_information') ? (
+      {started && lastAssistant && lastAssistant.status !== 'needs_information' ? (
         <Card className="mt-6 p-5">
           <div className="text-sm font-semibold text-slate-700">هل النتيجة صحيحة؟</div>
           <div className="mt-2 flex gap-2">
@@ -417,22 +431,22 @@ export function TestsConsole() {
             </div>
             <div className="mt-4 space-y-4 text-sm">
               <TraceSection title="العملية">
-                <Row k="run id" v={lastResponse?.runId ?? '—'} />
-                <Row k="Status" v={lastResponse ? `${lastResponse.status} ` : '—'} />
-                <Row k="المراحل الفعلية" v={lastResponse?.stages.join(' → ') ?? '—'} />
+                <Row k="run id" v={lastAssistant?.runId ?? '—'} />
+                <Row k="Status" v={lastAssistant?.status ?? '—'} />
+                <Row k="المراحل الفعلية" v={lastAssistant?.stages?.join(' → ') ?? '—'} />
               </TraceSection>
               <TraceSection title="الفهم">
-                <Row k="dialogue act" v={lastResponse?.understanding?.dialogueAct ?? '—'} />
-                <Row k="understanding" v={lastResponse?.understanding?.status ?? '—'} />
+                <Row k="dialogue act" v={lastAssistant?.understanding?.dialogueAct ?? '—'} />
+                <Row k="understanding" v={lastAssistant?.understanding?.status ?? '—'} />
               </TraceSection>
               <TraceSection title="الاستعداد">
-                <Row k="readiness" v={lastResponse?.readiness?.status ?? '—'} />
-                {lastResponse?.readiness?.missingKeys?.length ? (
-                  <Row k="مفتاح ناقص" v={lastResponse.readiness.missingKeys.join('، ')} />
+                <Row k="readiness" v={lastAssistant?.readiness?.status ?? '—'} />
+                {lastAssistant?.readiness?.missingKeys?.length ? (
+                  <Row k="مفتاح ناقص" v={lastAssistant.readiness.missingKeys.join('، ')} />
                 ) : null}
               </TraceSection>
               <TraceSection title="النتيجة">
-                <Row k="interaction" v={lastResponse?.interaction?.type ?? 'نص حر'} />
+                <Row k="interaction" v={lastAssistant?.interaction?.type ?? 'نص حر'} />
                 <Row k="المشروع" v={activeProject.name} />
                 <Row k="الوضع" v={mode === 'contextual' ? 'سياقي' : 'خاص'} />
               </TraceSection>
