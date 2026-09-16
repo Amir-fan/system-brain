@@ -12,11 +12,25 @@
 
 import { IngestionFailure } from '../../core/ingestion/ingestion.types.ts';
 import { extractPptx } from '../ingestion/pptx-extraction.ts';
+import { extractDocx } from '../ingestion/docx-extraction.ts';
 import type { AcquiredContent } from '../../core/ingestion/ingestion.types.ts';
 import type { IngestionSourceReader, SourceAcquisitionAdapter } from '../../core/ingestion/ingestion.ports.ts';
 
 /** Formats whose bytes are already text and can be decoded directly. */
 export const TEXT_FILE_EXTENSIONS = ['txt', 'md', 'markdown', 'csv', 'json', 'log', 'yaml', 'yml'] as const;
+
+/**
+ * Decode a plain-text file. Honours a UTF-16 BOM (LE/BE) and otherwise reads
+ * UTF-8, stripping a leading BOM. `fatal: false` means invalid bytes become the
+ * replacement char instead of throwing — never a decode crash on user content.
+ */
+function decodeTextFile(bytes: Uint8Array): string {
+  const b = bytes;
+  if (b.length >= 2 && b[0] === 0xff && b[1] === 0xfe) return new TextDecoder('utf-16le').decode(b.subarray(2));
+  if (b.length >= 2 && b[0] === 0xfe && b[1] === 0xff) return new TextDecoder('utf-16be').decode(b.subarray(2));
+  const text = new TextDecoder('utf-8', { fatal: false }).decode(b);
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
 
 export function createFileAcquisitionAdapter(sources: IngestionSourceReader): SourceAcquisitionAdapter {
   return {
@@ -46,6 +60,27 @@ export function createFileAcquisitionAdapter(sources: IngestionSourceReader): So
           provenance: { kind: 'file', detail: 'pptx', byteCount: raw.bytes.length },
         };
       }
+      if (ext === 'docx') {
+        // Word OOXML: the document body becomes ONE canonical document whose text
+        // is the real paragraph content (never a paraphrase, never blank).
+        const extraction = await extractDocx(raw.bytes);
+        return {
+          sourceId,
+          sourceType: 'file',
+          contentType: 'text/plain',
+          text: extraction.text,
+          units: [
+            {
+              key: 'file:' + (raw.originalName ?? 'document.docx'),
+              title: raw.originalName ?? 'document.docx',
+              logicalPath: raw.originalName ?? 'document.docx',
+              contentType: 'text/plain',
+              text: extraction.text,
+            },
+          ],
+          provenance: { kind: 'file', detail: 'docx', byteCount: raw.bytes.length },
+        };
+      }
       if (ext === 'pdf' || (raw.bytes[0] === 0x25 && raw.bytes[1] === 0x50 && raw.bytes[2] === 0x44)) {
         // Scanned/image-only PDF: no usable text layer. Explicit, retryable
         // requirement — never a generic failure, never binary-as-text garbage.
@@ -55,7 +90,7 @@ export function createFileAcquisitionAdapter(sources: IngestionSourceReader): So
         // Explicit, safe failure: no fake extraction, no binary-as-text garbage.
         throw new IngestionFailure('ACQUISITION_FAILED', `unsupported file format: ${ext || 'unknown'}`);
       }
-      const text = new TextDecoder('utf-8', { fatal: false }).decode(raw.bytes);
+      const text = decodeTextFile(raw.bytes);
       const originalName = raw.originalName ?? 'upload';
       return {
         sourceId,
