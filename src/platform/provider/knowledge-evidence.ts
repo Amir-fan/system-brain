@@ -12,6 +12,7 @@
  * search its own project's knowledge.
  */
 
+import { MAX_SKILL_CONTEXT_EVIDENCE } from '../../core/skill/skill.ts';
 import type { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
 import type { SkillKnowledgeCapability, SkillKnowledgePassage } from '../../core/skill/skill.ts';
 import type { ChunkRecord, ChunkSummary } from '../../core/ingestion/chunk.ts';
@@ -96,6 +97,28 @@ export function createKnowledgeEvidence(deps: KnowledgeEvidenceDeps): SkillKnowl
         );
       }
       return passages;
+    },
+
+    async loadByIds(chunkIds) {
+      const out: SkillKnowledgePassage[] = [];
+      for (const id of chunkIds.slice(0, MAX_SKILL_CONTEXT_EVIDENCE)) {
+        const row = await deps.chunks.getChunk(projectId, id).catch(() => null);
+        if (!row) continue;
+        out.push(
+          await toPassage(
+            {
+              chunkId: row.id,
+              documentId: row.documentId,
+              sourceId: row.sourceId,
+              text: row.text,
+              ...(row.logicalPath ? { logicalPath: row.logicalPath } : {}),
+              ...(row.headingContext ? { headingContext: row.headingContext } : {}),
+            },
+            row.index ?? -1,
+          ),
+        );
+      }
+      return out;
     },
 
     async resolveSources(sourceTitles) {

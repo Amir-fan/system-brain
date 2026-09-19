@@ -14,6 +14,8 @@
  */
 
 import type { SkillAnswer, SkillTraceSummary } from '../skill/skill.ts';
+import type { SkillTurnContext } from '../skill/skill';
+import type { FactCertainty, FactProvenance } from '../understanding/understanding.ts';
 
 export type ConversationMode = 'contextual' | 'private';
 export type ConversationStatus = 'active' | 'closed';
@@ -34,6 +36,17 @@ export interface SessionTurn {
 }
 
 /** Bounded session-local continuity. NEVER personal Memory; NEVER a full transcript. */
+/** Bounded metadata for the CURRENT value of one case fact. No history, no event log. */
+export interface CaseFactMeta {
+  provenance: FactProvenance;
+  certainty: FactCertainty;
+  at: string;
+  /** Verbatim user fragment when the value came from a statement. */
+  original?: string;
+  /** At most a couple of superseded values (traceability without history). */
+  superseded?: Array<{ value: string; at: string }>;
+}
+
 export interface SessionContext {
   facts: Record<string, unknown>;
   pendingKey?: string;
@@ -41,6 +54,10 @@ export interface SessionContext {
   recentTurns: SessionTurn[];
   /** Latest grounded terminal result (bounded; cleared by a material correction). */
   lastGroundedResult?: LastGroundedResult;
+  /** Provenance/certainty/currency per fact key (bounded). */
+  factMeta?: Record<string, CaseFactMeta>;
+  /** B3a: bounded reusable turn context (replaced each turn; never authoritative). */
+  skillContext?: SkillTurnContext;
 }
 
 export interface ConversationSession {
@@ -77,7 +94,13 @@ export function policyFor(mode: ConversationMode): ContextPolicy {
     : { mode, personalMemoryRead: true, personalMemoryWrite: false, projectDefaults: true };
 }
 
-export type InteractionType = 'single_choice' | 'multiple_choice' | 'yes_no' | 'number' | 'date' | 'duration' | 'free_text';
+/**
+ * One canonical backend `InteractionType` lives with the readiness contract (the requirement
+ * owns the control AND the expected-answer kind); it is re-exported here so the conversation
+ * layer keeps a single import surface and no second definition exists.
+ */
+export type { InteractionType } from '../readiness/readiness.ts';
+import type { InteractionType } from '../readiness/readiness.ts';
 
 /**
  * Structured interaction contract. The internal requirement `key` stays separate from
@@ -113,6 +136,8 @@ export interface LastGroundedResult {
   explanation?: string;
   sourceTitle?: string;
   evidenceRefs: string[];
+  /** Guarded case-state digest this result was derived from (staleness guard). */
+  caseSignature?: string;
 }
 
 export interface ConversationResponse {
@@ -129,6 +154,16 @@ export interface ConversationResponse {
   trace?: SkillTraceSummary;
   /** Present when the executed skill produced a grounded user-facing answer. */
   answer?: SkillAnswer;
+  /** Present when the turn was a clarification the user must answer. */
+  clarification?: { question: string };
+  /** Bounded, auditable case state (no chain-of-thought, no raw Memory). */
+  caseState?: {
+    facts: Array<{ key: string; value: string; provenance: FactProvenance; certainty: FactCertainty }>;
+    pendingNeed?: string;
+    groundedResult: 'valid' | 'invalidated' | 'none';
+    invalidationReason?: string;
+    candidates?: Array<{ kind: string; value: string; unit?: string; certainty: FactCertainty }>;
+  };
 }
 
 export type ConversationErrorCode = 'CONVERSATION_NOT_FOUND' | 'CONVERSATION_FORBIDDEN' | 'CONVERSATION_INPUT_INVALID';

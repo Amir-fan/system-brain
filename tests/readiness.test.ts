@@ -133,11 +133,17 @@ test('J(runtime) not-ready BLOCKS the skill body; K(runtime) ready ALLOWS it', a
   assert.equal(bodyRan, 1); // body ran exactly once (on the ready path)
 });
 
-test('C(bounded memory) memory value satisfies requirement across runtime', async () => {
+test('C(bounded memory) memory is CONTEXT only: it never closes a material need across the runtime', async () => {
+  // B1.1/K-6: a memory-derived value is not a user assertion — the platform's existing certainty
+  // convention is UNCERTAIN, so it must NOT satisfy a material requirement...
   const runtime = rt([{ memoryKey: 'prior_complete_days', value: 4 }]);
   const r = await runtime.execute({ projectId: 'p', actor: 'a', skillId: 'demo.decision-readiness', payload: {} });
-  assert.equal(r.status, 'completed');
-  assert.equal(r.readiness?.status, 'READY_FOR_DECISION');
+  assert.equal(r.status, 'needs_information');
+  assert.equal(r.readiness?.status, 'NEEDS_INFORMATION');
+  // ...whereas a value supplied FOR THIS CASE does satisfy it.
+  const withContext = await runtime.execute({ projectId: 'p', actor: 'a', skillId: 'demo.decision-readiness', payload: { context: { prior_complete_days: 4 } } });
+  assert.equal(withContext.status, 'completed');
+  assert.equal(withContext.readiness?.status, 'READY_FOR_DECISION');
 });
 
 test('K25: a requirement-owned interaction hint is carried into the missing item', () => {

@@ -99,6 +99,27 @@ export interface ContextUsage {
   scopes: string[];
 }
 
+/** Categorical certainty only — never a percentage. */
+export type FactCertainty = 'CERTAIN' | 'UNCERTAIN' | 'UNKNOWN';
+/** Where a current case value came from. EVIDENCE is contract-compatibility only. */
+export type FactProvenance = 'user_statement' | 'user_answer' | 'memory' | 'evidence';
+
+/**
+ * A bounded, GENERIC candidate fact extracted from the user's own words. It records WHAT
+ * was said (duration, quantity, cessation, categorical, observation) plus its certainty
+ * and provenance — never what it means in any domain. Binding to a domain need, and all
+ * interpretation, belongs to the domain skill.
+ */
+export interface CandidateFact {
+  kind: 'duration' | 'quantity' | 'boolean' | 'categorical' | 'observation';
+  value: number | boolean | string;
+  unit?: string;
+  /** Verbatim user fragment (bounded) — kept for trace/debugging. */
+  originalText: string;
+  certainty: FactCertainty;
+  provenance: FactProvenance;
+}
+
 export interface UnderstandingResult {
   status: UnderstandingStatus;
   language: UnderstandingLanguage;
@@ -107,6 +128,8 @@ export interface UnderstandingResult {
   references: ReferenceResult;
   corrections: UnderstandingCorrection[];
   facts: UnderstandingFact[];
+  /** Generic candidate facts from this message (domain-free; may be hedged/hypothetical). */
+  candidates?: CandidateFact[];
   ambiguity: AmbiguityResult;
   clarification?: Clarification;
   contextUsed: ContextUsage;

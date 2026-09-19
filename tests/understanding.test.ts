@@ -83,12 +83,16 @@ test('F resolvable reference -> CLEAR', async () => {
   assert.equal(r.references.resolved, true);
 });
 
-test('G unresolved material reference -> NEEDS_CLARIFICATION, no guessed referent', async () => {
+test('G deictic reference with ZERO candidates -> CLEAR, never an unanswerable question (B1.2)', async () => {
+  // Corrected: this case used to pin NEEDS_CLARIFICATION, which asked the user to identify a
+  // referent that does not exist in context. Nothing to disambiguate -> no question.
   const r = await svc.evaluate({ projectId: 'p', text: 'What about that one?', context: ctx([]) });
-  assert.equal(r.status, 'NEEDS_CLARIFICATION');
+  assert.equal(r.status, 'CLEAR');
+  assert.equal(r.clarification, undefined);
   assert.equal(r.references.resolved, false);
   assert.equal(r.references.referent, undefined);
-  assert.equal(r.ambiguity.material, true);
+  assert.equal(r.references.needsClarification, false);
+  assert.equal(r.ambiguity.material, false);
 });
 
 test('H temporal normalization against explicit timestamp', async () => {
@@ -111,6 +115,63 @@ test('J project isolation at the service level (empty cross-project context)', a
   // Nothing from project A is injected; the cross-project evaluation sees no referents.
   assert.equal(r.contextUsed.userCount, 0);
   assert.equal(r.references.resolved, false);
+});
+
+// ---------------------------------------------------------------------------
+// B1.2 — lexical-safe Arabic deictic matching + no unanswerable reference question.
+// `references.referent` is set only when a deictic token matched together with exactly one
+// candidate, so it is the cleanest public signal that the token was (or was not) detected.
+// ---------------------------------------------------------------------------
+
+const reportedSentence = 'نزل علي دم اليوم، وأنا مو حامل ولا نفساء، واستمر 7 ساعات وبعدين وقف. هل أصلي؟';
+
+test('K lexical-token matching: نفساء does not trigger نفس; نفس الشيء still resolves', async () => {
+  const one = ctx([ref({ id: 'only', memoryKey: 'appointment' })]);
+  for (const text of ['أنا مو حامل ولا نفساء', 'كذلك الأمر', 'النفس', 'نفسي أريد أن أعرف']) {
+    const r = await svc.evaluate({ projectId: 'p', text, context: one });
+    assert.equal(r.references.referent, undefined, `${text}: must not be read as a deictic reference`);
+    assert.equal(r.status, 'CLEAR', text);
+  }
+  for (const text of ['نفس الشيء', 'أريد ذلك', 'هل هذا صحيح؟']) {
+    const r = await svc.evaluate({ projectId: 'p', text, context: one });
+    assert.equal(r.references.referent, 'appointment', `${text}: a standalone deictic token still resolves`);
+  }
+});
+
+test('L the reported sentence passes the reference gate (no referent question)', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: reportedSentence, context: ctx([]) });
+  assert.notEqual(r.clarification?.question, 'إلى أي عنصر تشير بالضبط؟');
+  assert.equal(r.references.resolved, true);
+  assert.equal(r.ambiguity.material, false);
+  assert.equal(r.status, 'CLEAR');
+});
+
+test('M zero candidates: deictic detected but NO unanswerable reference question', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: 'نفس الشيء', context: ctx([]) });
+  assert.equal(r.references.resolved, false);
+  assert.equal(r.references.needsClarification, false);
+  assert.equal(r.ambiguity.material, false);
+  assert.equal(r.status, 'CLEAR');
+  assert.equal(r.clarification, undefined);
+});
+
+test('N multiple legitimate candidates keep the clarification (real ambiguity preserved)', async () => {
+  const two = ctx([ref({ id: 'a', memoryKey: 'appointment' }), ref({ id: 'b', memoryKey: 'preferred_language' })]);
+  const r = await svc.evaluate({ projectId: 'p', text: 'نفس الشيء', context: two });
+  assert.equal(r.references.resolved, false);
+  assert.equal(r.references.needsClarification, true);
+  assert.equal(r.ambiguity.material, true);
+  assert.equal(r.status, 'NEEDS_CLARIFICATION');
+  assert.equal(r.clarification?.reason, 'unresolved_reference');
+  assert.equal(r.clarification?.question, 'إلى أي عنصر تشير بالضبط؟');
+});
+
+test('O zero-candidate rejection asks its ANSWERABLE alternative, never a referent question', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: 'No, not that one.', context: ctx([]) });
+  assert.equal(r.dialogueAct, 'REJECTION');
+  assert.equal(r.status, 'NEEDS_CLARIFICATION');
+  assert.equal(r.clarification?.question, 'ما هو الخيار الذي تقصده بدلاً من ذلك؟');
+  assert.notEqual(r.clarification?.question, 'إلى أي عنصر تشير بالضبط؟');
 });
 
 test('invalid input rejected', async () => {

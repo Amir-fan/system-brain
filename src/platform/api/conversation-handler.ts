@@ -12,6 +12,7 @@ import { authorizeProject } from '../../core/authorization/project-boundary.ts';
 import type { ProjectBoundaryReaders } from '../../core/authorization/project-boundary.ts';
 import type { Actor } from '../../core/authorization/actor.ts';
 import { ConversationFailure, type ConversationMode } from '../../core/conversation/conversation.ts';
+import { isProviderError } from '../../core/model-gateway/gateway-errors.ts';
 import type { ConversationService } from '../../core/conversation/conversation.service.ts';
 import type { EvaluationStorage, ProblemCategory } from '../provider/evaluation.storage.ts';
 
@@ -23,13 +24,24 @@ export interface ConversationApiDeps {
 
 export type ConversationApiResult =
   | { ok: true; status: number; data: unknown }
-  | { ok: false; status: number; error: { message: string; category: string; code?: string } };
+  | {
+      ok: false;
+      status: number;
+      error: {
+        message: string;
+        category: string;
+        code?: string;
+        /** Technical execution trace for the INTERNAL tester (durations/stages/codes only;
+         *  never prompts, model reasoning or credentials). */
+        diagnostics?: unknown;
+      };
+    };
 
 const ok = (data: unknown, status = 200): ConversationApiResult => ({ ok: true, status, data });
-const fail = (message: string, category: string, status = 400, code?: string): ConversationApiResult => ({
+const fail = (message: string, category: string, status = 400, code?: string, diagnostics?: unknown): ConversationApiResult => ({
   ok: false,
   status,
-  error: { message, category, ...(code ? { code } : {}) },
+  error: { message, category, ...(code ? { code } : {}), ...(diagnostics !== undefined ? { diagnostics } : {}) },
 });
 
 const isMode = (v: unknown): v is ConversationMode => v === 'contextual' || v === 'private';
@@ -71,7 +83,13 @@ export async function handleConversationMessage(
     if (e instanceof ConversationFailure) {
       return fail(e.message, 'conversation', e.code === 'CONVERSATION_NOT_FOUND' ? 404 : 400, e.code);
     }
-    return fail('تعذر معالجة الرسالة.', 'conversation', 500);
+    // Provider/transport failure = temporary infrastructure problem, NOT a domain verdict:
+    // reported as retryable, with no provider name, stack trace or HTTP internals exposed.
+    const diagnostics = (e as { execution?: unknown } | null)?.execution;
+    if (isProviderError(e)) {
+      return fail('تعذر إكمال الطلب مؤقتًا. حاولي مرة أخرى.', 'provider', 503, undefined, diagnostics);
+    }
+    return fail('تعذر معالجة الرسالة.', 'conversation', 500, undefined, diagnostics);
   }
 }
 

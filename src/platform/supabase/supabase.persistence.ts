@@ -14,16 +14,25 @@ import type {
   RunRecord,
 } from '../../core/runtime/runtime.ports.ts';
 
-/** Platform boundary: this heavyweight type stays here, never in Core. */
+/**
+ * Platform boundary: this heavyweight type stays here, never in Core.
+ *
+ * A write/read chain is both chainable and awaitable; awaiting yields the PostgREST result.
+ * PostgREST reports failures in `error` WITHOUT throwing, so the result MUST be inspected
+ * — never discarded.
+ */
+export type SupabaseWrite = SupabaseDatabase &
+  PromiseLike<{ data: unknown; error: { code?: string; message: string } | null }>;
+
 export type SupabaseDatabase = {
   from(table: string): SupabaseDatabase;
   select(columns: string): SupabaseDatabase;
-  insert(values: Record<string, unknown> | Record<string, unknown>[]): SupabaseDatabase;
-  update(values: Record<string, unknown>): SupabaseDatabase;
+  insert(values: Record<string, unknown> | Record<string, unknown>[]): SupabaseWrite;
+  update(values: Record<string, unknown>): SupabaseWrite;
   delete(): SupabaseDatabase;
-  eq(column: string, value: unknown): SupabaseDatabase;
-  neq(column: string, value: unknown): SupabaseDatabase;
-  in(column: string, values: unknown[]): SupabaseDatabase;
+  eq(column: string, value: unknown): SupabaseWrite;
+  neq(column: string, value: unknown): SupabaseWrite;
+  in(column: string, values: unknown[]): SupabaseWrite;
   order(column: string, opts?: { ascending?: boolean }): SupabaseDatabase;
   limit(count: number): Promise<{ data: Array<Record<string, unknown>> | null; error: unknown }>;
   maybeSingle(): Promise<{ data: Record<string, unknown> | null; error: unknown }>;
@@ -65,7 +74,7 @@ export function createSupabaseRuntimePersistence(db: SupabaseDatabase): RuntimeP
     },
 
     async createRun(record) {
-      await db.from('runs').insert({
+      const { error } = await db.from('runs').insert({
         id: record.id,
         project_id: record.projectId,
         actor_subject: record.actorSubject ?? null,
@@ -76,6 +85,9 @@ export function createSupabaseRuntimePersistence(db: SupabaseDatabase): RuntimeP
         latency_ms: record.latencyMs ?? null,
         error_category: record.errorCategory ?? null,
       });
+      // A run that cannot be opened must not look opened; surface it instead of
+      // continuing with a run the store does not know about.
+      if (error) throw new Error(`run insert failed: ${error.code ?? ''} ${error.message}`.trim());
     },
 
     async updateRun(id, patch) {
@@ -92,7 +104,11 @@ export function createSupabaseRuntimePersistence(db: SupabaseDatabase): RuntimeP
         if (patch.usage.totalTokens !== undefined) dbPatch.usage_tokens_total = patch.usage.totalTokens;
         if (patch.usage.costUsd !== undefined) dbPatch.usage_cost_usd = patch.usage.costUsd;
       }
-      await db.from('runs').update(dbPatch).eq('id', id);
+      // PostgREST reports write failures in `error` WITHOUT throwing. Swallowing it
+      // left runs permanently `started` and made real failures undiagnosable, so the
+      // runtime is told explicitly whether finalization succeeded.
+      const { error } = await db.from('runs').update(dbPatch).eq('id', id);
+      if (error) throw new Error(`run update failed: ${error.code ?? ''} ${error.message}`.trim());
     },
   };
 }

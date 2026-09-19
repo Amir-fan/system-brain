@@ -30,7 +30,11 @@ const QUESTION_WORDS_EN = /^(what|when|where|who|why|how|which|is|are|do|does|ca
 const QUESTION_WORDS_AR = /^(ما|ماذا|كيف|متى|أين|اين|هل|لماذا|كم|من|أي)\b/;
 const IMPERATIVES_EN = /^(book|reserve|schedule|send|open|show|give|create|add|set|call|remind|check)\b/i;
 const IMPERATIVES_AR = /^(احجز|أرسل|افتح|أعطني|أرني|أنشئ|أضف|اضبط|اذكر|ذكرني|تحقق)\b/;
-const DEICTIC = /\b(that one|that|the previous one|the same|this one|it)\b|(هذا|ذلك|الذي|نفسه|نفس)/;
+// Lexical-token match (B1.2): a deictic term counts only as a standalone token, never as a
+// substring of another word — Arabic نفس inside نفساء, ذلك inside كذلك. Unicode LETTERS are the
+// token class; combining marks (harakat/tanween) are not letters, so a marked standalone word
+// (نفسٌ) still matches while نفساء does not. No word is special-cased.
+const DEICTIC = /(?<!\p{L})(?:that one|the previous one|the same|this one|that|it|هذا|ذلك|الذي|نفسه|نفس)(?!\p{L})/u;
 
 function detectLanguage(text: string): UnderstandingLanguage {
   if (ARABIC.test(text)) return 'ar';
@@ -125,18 +129,24 @@ function resolveReferences(text: string, context: BoundedUnderstandingContext): 
   if (!DEICTIC.test(text)) return { resolved: true };
   const candidates = [...context.user, ...context.conversation, ...context.case];
   if (candidates.length === 1) return { resolved: true, referent: candidates[0].memoryKey };
-  if (candidates.length === 0) return { resolved: false, needsClarification: true };
-  return { resolved: false, needsClarification: true };
+  // B1.2: with ZERO candidates there is no referent the user could name, so a referent question
+  // would be unanswerable. It stays unresolved (a rejection still needs its alternative question)
+  // but is explicitly NOT a clarification-worthy reference ambiguity. Multiple candidates are.
+  return { resolved: false, needsClarification: candidates.length > 1 };
 }
 
 function materialAmbiguity(text: string, references: ReferenceResult): AmbiguityResult {
   if (references.resolved) return { material: false };
-  // A deictic reference with no single referent is material to the interpretation.
+  // Only an ambiguity the user can actually resolve is material (B1.2): a deictic token with no
+  // candidate referent has nothing to disambiguate, so it must not block the turn.
+  if (references.needsClarification !== true) return { material: false };
   return { material: true, reason: 'unresolved_reference' };
 }
 
 function clarificationFor(text: string, refs: ReferenceResult, act: DialogueAct): Clarification {
-  if (!refs.resolved) {
+  // B1.2: the referent question is only askable when a candidate set actually exists. With none it
+  // is unanswerable, so a rejection gets its answerable alternative question instead.
+  if (!refs.resolved && refs.needsClarification === true) {
     return { reason: 'unresolved_reference', question: 'إلى أي عنصر تشير بالضبط؟', candidates: [] };
   }
   if (act === 'REJECTION') {
@@ -145,6 +155,60 @@ function clarificationFor(text: string, refs: ReferenceResult, act: DialogueAct)
   return { reason: 'material_ambiguity', question: 'أرجو توضيح قصدك حتى أتمكن من المتابعة.' };
 }
 
+
+const UNKNOWN_MARKERS = /(ما أدري|ما ادري|ما أعرف|ما اعرف|لا أعرف|لا اعرف|مو متأكد|مو متأكدة|مب متأكد|غير متأكد|ما أعلم|لا علم)/;
+const HEDGE_MARKERS = /(غالبا|غالبًا|تقريبا|تقريبًا|ربما|يمكن|أظن|اظن|لعل|مو متأكد|مو متأكدة)/;
+/** A speculative clause must never become current case truth (Slice B owns full F5). */
+const HYPOTHETICAL_MARKERS = /(^|\s)(لو|اذا|إذا|بفرض|في حال)(\s|$)/;
+
+/**
+ * Generic candidate-fact extraction. Domain-free by construction: quantities with a time
+ * unit become a duration, cessation verbs a boolean, "I don't know" an UNKNOWN categorical,
+ * hedged/hypothetical language lowers certainty, everything else stays an observation.
+ * Interpretation ("is this enough for X?") is never done here.
+ */
+function extractCandidates(text: string): CandidateFact[] {
+  const normalized = normalizeDigits(text);
+  const unknown = UNKNOWN_MARKERS.test(text);
+  const hedged = HEDGE_MARKERS.test(text);
+  const hypothetical = HYPOTHETICAL_MARKERS.test(text);
+  const certainty: FactCertainty = unknown ? 'UNKNOWN' : hedged || hypothetical ? 'UNCERTAIN' : 'CERTAIN';
+  const out: CandidateFact[] = [];
+
+  const UNITS: Array<[RegExp, string]> = [
+    [/(ساعات|ساعتان|ساعتين|ساعة|ساعه|ساعه)/, 'hour'],
+    [/(أيام|ايام|يومين|يوم)/, 'day'],
+    [/(أسابيع|اسابيع|أسبوع|اسبوع)/, 'week'],
+    [/(شهور|أشهر|اشهر|شهر)/, 'month'],
+    [/(دقائق|دقيقة|دقيقه)/, 'minute'],
+  ];
+  for (const m of text.matchAll(/([0-9٠-٩۰-۹]+(?:[.][0-9٠-٩۰-۹]+)?)\s*([؀-ۿ]+)/g)) {
+    const n = parseNumberLoose(m[1]);
+    if (n === undefined || !Number.isFinite(n)) continue;
+    const word = m[2];
+    const unit = UNITS.find(([re]) => re.test(word))?.[1];
+    if (!unit) continue;
+    out.push({ kind: 'duration', value: n, unit, originalText: m[0].slice(0, 60), certainty, provenance: 'user_statement' });
+  }
+  const stop = /(وقف|توقف|توقّف|انقطع|جفّ|جف |نشف|اختفت)/.exec(text);
+  if (stop) {
+    out.push({ kind: 'boolean', value: true, originalText: stop[0].slice(0, 60), certainty, provenance: 'user_statement' });
+  }
+  if (unknown) {
+    out.push({ kind: 'categorical', value: 'UNKNOWN', originalText: UNKNOWN_MARKERS.exec(text)?.[0]?.slice(0, 60) ?? 'unknown', certainty: 'UNKNOWN', provenance: 'user_statement' });
+  }
+  if (out.length === 0) {
+    const q = parseNumberLoose(text);
+    if (q !== undefined) out.push({ kind: 'quantity', value: q, originalText: String(q), certainty, provenance: 'user_statement' });
+  }
+  const obs = text.trim().slice(0, 200);
+  if (obs) out.push({ kind: 'observation', value: obs, originalText: obs, certainty, provenance: 'user_statement' });
+
+  return out.slice(0, 8);
+}
+
+import type { CandidateFact, FactCertainty } from './understanding.ts';
+import { normalizeDigits, parseNumberLoose } from './numbers.ts';
 export class UnderstandingService {
   /** Deterministic: no model call. */
   async evaluate(input: UnderstandingInput): Promise<UnderstandingResult> {
@@ -184,6 +248,8 @@ export class UnderstandingService {
       references,
       corrections,
       facts,
+
+      candidates: extractCandidates(text),
       ambiguity,
       ...(clarification ? { clarification } : {}),
       contextUsed: {

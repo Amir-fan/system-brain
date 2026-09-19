@@ -9,6 +9,7 @@ import { policyFor, type ConversationSession } from '../src/core/conversation/co
 import { emptySessionContext } from '../src/core/conversation/conversation.ts';
 import { conversationEligibilityFixture } from '../src/core/skill/conversation-eligibility-fixture.ts';
 import { DecisionReadinessService } from '../src/core/readiness/readiness.service.ts';
+import type { DecisionRequirement } from '../src/core/readiness/readiness.ts';
 
 function fakeStore() {
   const rows = new Map<string, ConversationSession>();
@@ -212,7 +213,7 @@ test('a correction never invents a fact when nothing is pending', async () => {
  */
 test('dynamic requirement: the conversation renders the requirement-owned control and bounded trace', async () => {
   const store = fakeStore();
-  const requirement = {
+  const requirement: DecisionRequirement = {
     key: 'bleeding_stopped',
     description: 'شرط الاتصال',
     material: true,
