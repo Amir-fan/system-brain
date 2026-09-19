@@ -13,14 +13,10 @@ export interface ProviderPublic {
 
 const BASE = '/v1/admin/providers';
 
+import { call } from './transport';
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
-  });
-  const body = (await res.json()) as unknown;
-  if (!res.ok) throw new Error(((body as { error?: { message?: string } }).error?.message) ?? 'request failed');
-  return (body as { data: T }).data;
+  return call<T>(`${BASE}${path}`, init);
 }
 
 export async function connectOpenRouter(apiKey: string, displayName?: string): Promise<ProviderPublic> {
