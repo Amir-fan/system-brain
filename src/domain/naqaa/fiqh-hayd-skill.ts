@@ -21,8 +21,21 @@
  */
 
 import type { SkillDefinition, SkillExecutionContext, SkillKnowledgePassage } from '../../core/skill/skill.ts';
+import {
+  MAX_SKILL_CONTEXT_EVIDENCE,
+  MAX_SKILL_CONTEXT_REQUIREMENTS,
+  MAX_SKILL_CONTEXT_SOURCES,
+  type SkillTurnContext,
+} from '../../core/skill/skill.ts';
 import { SkillFailure } from '../../core/skill/skill.ts';
-import type { DecisionRequirement, KnownContextItem, ReadinessResult } from '../../core/readiness/readiness.ts';
+import {
+  hasKnownValue,
+  isInteractionType,
+  type DecisionRequirement,
+  type KnownContextItem,
+  type ReadinessResult,
+  type RequirementInteraction,
+} from '../../core/readiness/readiness.ts';
 import {
   APPROVED_SOURCE_TITLES,
   FIQH_HAYD_SKILL_ID,
@@ -40,11 +53,25 @@ import {
   type FiqhReasoningPlan,
   type FiqhSourceGap,
   type FiqhSourceSupport,
+  NEED_CATALOGUE,
+  canonicalInteractionFor,
+  isMaterialityStable,
   DECISION_MAX_OUTPUT_TOKENS,
   REASONING_MAX_OUTPUT_TOKENS,
   MADHHAB,
   type FiqhConfidence,
 } from './fiqh-hayd-contracts.ts';
+const digestOf = (text: string): string => {
+  let h = 0;
+  const t = text.slice(0, 400);
+  for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36) + ':' + t.length;
+};
+const caseDigestOf = (known: Record<string, unknown>): string => {
+  const keys = Object.keys(known).sort();
+  return keys.length + ':' + digestOf(keys.map((k) => k + '=' + String(known[k])).join('|'));
+};
+
 
 /** Existing K22 evaluator, injected (the skill owns its dynamic requirements). */
 export interface FiqhHaydSkillDeps {
@@ -52,6 +79,26 @@ export interface FiqhHaydSkillDeps {
 }
 
 const WORKLOAD = 'knowledge_answer';
+/** Reused bound for a requirement's allowed-value set (the Skill's existing maximum). */
+const MAX_NEED_OPTIONS = 6;
+
+/**
+ * B1.0 / G1 — the expected-answer contract of a requirement. A KNOWN catalogue need's answer
+ * kind is owned by the Skill and can NEVER be weakened or redefined by a model declaration:
+ * the canonical contract wins. A key outside the catalogue keeps the model's declaration (or an
+ * explicit free text) — it is never silently promoted to a trusted typed contract.
+ */
+function interactionForNeed(key: string, declared: unknown): RequirementInteraction {
+  const canonical = canonicalInteractionFor(key);
+  if (canonical) return canonical;
+  const o = (declared && typeof declared === 'object' ? declared : {}) as Record<string, unknown>;
+  const options = Array.isArray(o.options) ? o.options.map(strOf).filter(Boolean).slice(0, MAX_NEED_OPTIONS) : [];
+  return {
+    type: isInteractionType(o.type) ? o.type : 'free_text',
+    ...(options.length ? { options } : {}),
+    ...(typeof o.allowOther === 'boolean' ? { allowOther: o.allowOther } : {}),
+  };
+}
 
 // ---------------------------------------------------------------- prompt helpers
 
@@ -73,12 +120,15 @@ const INTERPRETER_SYSTEM = [
   '5) المتطلبات المادية يجب أن تكون حقائق يستطيع المستخدم ملاحظتها بنفسه، وبصياغة عربية بسيطة',
   '   (بمستوى يفهمه من عمره ١٢ سنة)، وبلا مصطلحات فقهية، وسؤال واحد لكل حاجة.',
   '6) لا تسأل عن حقيقة يعرفها السياق أو ذكرها المستخدم في وصفه للحالة (knownFromCase=true).',
+  '7) ترتيب المتطلبات مقصود وليس عشوائيًا: قدّم أولًا الحقيقة التي يُمكِن أن يُحدِّد جوابها',
+  '   الفرع أو الفرض المطبَّق — أو يُلغي أسئلة أخرى — ثم ما هو تفصيل أو تحسين لاحقًا.',
   'أجب بـ JSON فقط بالشكل:',
   '{"interpretations":[{"observation":"...","candidateConcept":"...","supported":true,"citations":["chunkId"]}],',
   ' "requirements":[{"key":"snake_case","whyMaterial":"...","question":{"wording":"..."},',
   ' "interaction":{"type":"single_choice|yes_no|number|duration|date|free_text","options":["..."]},',
   ' "citations":["chunkId"],"knownFromCase":false}],',
   ' "unresolved":["..."]}',
+  `المعرّفات المعتمدة: ${Object.keys(NEED_CATALOGUE).join(', ')}.`,
 ].join('\n');
 
 const DECISION_SYSTEM = [
@@ -92,6 +142,9 @@ const DECISION_SYSTEM = [
   '5أ) كل سؤال يجب أن يحمل حاجة واحدة فقط؛ لا تجمع شرطين أو حاجتين في سؤال واحد.',
   '5ب) حقائق معروفة تأتي بقيمة مختصرة ومعها الأسئلة التي أجابت عنها؛ فسّر كل قيمة في ضوء سؤالها.',
   '5ج) إن تعارضت حقيقة معروفة مع وصف الحالة، لا تُصدر حكمًا: status=SOURCE_GAP بسبب صريح.',
+  '5د) مفتاح كل معلومة (key) يجب أن يكون من قائمة المعرّفات المعتمدة حرفيًا؛ لا تخترع مفتاحًا جديدًا.',
+  '5هـ) القيم التي وصلت معها درجة يقين غير CERTAIN (مجهولة أو غير مؤكدة) لا تُعامل كحقيقة؛ اذكرها في unresolved.',
+  `المعرّفات المعتمدة: ${Object.keys(NEED_CATALOGUE).join(', ')}.`,
   '6) إن قررت: كن مباشرًا وبسيطًا (يفهمه من عمره ١٢ سنة)، بلا مصطلحات زائدة.',
   'أجب بـ JSON فقط:',
   '{"status":"DECIDED|NEEDS_INFORMATION|SOURCE_GAP",',
@@ -207,13 +260,13 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
       }
 
       // ---- 1. the case as the user described it (bounded) -------------------
-      const caseText = bounded(
-        [
-          ...(input.recentTurns ?? []).filter((t) => t.role === 'user').map((t) => t.text),
-          strOf(input.text),
-        ].join('\n'),
-        MAX_CASE_CHARS,
-      );
+      // Bounded narrative keeps the NEWEST content: older prose is dropped first, so a
+      // recent statement is never the thing that falls off the context window.
+      const narrative = [
+        ...(input.recentTurns ?? []).filter((t) => t.role === 'user').map((t) => t.text),
+        strOf(input.text),
+      ].join('\n');
+      const caseText = narrative.length > MAX_CASE_CHARS ? narrative.slice(-MAX_CASE_CHARS) : narrative;
 
       // ---- 2. approved source set (identity, not just role) -----------------
       const approved = await ctx.knowledge.resolveSources([...APPROVED_SOURCE_TITLES]);
@@ -231,6 +284,102 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         };
       }
       const approvedIds = approved.map((s) => s.id);
+
+      // ---- 2b. B3a fast path: continue from the bounded reusable turn context -------
+      // Only when this turn is UNAMBIGUOUSLY the structured answer to the stored pending
+      // need and nothing else material changed. Otherwise: full grounded path (default).
+      const ex = (ctx.input ?? {}) as {
+        pendingKey?: string;
+        changedFactKeys?: unknown[];
+        answeredKeys?: unknown[];
+        correctionsPresent?: boolean;
+        skillContext?: SkillTurnContext;
+        factMeta?: Record<string, { certainty?: string }>;
+      };
+      const reusable = ex.skillContext;
+      const answeredKeys = (Array.isArray(ex.answeredKeys) ? ex.answeredKeys : []).map(strOf).filter(Boolean);
+      const changedKeys = (Array.isArray(ex.changedFactKeys) ? ex.changedFactKeys : []).map(strOf).filter(Boolean);
+      const pendingStored = strOf(ex.pendingKey);
+      const reusableRequirements = (reusable?.requirements ?? [])
+        .slice(0, MAX_SKILL_CONTEXT_REQUIREMENTS)
+        .filter((r) => Boolean(r && r.key));
+      const canReuse = Boolean(
+        reusable &&
+        reusable.skillId === FIQH_HAYD_SKILL_ID &&
+        reusable.skillVersion === FIQH_HAYD_SKILL_VERSION &&
+        pendingStored &&
+        answeredKeys.length === 1 && answeredKeys[0] === pendingStored &&
+        changedKeys.length > 0 && changedKeys.every((k) => k === pendingStored) &&
+        ex.correctionsPresent !== true &&
+        reusableRequirements.length > 0 &&
+        reusable.evidenceRefs.length > 0 &&
+        reusable.sourceIds.length > 0 &&
+        reusable.sourceIds.every((id) => approvedIds.includes(id)),
+      );
+      // ---- 2c. B1.1/K-3: is the PERSISTED materiality still trustworthy after this answer?
+      // The gate above only proves that the answer BOUND cleanly. It does NOT prove that the
+      // stored requirement list is still material: answering A may have changed which conditions
+      // this case requires, so continuing B/C from the stored list could ask a question that no
+      // longer earns its place. Reuse therefore needs a POSITIVE Skill-owned stability statement;
+      // anything else falls through to the fresh derivation below (fail-safe, correctness first).
+      const materialitySafe = canReuse && isMaterialityStable(pendingStored);
+      if (canReuse && !materialitySafe) gaps.notes.push('b1.1_materiality_stability_unproven');
+      if (materialitySafe && reusable) {
+        const metaIn = ex.factMeta ?? {};
+        const knownItems: KnownContextItem[] = Object.entries(known)
+          .filter(([, v]) => isKnown(v))
+          .map(([key, value]) => ({
+            key,
+            value,
+            source: 'conversation' as const,
+            ...(metaIn[key]?.certainty ? { certainty: metaIn[key]!.certainty as 'CERTAIN' | 'UNCERTAIN' | 'UNKNOWN' } : {}),
+          }));
+        const reusedReadiness = deps.readiness.evaluate({ requirements: reusableRequirements, known: knownItems });
+        if (reusedReadiness.status !== 'READY_FOR_DECISION') {
+          const refs = reusable.evidenceRefs.slice(0, MAX_SKILL_CONTEXT_EVIDENCE);
+          const refreshed: SkillTurnContext = {
+            skillId: FIQH_HAYD_SKILL_ID,
+            skillVersion: FIQH_HAYD_SKILL_VERSION,
+            issueSignature: reusable.issueSignature,
+            requirements: reusableRequirements,
+            evidenceRefs: refs,
+            sourceIds: reusable.sourceIds.slice(0, MAX_SKILL_CONTEXT_SOURCES),
+            baseCaseSignature: caseDigestOf({ ...known }),
+            at: new Date().toISOString(),
+          };
+          return {
+            status: 'NEEDS_INFORMATION',
+            issue: reusable.issueSignature,
+            caseFacts: {},
+            interpretations: [],
+            requirementKeys: reusableRequirements.map((r) => r.key),
+            sourceGap: gaps,
+            approvedSourceIds: approvedIds,
+            evidenceChunkIds: refs,
+            readiness: reusedReadiness,
+            skillContext: refreshed,
+            trace: {
+              issue: reusable.issueSignature,
+              status: 'NEEDS_INFORMATION+REUSED_CONTEXT',
+              approvedSourceIds: approvedIds,
+              evidence: [],
+              requirementKeys: reusableRequirements.map((r) => r.key),
+              retrievedEvidenceIds: refs,
+              acceptedEvidenceRefs: refs,
+              notes: ['b3a_reused_context', 'skipped:planner,retrieval,interpreter'],
+              workload: `${WORKLOAD}:reused_turn_context`,
+              plannerCalled: false,
+              retrievalCalled: false,
+              interpreterCalled: false,
+              decisionCalled: false,
+            },
+          };
+        }
+        // Readiness satisfied on the fast path: the decision step consumes passage text, so
+        // this slice continues through the existing grounded path (the capability can reload
+        // approved chunks by id, but the decision block is not re-entered from here).
+        gaps.notes.push('b3a_decision_fallback_to_grounded_path');
+      }
 
       // ---- 3. knowledge need: bridge user language -> source language -------
       const planRes = await ctx.model.generateText({
@@ -298,6 +447,37 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         };
       }
 
+      // ---- 5b. F1→F3 binding + the ONE satisfaction test (B1.1/K-1, K-2).
+      // CERTAIN statement candidates become case facts bound to catalogue identities; hedged /
+      // hypothetical / unknown values are NEVER hardened here. Computed BEFORE the requirement
+      // derivation so the derivation can use the SAME certainty semantics to decide whether a need
+      // is already satisfied — presence alone is never satisfaction.
+      const statementFacts = Array.isArray(input.statementFacts) ? input.statementFacts : [];
+      const bound: Record<string, unknown> = {};
+      for (const c of statementFacts) {
+        if (c.certainty !== 'CERTAIN') continue;
+        if (c.kind === 'duration' && c.unit === 'hour') bound.bleeding_duration_hours = c.value;
+        else if (c.kind === 'duration' && c.unit === 'day') bound.bleeding_duration_days = c.value;
+        else if (c.kind === 'boolean' && c.value === true) bound.bleeding_cessation = true;
+      }
+      const factMeta = (input.factMeta ?? {}) as Record<string, { provenance?: string; certainty?: string }>;
+
+      /**
+       * B1.1/K-1 — does the CASE already legitimately satisfy this need? Reuses the one existing
+       * certainty semantics (Core's hasKnownValue): a value satisfies only when it is present AND
+       * CERTAIN. A stored `UNKNOWN` (or any non-CERTAIN value) leaves the need unresolved and
+       * still askable. `bound` values come from THIS turn's CERTAIN statement candidates.
+       */
+      const satisfies = (key: string): boolean =>
+        Object.prototype.hasOwnProperty.call(bound, key)
+          ? hasKnownValue({ key, value: bound[key], source: 'case', certainty: 'CERTAIN' })
+          : hasKnownValue({
+              key,
+              value: (known ?? {})[key],
+              source: 'conversation',
+              ...(factMeta[key]?.certainty ? { certainty: factMeta[key]!.certainty as 'CERTAIN' | 'UNCERTAIN' | 'UNKNOWN' } : {}),
+            });
+
       // ---- 6. deterministic validation (this is what makes it source-grounded)
       const validIds = new Set(evidence.map((p) => p.chunkId));
       const byId = new Map(evidence.map((p) => [p.chunkId, p]));
@@ -321,24 +501,32 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         const wording = bounded(strOf(r?.question?.wording), 240);
         const citations = citeRefs(r?.citations);
         if (!key || !wording) continue;
+        // F2: identity must come from the declared catalogue — never an invented key.
+        if (!(key in NEED_CATALOGUE)) {
+          dropped.push(`unregistered_need:${key}`);
+          continue;
+        }
         // (a) source grounding: an uncited requirement is NOT material evidence, it is a guess.
         if (citations.length === 0) {
           dropped.push(`uncited_requirement:${key}`);
           continue;
         }
-        // (b) never re-ask what is already known (structured fact or stated in the case).
-        if (isKnown(known[key]) || r?.knownFromCase === true) {
-          dropped.push(`already_known:${key}`);
+        // (b) never re-ask what the case ALREADY SATISFIES — presence is not satisfaction, and a
+        // mere value row (e.g. `UNKNOWN`) must not suppress a material need (B1.1/K-1).
+        if (satisfies(key)) {
+          dropped.push(`already_satisfied:${key}`);
           continue;
         }
+        // A model claim is a hint, never authority to drop a material need (B1.1/K-2): it is
+        // recorded and ignored, so the need stays material until a trustworthy value exists.
+        if (r?.knownFromCase === true) dropped.push(`unproven_known_from_case:${key}`);
         if (requirements.some((x) => x.key === key)) continue;
-        const type = bounded(strOf(r?.interaction?.type), 24) || 'free_text';
-        const options = Array.isArray(r?.interaction?.options) ? r.interaction.options.map(strOf).filter(Boolean).slice(0, 6) : [];
         requirements.push({
           key,
           whyMaterial: bounded(strOf(r?.whyMaterial), 240),
           question: { wording },
-          interaction: { type, ...(options.length ? { options } : {}), ...(typeof r?.interaction?.allowOther === 'boolean' ? { allowOther: r.interaction.allowOther } : {}) },
+          // The Skill owns the answer contract of a known need (the model's type is at most a hint).
+          interaction: interactionForNeed(key, r?.interaction),
           citations,
         });
         if (requirements.length >= MAX_REQUIREMENTS) break;
@@ -354,6 +542,8 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
       }
       if (dropped.length > 0) gaps.notes.push(...dropped.slice(0, 6));
 
+      // ---- 6b. binding was computed above (5b) so the derivation could use the same semantics.
+
       // ---- 7. readiness (existing K22 evaluator; dynamic requirements) ------
       const decisionRequirements: DecisionRequirement[] = requirements.map((r) => ({
         key: r.key,
@@ -362,9 +552,16 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         question: { key: r.key, wording: r.question.wording },
         interaction: r.interaction,
       }));
-      const knownItems: KnownContextItem[] = Object.entries(known)
+      const knownItems: KnownContextItem[] = Object.entries({ ...known, ...bound })
         .filter(([, v]) => isKnown(v))
-        .map(([key, value]) => ({ key, value, source: 'conversation' as const }));
+        .map(([key, value]) => ({
+          key,
+          value,
+          source: 'conversation' as const,
+          // Memory-derived and hedged values never close a material need (F3).
+          ...(factMeta[key]?.certainty ? { certainty: factMeta[key]!.certainty as 'CERTAIN' | 'UNCERTAIN' | 'UNKNOWN' } : {}),
+        }));
+      const valueKnown = { ...known, ...bound };
       const readiness = deps.readiness.evaluate({ requirements: decisionRequirements, known: knownItems });
 
       const baseTrace = (st: string, extra: Record<string, unknown> = {}) => ({
@@ -382,6 +579,7 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
       // Not decision-ready yet: the material questions ARE the answer.
       if (readiness.status !== 'READY_FOR_DECISION') {
         return {
+          caseFacts: bound,
           status: 'NEEDS_INFORMATION',
           issue,
           interpretations: interpretations.map((i) => ({ observation: i.observation, candidateConcept: i.candidateConcept, supported: i.supported, citationIds: i.citations.map((c) => c.chunkId) })),
@@ -390,7 +588,22 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
           approvedSourceIds: approvedIds,
           evidenceChunkIds: evidence.map((p) => p.chunkId),
           readiness,
-          trace: baseTrace(gaps.present ? 'NEEDS_INFORMATION+SOURCE_GAP' : 'NEEDS_INFORMATION'),
+          skillContext: {
+            skillId: FIQH_HAYD_SKILL_ID,
+            skillVersion: FIQH_HAYD_SKILL_VERSION,
+            issueSignature: digestOf(issue),
+            requirements: decisionRequirements.slice(0, MAX_SKILL_CONTEXT_REQUIREMENTS),
+            evidenceRefs: evidence.map((p) => p.chunkId).slice(0, MAX_SKILL_CONTEXT_EVIDENCE),
+            sourceIds: approvedIds.slice(0, MAX_SKILL_CONTEXT_SOURCES),
+            baseCaseSignature: caseDigestOf(valueKnown),
+            at: new Date().toISOString(),
+          },
+          trace: baseTrace(gaps.present ? 'NEEDS_INFORMATION+SOURCE_GAP' : 'NEEDS_INFORMATION', {
+            plannerCalled: true,
+            retrievalCalled: true,
+            interpreterCalled: true,
+            decisionCalled: false,
+          }),
         };
       }
 
@@ -405,9 +618,14 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         madhhab: MADHHAB,
         issue,
         caseText,
-        knownFacts: known,
+        knownFacts: valueKnown,
         /** The questions the user answered to produce knownFacts (bounded). */
         answeredQuestions: askedQuestions,
+        /** Facts that exist but are NOT certain: never to be treated as knowledge. */
+        uncertainFacts: Object.entries(factMeta)
+          .filter(([, m]) => m.certainty && m.certainty !== 'CERTAIN')
+          .map(([k, m]) => `${k} (${m.certainty}${m.provenance === 'memory' ? ', من الذاكرة' : ''})`)
+          .slice(0, 8),
         observations: interpretations.map((i) => ({ observation: i.observation, candidateConcept: i.candidateConcept, supportedBySource: i.supported })),
         sourceGaps: gaps.observations,
         approvedSourceTitles: [...APPROVED_SOURCE_TITLES].join('، '),
@@ -447,12 +665,35 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
           approvedSourceIds: approvedIds,
           evidenceChunkIds: evidence.map((p) => p.chunkId),
           readiness: mergedReadiness,
+          // B1.1: a need asked from the DECISION step must carry its expected-answer contract
+          // forward like any other requirement. Without it the answer could never be validated
+          // (B1.0) nor its materiality re-derived safely (B1.1) — and the same question would be
+          // asked again forever.
+          skillContext: {
+            skillId: FIQH_HAYD_SKILL_ID,
+            skillVersion: FIQH_HAYD_SKILL_VERSION,
+            issueSignature: digestOf(issue),
+            requirements: merged
+              .map((r) => ({
+                key: r.key,
+                description: r.whyMaterial || r.question.wording,
+                material: true,
+                question: { key: r.key, wording: r.question.wording },
+                interaction: r.interaction,
+              }))
+              .slice(0, MAX_SKILL_CONTEXT_REQUIREMENTS),
+            evidenceRefs: evidence.map((p) => p.chunkId).slice(0, MAX_SKILL_CONTEXT_EVIDENCE),
+            sourceIds: approvedIds.slice(0, MAX_SKILL_CONTEXT_SOURCES),
+            baseCaseSignature: caseDigestOf(valueKnown),
+            at: new Date().toISOString(),
+          },
           trace: baseTrace('NEEDS_INFORMATION', { decisionStatus: 'NEEDS_INFORMATION', workload: WORKLOAD, ...(modelTag ? { model: modelTag } : {}) }),
         };
       }
 
       if (verdict.kind === 'DECIDED' && verdict.directAnswer) {
         return {
+          caseFacts: bound,
           status: 'READY_FOR_FIQH_DECISION',
           issue,
           interpretations: interpretations.map((i) => ({ observation: i.observation, candidateConcept: i.candidateConcept, supported: i.supported, citationIds: i.citations.map((c) => c.chunkId) })),
@@ -498,6 +739,7 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         ? `\nالنقطة اللي تحتاج توضيح: ${verdict.unresolvedMaterial.slice(0, 3).join('، ')}.`
         : '';
       return {
+        caseFacts: bound,
         status: 'SOURCE_GAP',
         issue,
           interpretations: interpretations.map((i) => ({ observation: i.observation, candidateConcept: i.candidateConcept, supported: i.supported, citationIds: i.citations.map((c) => c.chunkId) })),
@@ -595,15 +837,20 @@ export function validateDecision(args: {
     if (!key || !wording || refs.length === 0) {
       return { kind: 'SOURCE_GAP', codes: ['needs_information_unusable'], refs, unresolved, unresolvedMaterial, sourceSupport };
     }
-    const type = bounded(strOf(n?.interaction?.type), 24) || 'free_text';
-    const options = Array.isArray(n?.interaction?.options) ? n.interaction.options.map(strOf).filter(Boolean).slice(0, 6) : [];
+    // B1.1/K-5: identity must come from the declared catalogue, exactly as on the reasoning path.
+    // A model-invented need may never become a trusted requirement, a user question, or part of
+    // the persisted turn context.
+    if (!(key in NEED_CATALOGUE)) {
+      return { kind: 'SOURCE_GAP', codes: [`needs_information_unregistered_need:${key}`], refs, unresolved, unresolvedMaterial, sourceSupport };
+    }
     return {
       kind: 'NEEDS_INFORMATION',
       requirement: {
         key,
         whyMaterial: bounded(strOf(n?.whyMaterial), 240),
         question: { wording },
-        interaction: { type, ...(options.length ? { options } : {}), ...(typeof n?.interaction?.allowOther === 'boolean' ? { allowOther: n.interaction.allowOther } : {}) },
+        // Same Skill-owned contract: a model-declared type can never redefine a known need.
+        interaction: interactionForNeed(key, n?.interaction),
         citations: refs,
       },
       codes: ['model_requested_information'], refs, unresolved, unresolvedMaterial, sourceSupport,

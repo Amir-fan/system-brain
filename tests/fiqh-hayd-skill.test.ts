@@ -111,7 +111,7 @@ describe('K25 fiqh skill — source-grounded reasoning', () => {
 
   it('drops an uncited requirement (materiality requires a source citation)', async () => {
     const { out } = await run(plan({
-      requirements: [{ key: 'no_citation', whyMaterial: 'x', question: { wording: 'سؤال؟' }, interaction: { type: 'yes_no' }, citations: [] }],
+      requirements: [{ key: 'bleeding_cessation', whyMaterial: 'x', question: { wording: 'سؤال؟' }, interaction: { type: 'yes_no' }, citations: [] }],
     }));
     assert.deepEqual(out.requirementKeys, []);
     assert.ok((out.sourceGap as { notes: string[] }).notes.some((n) => n.startsWith('uncited_requirement')));
@@ -121,16 +121,17 @@ describe('K25 fiqh skill — source-grounded reasoning', () => {
     const { out } = await run(
       plan({
         requirements: [{
-          key: 'bleeding_stopped', whyMaterial: 'اتصال الإفراز بالحيض',
+          key: 'bleeding_cessation', whyMaterial: 'اتصال الإفراز بالحيض',
           question: { wording: 'قبل ما تشوفين هذا السائل، كان الدم وقف تمامًا أو كان ما زال ينزل؟' },
           interaction: { type: 'single_choice', options: ['توقف', 'كان ينزل'] },
           citations: ['chunk-7'],
         }],
       }),
-      { context: { bleeding_stopped: 'توقف تمامًا' } },
+      { context: { bleeding_cessation: 'توقف تمامًا' } },
     );
     assert.deepEqual(out.requirementKeys, []);
-    assert.ok((out.sourceGap as { notes: string[] }).notes.includes('already_known:bleeding_stopped'));
+    // B1.1/K-1: the drop is CERTAINTY-aware now — a CERTAIN case value satisfies the need.
+    assert.ok((out.sourceGap as { notes: string[] }).notes.includes('already_satisfied:bleeding_cessation'));
     // The case is decision-ready, so the skill proceeds to the decision step; with no
     // usable grounded proposal it returns SOURCE_GAP rather than a ruling.
     assert.equal((out.readiness as { status: string }).status, 'READY_FOR_DECISION');
@@ -138,32 +139,35 @@ describe('K25 fiqh skill — source-grounded reasoning', () => {
     assert.equal((out.decision as { status: string }).status, 'SOURCE_GAP');
   });
 
-  it('never re-asks a fact the user already stated in the case (knownFromCase)', async () => {
+  it('B1.1/K-2: an UNVERIFIED knownFromCase claim cannot drop a material need', async () => {
     const { out } = await run(plan({
       requirements: [{
-        key: 'bleeding_stopped', whyMaterial: 'اتصال الإفراز بالحيض',
+        key: 'bleeding_cessation', whyMaterial: 'اتصال الإفراز بالحيض',
         question: { wording: 'هل توقف الدم؟' }, interaction: { type: 'yes_no' }, citations: ['chunk-7'],
         knownFromCase: true,
       }],
     }));
-    assert.deepEqual(out.requirementKeys, []);
-    assert.ok((out.sourceGap as { notes: string[] }).notes.includes('already_known:bleeding_stopped'));
+    // No trustworthy value supports the claim, so the need stays material AND askable...
+    assert.deepEqual(out.requirementKeys, ['bleeding_cessation']);
+    assert.equal((out.readiness as { status: string }).status, 'NEEDS_INFORMATION');
+    // ...and the unverified claim is recorded rather than silently obeyed.
+    assert.ok((out.sourceGap as { notes: string[] }).notes.includes('unproven_known_from_case:bleeding_cessation'));
   });
 
   it('derives a DIFFERENT requirement set per case (dynamic, not a fixed questionnaire)', async () => {
     const req = (key: string, wording: string) => ({
       key, whyMaterial: 'شرط في المصدر', question: { wording }, interaction: { type: 'yes_no' }, citations: ['chunk-7'],
     });
-    const a = await run(plan({ requirements: [req('dryness', 'هل جفّ المكان؟')] }));
-    const b = await run(plan({ requirements: [req('duration_days', 'كم يومًا استمر الدم؟'), req('habit_days', 'كم يومًا عادتك؟')] }));
-    assert.deepEqual(a.out.requirementKeys, ['dryness']);
-    assert.deepEqual(b.out.requirementKeys, ['duration_days', 'habit_days']);
+    const a = await run(plan({ requirements: [req('post_bleeding_dryness', 'هل جفّ المكان؟')] }));
+    const b = await run(plan({ requirements: [req('bleeding_duration_days', 'كم يومًا استمر الدم؟'), req('habit_days', 'كم يومًا عادتك؟')] }));
+    assert.deepEqual(a.out.requirementKeys, ['post_bleeding_dryness']);
+    assert.deepEqual(b.out.requirementKeys, ['bleeding_duration_days', 'habit_days']);
   });
 
   it('sends the derived requirements through the K22 readiness contract with a human question + control', async () => {
     const { out } = await run(plan({
       requirements: [{
-        key: 'bleeding_stopped', whyMaterial: 'شرط الاتصال',
+        key: 'bleeding_cessation', whyMaterial: 'شرط الاتصال',
         question: { wording: 'قبل ما تشوفين هذا السائل، كان الدم وقف تمامًا أو كان ما زال ينزل؟' },
         interaction: { type: 'single_choice', options: ['توقف تمامًا', 'كان ينزل'] },
         citations: ['chunk-7'],
@@ -171,9 +175,11 @@ describe('K25 fiqh skill — source-grounded reasoning', () => {
     }));
     const readiness = out.readiness as { status: string; missing: Array<{ key: string; question?: { wording: string }; interaction?: { type: string } }> };
     assert.equal(readiness.status, 'NEEDS_INFORMATION');
-    assert.equal(readiness.missing[0].key, 'bleeding_stopped');
+    assert.equal(readiness.missing[0].key, 'bleeding_cessation');
     assert.match(readiness.missing[0].question!.wording, /وقف تمامًا/);
-    assert.equal(readiness.missing[0].interaction!.type, 'single_choice');
+    // B1.0/G1: bleeding_cessation's answer kind is Skill-owned (canonical yes_no), so the
+    // model's single_choice declaration cannot weaken it; the question wording still travels.
+    assert.equal(readiness.missing[0].interaction!.type, 'yes_no');
     assert.equal(out.status, 'NEEDS_INFORMATION');
   });
 

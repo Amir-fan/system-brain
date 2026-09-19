@@ -181,7 +181,7 @@ describe('K25 decision — guard (model proposes, code validates)', () => {
         status: 'NEEDS_INFORMATION',
         sourceSupport: 'PARTIAL',
         needsInformation: {
-          key: 'contiguous_with_bleeding', whyMaterial: 'شرط الاتصال في ترجيح المصدر',
+          key: 'bleeding_contiguity', whyMaterial: 'شرط الاتصال في ترجيح المصدر',
           question: { wording: 'قبل ما تشوفين هذا السائل، كان الدم وقف تمامًا أو كان ما زال ينزل؟' },
           interaction: { type: 'single_choice', options: ['توقف تمامًا', 'كان ينزل'] },
           evidenceRefs: [C8],
@@ -190,8 +190,10 @@ describe('K25 decision — guard (model proposes, code validates)', () => {
     });
     const readiness = out.readiness as { status: string; missing: Array<{ key: string; interaction?: { type: string } }> };
     assert.equal(readiness.status, 'NEEDS_INFORMATION');
-    assert.equal(readiness.missing[0].key, 'contiguous_with_bleeding');
-    assert.equal(readiness.missing[0].interaction?.type, 'single_choice');
+    assert.equal(readiness.missing[0].key, 'bleeding_contiguity');
+    // B1.0/G1: the model asked with single_choice, but the Skill owns this need's answer
+    // contract — the canonical YES/NO kind wins and can never be weakened by the model.
+    assert.equal(readiness.missing[0].interaction?.type, 'yes_no');
     assert.equal(out.status, 'NEEDS_INFORMATION');
   });
 
@@ -223,20 +225,20 @@ describe('K25 decision — anti-hardcoding (the facts drive the outcome)', () =>
     // The stub is deliberately dumb: the SKILL passes the real facts to the reasoning
     // layer, and the guard validates whatever comes back. Here we prove the fact is
     // actually delivered to the reasoning layer (no hardcoded case replay).
-    const withFact = await runDecision({ decision: reasoningStub('contiguous_with_bleeding'), knownFacts: { contiguous_with_bleeding: true } });
-    const withoutFact = await runDecision({ decision: reasoningStub('contiguous_with_bleeding'), knownFacts: { contiguous_with_bleeding: false } });
+    const withFact = await runDecision({ decision: reasoningStub('bleeding_contiguity'), knownFacts: { bleeding_contiguity: true } });
+    const withoutFact = await runDecision({ decision: reasoningStub('bleeding_contiguity'), knownFacts: { bleeding_contiguity: false } });
     assert.equal(withFact.out.status, 'READY_FOR_FIQH_DECISION');
     assert.equal(withoutFact.out.status, 'READY_FOR_FIQH_DECISION');
     const p1 = withFact.prompts[2];
     const p2 = withoutFact.prompts[2];
-    assert.ok(p1.includes('"contiguous_with_bleeding":true'), 'the fact reaches the reasoning layer');
-    assert.ok(p2.includes('"contiguous_with_bleeding":false'), 'the changed fact reaches the reasoning layer');
+    assert.ok(p1.includes('"bleeding_contiguity":true'), 'the fact reaches the reasoning layer');
+    assert.ok(p2.includes('"bleeding_contiguity":false'), 'the changed fact reaches the reasoning layer');
     assert.notEqual(p1, p2);
   });
 
   it('a correction replaces the fact and the case is decided again on the new facts', async () => {
-    const first = await runDecision({ decision: decided({ category: 'حيض', directAnswer: 'نعم هو حيض.' }), knownFacts: { contiguous_with_bleeding: true } });
-    const corrected = await runDecision({ decision: decided({ category: 'طهر', directAnswer: 'لا، هذا ليس حيضًا.' }), knownFacts: { contiguous_with_bleeding: false } });
+    const first = await runDecision({ decision: decided({ category: 'حيض', directAnswer: 'نعم هو حيض.' }), knownFacts: { bleeding_contiguity: true } });
+    const corrected = await runDecision({ decision: decided({ category: 'طهر', directAnswer: 'لا، هذا ليس حيضًا.' }), knownFacts: { bleeding_contiguity: false } });
     assert.equal((first.out.decision as { category: string }).category, 'حيض');
     assert.equal((corrected.out.decision as { category: string }).category, 'طهر');
     assert.match(String((corrected.out.answer as { text: string }).text), /ليس حيضًا/);

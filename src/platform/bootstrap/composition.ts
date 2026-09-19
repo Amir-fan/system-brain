@@ -50,6 +50,10 @@ import { createEvaluationStorage } from '../provider/evaluation.storage.ts';
 import { createKnowledgeEvidence } from '../provider/knowledge-evidence.ts';
 import { naqaaScanner } from '../../domain/naqaa/scanner-skill.ts';
 import { createFiqhHaydSkill } from '../../domain/naqaa/fiqh-hayd-skill.ts';
+// EXPERIMENT (K26-mind-v0): a second, independent Naqaa skill registered alongside the
+// control skill. Additive only — it is selected explicitly by skillId, never by default.
+import { createFiqhHaydMindSkill } from '../../domain/naqaa/fiqh-hayd-mind-skill.ts';
+import { createFiqhHaydMinimalSkill } from '../../domain/naqaa/fiqh-hayd-minimal-skill.ts';
 import { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
 import { KnowledgeAnswerService } from '../../core/knowledge/knowledge-answer.service.ts';
 import { EmbeddingService } from '../../core/embedding/embedding.service.ts';
@@ -206,6 +210,10 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   // K25 slice 1: the Shafi'i fiqh skill reasons over APPROVED source knowledge and
   // declares its material requirements dynamically (validated against citations).
   skillRegistry.register(createFiqhHaydSkill({ readiness: readinessService }));
+  // Mind Skill V0 (experiment) — coexists with the control skill; not the default.
+  skillRegistry.register(createFiqhHaydMindSkill({ readiness: readinessService }));
+  // Minimal Mind V0 (experiment) — one LLM + an approved-Knowledge tool; not the default.
+  skillRegistry.register(createFiqhHaydMinimalSkill({ readiness: readinessService }));
   const skillsRuntime = new SkillsRuntime({
     persistence,
     registry: skillRegistry,
@@ -359,6 +367,10 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
         resolver: assignmentResolver,
         openRouter,
       },
+      // Browser Admin UI logs in via Supabase Auth and sends the Supabase access token
+      // here. The server verifies the token and checks the email against
+      // KIP_PLATFORM_ADMIN_EMAILS before granting admin privileges.
+      supabase: { auth: rawClient.auth },
     },
   });
 }
