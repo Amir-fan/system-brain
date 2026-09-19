@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ChangeEvent } from 'react';
-import { FileSearch, MessageCircle, ScanLine, ListChecks, BarChart3 } from 'lucide-react';
+import { FileSearch, MessageCircle, ScanLine, ListChecks, BarChart3, MessageSquareText } from 'lucide-react';
 import type { WorkloadKey } from '../contracts/models';
 import { useI18n } from '../i18n';
 import { Button, Card, CardHeader } from '../ui/primitives';
@@ -18,6 +18,7 @@ const ICONS: Record<WorkloadKey, typeof FileSearch> = {
   vision_scan: ScanLine,
   summarization: ListChecks,
   embeddings: BarChart3,
+  knowledge_answer: MessageSquareText,
 };
 
 const DESCRIPTIONS: Record<WorkloadKey, string> = {
@@ -26,9 +27,10 @@ const DESCRIPTIONS: Record<WorkloadKey, string> = {
   vision_scan: 'workload.desc.vision_scan',
   summarization: 'workload.desc.summarization',
   embeddings: 'workload.desc.embeddings',
+  knowledge_answer: 'workload.desc.knowledge_answer',
 };
 
-const ORDER: WorkloadKey[] = ['source_analysis', 'chat_assistant', 'vision_scan', 'summarization', 'embeddings'];
+const ORDER: WorkloadKey[] = ['source_analysis', 'chat_assistant', 'vision_scan', 'summarization', 'embeddings', 'knowledge_answer'];
 
 export function ModelAssignment() {
   const { t } = useI18n();

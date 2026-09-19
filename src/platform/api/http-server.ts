@@ -11,8 +11,9 @@ import type { Server } from 'node:http';
 import { createServer } from 'node:http';
 import { handleInvoke } from './api-handler.ts';
 import type { TokenActorMap } from './auth.ts';
-import { isPlatformAdmin, bearerFromHeader } from './admin-auth.ts';
+import { isPlatformAdmin, isSupabasePlatformAdmin, bearerFromHeader } from './admin-auth.ts';
 import type { AdminProviderApiDeps } from './admin-provider.ts';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   connectProvider,
   listProviders,
@@ -108,6 +109,12 @@ export interface HttpApiDeps {
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
+    /**
+     * Optional Supabase client used to verify Supabase-issued admin tokens (browser login
+     * via the standard Supabase Auth flow). When absent, only the env-stored static admin
+     * token is accepted.
+     */
+    supabase?: Pick<SupabaseClient, 'auth'>;
   };
 }
 
@@ -757,9 +764,26 @@ async function handleAdmin(
   if (!deps.admin) {
     return sendJson(res, 404, { ok: false, status: 404, error: { category: 'not_found', message: 'not found' } });
   }
-  // Temporary bootstrap admin auth — constant-time check, not logged.
+  // Admin auth: either the env-stored static admin token OR a valid Supabase-issued
+  // actor whose email is on the platform-admin allowlist (KIP_PLATFORM_ADMIN_EMAILS).
+  // The Supabase path is what a browser-based Admin UI uses after Supabase Auth login.
   const supplied = bearerFromHeader(req.headers.authorization);
-  if (!isPlatformAdmin(supplied)) {
+  let adminAuthed = isPlatformAdmin(supplied);
+  if (!adminAuthed && supplied && deps.admin?.supabase) {
+    try {
+      const { data } = await deps.admin.supabase.auth.getUser(supplied);
+      const email = data?.user?.email ?? null;
+      const userId = data?.user?.id ?? null;
+      if (email && userId && isSupabasePlatformAdmin(email)) {
+        adminAuthed = true;
+        // Stash the verified actor so downstream handlers can record provenance.
+        (req as unknown as { _adminActor?: { id: string; email: string | null } })._adminActor = { id: userId, email };
+      }
+    } catch {
+      /* fall through to 401 below */
+    }
+  }
+  if (!adminAuthed) {
     return sendJson(res, 401, { ok: false, status: 401, error: { category: 'authorization', message: 'admin authentication required' } });
   }
 

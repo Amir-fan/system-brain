@@ -21,6 +21,13 @@ export function platformAdminToken(): string | undefined {
   return process.env.KIP_PLATFORM_ADMIN_TOKEN;
 }
 
+/** Env-sourced allowlist of Supabase user emails that are platform admins (comma-separated). */
+export function platformAdminEmails(): string[] {
+  const raw = process.env.KIP_PLATFORM_ADMIN_EMAILS;
+  if (!raw) return [];
+  return raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
 /** Constant-time comparison of a provided bearer token against the configured admin token. */
 export function isPlatformAdmin(supplied: string | undefined): boolean {
   const expected = platformAdminToken();
@@ -29,6 +36,12 @@ export function isPlatformAdmin(supplied: string | undefined): boolean {
   const b = Buffer.from(expected);
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
+}
+
+/** Accept a Supabase-issued actor only when its email is on the platform-admin allowlist. */
+export function isSupabasePlatformAdmin(email: string | null | undefined): boolean {
+  if (!email) return false;
+  return platformAdminEmails().includes(email.trim().toLowerCase());
 }
 
 /** Extract bearer token from an Authorization header. */

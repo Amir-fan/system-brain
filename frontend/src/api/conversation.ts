@@ -32,6 +32,8 @@ export interface InteractionSpec {
 export interface SkillTraceSummary {
   issue?: string;
   status?: string;
+  /** Generic execution trace (K28) — the tester's مسار التنفيذ panel. */
+  execution?: import('../lib/executionTrace').ExecutionTrace;
   approvedSourceIds?: string[];
   evidence?: Array<{ chunkId: string; sourceId: string; note?: string }>;
   requirementKeys?: string[];
@@ -61,6 +63,14 @@ export interface ConversationResponse {
   trace?: SkillTraceSummary;
   /** Present when the executed skill produced a grounded user-facing answer. */
   answer?: { text: string; sourceTitle?: string; evidenceIds?: string[]; label?: string };
+  /** Bounded, auditable case state (facts + provenance/certainty + grounded validity). */
+  caseState?: {
+    facts: Array<{ key: string; value: string; provenance: string; certainty: string }>;
+    pendingNeed?: string;
+    groundedResult: 'valid' | 'invalidated' | 'none';
+    invalidationReason?: string;
+    candidates?: Array<{ kind: string; value: string; unit?: string; certainty: string }>;
+  };
 }
 
 export interface SkillListItem {

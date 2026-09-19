@@ -5,7 +5,16 @@
 
 export type ProviderStatus = 'connected' | 'not_connected' | 'issue';
 
-export type WorkloadKey = 'source_analysis' | 'chat_assistant' | 'vision_scan' | 'summarization' | 'embeddings';
+// Mirrors the runtime's canonical ALLOWED_WORKLOADS (src/platform/provider/model-assignment.ts).
+// `knowledge_answer` is the workload the Minimal Mind and the fiqh skills resolve, so it must be
+// selectable here; it was missing, which made the interactive workload invisible to the Admin.
+export type WorkloadKey =
+  | 'source_analysis'
+  | 'chat_assistant'
+  | 'vision_scan'
+  | 'summarization'
+  | 'embeddings'
+  | 'knowledge_answer';
 
 export interface WorkloadModelAssignment {
   workloadKey: WorkloadKey;
