@@ -3,6 +3,16 @@ import { useProjectContext } from '../contexts/ProjectContext';
 import { useI18n } from '../i18n';
 import { Card, Button } from '../ui/primitives';
 import { conversationApi } from '../api/conversation';
+import {
+  codeNote,
+  evidenceLabels,
+  formatDuration,
+  formatTokens,
+  stageTitle,
+  statusLabel,
+  summarizeExecution,
+} from '../lib/executionTrace';
+import type { ExecutionTrace } from '../lib/executionTrace';
 import type {
   ConversationMode,
   ConversationResponse,
@@ -33,6 +43,8 @@ interface Msg {
   role: 'user' | 'assistant';
   text: string;
   at: string;
+  /** K28: technical execution trace attached to a FAILED turn's error response. */
+  diagnostics?: unknown;
   interaction?: InteractionSpec;
   stages?: string[];
   runId?: string;
@@ -41,6 +53,7 @@ interface Msg {
   readiness?: ConversationResponse['readiness'];
   trace?: ConversationResponse['trace'];
   answer?: ConversationResponse['answer'];
+  caseState?: ConversationResponse['caseState'];
 }
 
 /**
@@ -247,10 +260,20 @@ export function TestsConsole() {
           readiness: res.readiness,
           trace: res.trace,
           answer: res.answer,
+          caseState: res.caseState,
         },
       ]);
     } catch (e) {
-      setMsgs((m) => [...m, { role: 'assistant', text: e instanceof Error ? e.message : 'تعذر إرسال الرسالة.', at: '' }]);
+      const diagnostics = (e as { diagnostics?: unknown } | null)?.diagnostics;
+      setMsgs((m) => [
+        ...m,
+        {
+          role: 'assistant',
+          text: e instanceof Error ? e.message : 'تعذر إرسال الرسالة.',
+          at: '',
+          ...(diagnostics !== undefined ? { diagnostics } : {}),
+        },
+      ]);
     } finally {
       setBusy(false);
     }
@@ -481,12 +504,43 @@ export function TestsConsole() {
                   <Row k="مفتاح ناقص" v={lastAssistant.readiness.missingKeys.join('، ')} />
                 ) : null}
               </TraceSection>
+              {(() => {
+                const exec = (lastAssistant?.trace?.execution ??
+                  (lastAssistant?.diagnostics as { execution?: ExecutionTrace } | undefined)?.execution) as
+                  | ExecutionTrace
+                  | undefined;
+                return exec ? <ExecutionTracePanel execution={exec} /> : null;
+              })()}
               {lastAssistant?.trace ? (
                 <TraceSection title="المسألة والمصادر">
                   <Row k="المسألة" v={lastAssistant.trace.issue ?? '—'} />
                   <Row k="حالة المهارة" v={lastAssistant.trace.status ?? '—'} />
-                  <Row k="مصادر معتمدة" v={lastAssistant.trace.approvedSourceIds?.length ? lastAssistant.trace.approvedSourceIds.join('، ') : '—'} />
-                  <Row k="مقاطع مستشهد بها" v={lastAssistant.trace.evidence?.length ? lastAssistant.trace.evidence.map((e) => e.chunkId).join('، ') : '—'} />
+                  <Row
+                    k="مصادر معتمدة"
+                    v={
+                      lastAssistant.trace.approvedSourceIds?.length
+                        ? evidenceLabels({
+                            sourceTitle: lastAssistant.answer?.sourceTitle,
+                            traceEvidence: lastAssistant.trace.approvedSourceIds.map((id) => ({ chunkId: id })),
+                          }).join('، ')
+                        : '—'
+                    }
+                  />
+                  <Row
+                    k="مقاطع مستشهد بها"
+                    v={evidenceLabels({
+                      sourceTitle: lastAssistant.answer?.sourceTitle,
+                      traceEvidence: lastAssistant.trace.evidence,
+                    }).join('، ') || '—'}
+                  />
+                  {lastAssistant.trace.evidence?.length ? (
+                    <details className="text-xs text-muted">
+                      <summary className="cursor-pointer">المعرّفات التقنية</summary>
+                      <div dir="ltr" className="font-mono">
+                        {lastAssistant.trace.evidence.map((e) => e.chunkId).join('، ')}
+                      </div>
+                    </details>
+                  ) : null}
                   <Row k="متطلبات مشتقة" v={lastAssistant.trace.requirementKeys?.length ? lastAssistant.trace.requirementKeys.join('، ') : '—'} />
                   {lastAssistant.trace.workload ? <Row k="workload" v={lastAssistant.trace.workload} /> : null}
                   {lastAssistant.trace.model ? <Row k="model" v={lastAssistant.trace.model} /> : null}
@@ -499,9 +553,43 @@ export function TestsConsole() {
                   <Row k="التصنيف" v={lastAssistant.trace.decisionLabel ?? '—'} />
                   <Row k="الثقة (فئوية)" v={lastAssistant.trace.confidence ?? '—'} />
                   <Row k="دعم المصدر" v={lastAssistant.trace.sourceSupport ?? '—'} />
-                  <Row k="مراجع مقبولة" v={lastAssistant.trace.acceptedEvidenceRefs?.length ? lastAssistant.trace.acceptedEvidenceRefs.join('، ') : '—'} />
-                  <Row k="مقاطع مُسترجَعة" v={lastAssistant.trace.retrievedEvidenceIds?.length ? lastAssistant.trace.retrievedEvidenceIds.join('، ') : '—'} />
+                  <Row
+                    k="مراجع مقبولة"
+                    v={evidenceLabels({ acceptedRefs: lastAssistant.trace.acceptedEvidenceRefs }).join('، ') || '—'}
+                  />
+                  <Row
+                    k="مقاطع مُسترجَعة"
+                    v={
+                      lastAssistant.trace.retrievedEvidenceIds?.length
+                        ? `${lastAssistant.trace.retrievedEvidenceIds.length} مقطع`
+                        : '—'
+                    }
+                  />
+                  {lastAssistant.trace.retrievedEvidenceIds?.length ? (
+                    <details className="text-xs text-muted">
+                      <summary className="cursor-pointer">المعرّفات التقنية</summary>
+                      <div dir="ltr" className="font-mono">
+                        {lastAssistant.trace.retrievedEvidenceIds.join('، ')}
+                      </div>
+                    </details>
+                  ) : null}
                   {lastAssistant.trace.gapKeys?.length ? <Row k="فجوات المصدر" v={lastAssistant.trace.gapKeys.join('، ')} /> : null}
+                </TraceSection>
+              ) : null}
+              {lastAssistant?.caseState ? (
+                <TraceSection title="حالة الحالة (facts)">
+                  {lastAssistant.caseState.facts.length > 0 ? (
+                    lastAssistant.caseState.facts.map((f) => (
+                      <Row key={f.key} k={f.key} v={`${f.value} · ${f.provenance}/${f.certainty}`} />
+                    ))
+                  ) : (
+                    <Row k="حقائق" v="—" />
+                  )}
+                  <Row k="سؤال معلّق" v={lastAssistant.caseState.pendingNeed ?? '—'} />
+                  <Row k="نتيجة مُسندة" v={lastAssistant.caseState.groundedResult + (lastAssistant.caseState.invalidationReason ? ` (${lastAssistant.caseState.invalidationReason})` : '')} />
+                  {lastAssistant.caseState.candidates?.length ? (
+                    <Row k="مرشحات هذه الرسالة" v={lastAssistant.caseState.candidates.map((c) => `${c.kind}:${c.value}${c.unit ? '/' + c.unit : ''}/${c.certainty}`).join('، ')} />
+                  ) : null}
                 </TraceSection>
               ) : null}
               <TraceSection title="النتيجة">
@@ -558,9 +646,62 @@ function AnswerSource({ answer }: { answer?: ConversationResponse['answer'] }) {
       ) : null}
       <span>المصدر: <b className="text-slate-600">{answer.sourceTitle}</b></span>
       {answer.evidenceIds?.length ? (
-        <span dir="ltr" className="font-mono">{answer.evidenceIds.map((id) => id.slice(0, 8)).join('، ')}</span>
+        <span>{`(${answer.evidenceIds.length} ${answer.evidenceIds.length === 1 ? 'مرجع' : 'مراجع'})`}</span>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * K28 — مسار التنفيذ: what executed, how long each stage took, where it stopped and the
+ * technical reason KIP can actually evidence. Rendered from measured runtime data only.
+ */
+function ExecutionTracePanel({ execution }: { execution: ExecutionTrace }) {
+  const s = summarizeExecution(execution);
+  const icon = (st: string) => (st === 'SUCCESS' ? '✓' : st === 'SKIPPED' ? '○' : '✕');
+  const tone = (st: string) => (st === 'SUCCESS' ? 'text-emerald-700' : st === 'SKIPPED' ? 'text-muted' : 'text-red-700');
+  return (
+    <TraceSection title="مسار التنفيذ">
+      <Row k="النتيجة" v={s.outcomeLabel} />
+      <Row k="الزمن الكلي" v={s.totalLabel} />
+      {s.failureLabel ? <Row k="مكان الفشل" v={s.failureLabel} /> : null}
+      {s.failureCode ? <Row k="السبب" v={s.failureCode} /> : null}
+      {s.failureNote ? <div className="text-xs text-muted">{s.failureNote}</div> : null}
+      {s.slowestLabel ? <Row k="أبطأ مرحلة" v={s.slowestLabel} /> : null}
+      <div className="space-y-0.5 pt-1">
+        {execution.stages.map((st, i) => (
+          <div key={`${st.stage}-${st.index ?? i}`} className="flex items-center justify-between gap-2 text-xs">
+            <span className={tone(st.status)} dir="auto">
+              {icon(st.status)} {stageTitle(st)}
+            </span>
+            <span className="text-muted">
+              {statusLabel(st.status)}
+              {typeof st.duration_ms === 'number' ? ` · ${formatDuration(st.duration_ms)}` : ''}
+            </span>
+          </div>
+        ))}
+      </div>
+      <details className="pt-1 text-xs text-muted">
+        <summary className="cursor-pointer">تفاصيل تقنية</summary>
+        <div className="space-y-1 pt-1">
+          {execution.stages
+            .filter((st) => st.detail)
+            .map((st, i) => (
+              <div key={`d-${st.stage}-${st.index ?? i}`} dir="auto">
+                {stageTitle(st)}:{' '}
+                {Object.entries(st.detail ?? {})
+                  .map(([k, v]) => `${k}=${typeof v === 'number' && k.includes('tokens') ? formatTokens(v) : String(v)}`)
+                  .join(' · ')}
+              </div>
+            ))}
+          {s.shares ? (
+            <div dir="auto">
+              {`الموديل ${s.shares.model}% · المصادر ${s.shares.knowledge}% · KIP ${s.shares.kip}% · الحفظ ${s.shares.persistence}%`}
+            </div>
+          ) : null}
+        </div>
+      </details>
+    </TraceSection>
   );
 }
 
