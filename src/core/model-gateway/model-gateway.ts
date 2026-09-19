@@ -37,6 +37,21 @@ export interface ModelGatewayInput {
   model?: ModelRequirement;
   /** Optional already-resolved model id (from the control-plane assignment resolver). */
   modelId?: string;
+  /**
+   * Optional provider-neutral structured-output request: the caller declares the exact
+   * response shape it needs (a JSON Schema). The provider adapter maps it to its own
+   * mechanism (e.g. OpenRouter/OpenAI `response_format: {type:'json_schema'}`). Omitted =>
+   * the request carries no structured-output requirement, exactly as before. The gateway
+   * knows nothing about the schema's meaning; it is execution plumbing only.
+   */
+  responseFormat?: { name: string; strict?: boolean; schema: Record<string, unknown> };
+  /**
+   * Workload/Skill-scoped reasoning hint. Provider-neutral vocabulary: 'low' | 'medium'
+   * | 'high' | 'off'. The adapter maps it to its own mechanism (OpenRouter `reasoning.effort`).
+   * Provider defaults are used when omitted. Distinct from the gateway-global K29 env knob:
+   * one workload can request 'low' while another stays default.
+   */
+  reasoning?: 'low' | 'medium' | 'high' | 'off';
 }
 
 export interface ModelUsage {
@@ -44,6 +59,8 @@ export interface ModelUsage {
   completionTokens?: number;
   totalTokens?: number;
   costUsd?: number;
+  /** Hidden reasoning tokens, when the provider reports them separately. */
+  reasoningTokens?: number;
 }
 
 export interface ModelGatewayOutput {
@@ -52,6 +69,10 @@ export interface ModelGatewayOutput {
   model?: string;
   usage?: ModelUsage;
   latencyMs?: number;
+  /** The provider backend that actually served the call, when the provider reports it. */
+  servedBy?: string;
+  /** Why generation stopped (e.g. stop / length), when the provider reports it. */
+  finishReason?: string;
 }
 
 /**

@@ -15,7 +15,8 @@ import type {
   ModelGatewayInput,
   ModelGatewayOutput,
 } from '../../core/model-gateway/model-gateway.ts';
-import { providerError } from '../../core/model-gateway/gateway-errors.ts';
+import { isProviderError, providerError } from '../../core/model-gateway/gateway-errors.ts';
+import type { ProviderError } from '../../core/runtime/runtime.ts';
 import {
   EMBEDDING_MAX_RETRIES,
   EMBEDDING_RETRY_BACKOFF_MS,
@@ -26,12 +27,82 @@ import type { EmbedTextsInput, EmbedTextsOutput } from '../../core/model-gateway
 const BASE = 'https://openrouter.ai/api/v1';
 /** Bounded per-request timeout; embeddings of one bounded batch finish well inside it. */
 const EMBEDDING_TIMEOUT_MS = 60_000;
+/**
+ * Bound for ONE chat/model call. Without it a hung provider call could keep a run open
+ * indefinitely (observed: >300 s, and a run left permanently `started`).
+ * 300_000 (5 min) is deliberately above the slowest observed SUCCESSFUL call (285 s) so
+ * no legitimately slow call is cut, and far below "indefinite" so a stall becomes a
+ * classified technical failure instead of an untracked hang.
+ * Override with KIP_CHAT_TIMEOUT_MS (milliseconds).
+ */
+const CHAT_TIMEOUT_MS = 300_000;
+
+/**
+ * K29 — operator-level chat request tuning. Both settings are OFF unless the environment
+ * sets them, so the default request body stays exactly what it was. They only influence
+ * (a) which provider backend serves the call and (b) how much hidden reasoning the provider
+ * allows: they never change how a Skill reasons, and they use documented OpenRouter request
+ * fields only. Invalid values are ignored rather than forwarded.
+ */
+const PROVIDER_SORTS = ['throughput', 'latency', 'price'] as const;
+const REASONING_EFFORTS = ['low', 'medium', 'high'] as const;
+
+function resolveProviderSort(raw: string): string | undefined {
+  const v = raw.trim();
+  return (PROVIDER_SORTS as readonly string[]).includes(v) ? v : undefined;
+}
+
+function resolveReasoningEffort(raw: string): string | undefined {
+  const v = raw.trim();
+  return (REASONING_EFFORTS as readonly string[]).includes(v) ? v : undefined;
+}
+
+/** Per-call resolution: a Skill that passes `reasoning` overrides the gateway-global default
+ *  for this call only. Returns undefined when both are unset or the request is 'off'. */
+const PER_CALL_REASONING = ['low', 'medium', 'high', 'off'] as const;
+type PerCallReasoning = (typeof PER_CALL_REASONING)[number];
+function resolvePerCallReasoning(raw: string | undefined): PerCallReasoning | undefined {
+  if (raw === undefined) return undefined;
+  const v = String(raw).trim().toLowerCase();
+  return (PER_CALL_REASONING as readonly string[]).includes(v) ? (v as PerCallReasoning) : undefined;
+}
+
+function resolveChatTimeoutMs(): number {
+  const raw = Number(process.env.KIP_CHAT_TIMEOUT_MS ?? '');
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : CHAT_TIMEOUT_MS;
+}
+
+/**
+ * Normalize a provider failure — whether it surfaces while opening the request OR while
+ * reading the response body (a stall after headers used to escape unclassified and reach
+ * callers as a bare DOMException, losing the lowercase `provider` kind). Never leaks
+ * provider internals upward: only the canonical kind + a machine code survive.
+ */
+function classifyChatFailure(e: unknown, timeoutMs: number): ProviderError {
+  if (isProviderError(e)) return e;
+  const name = (e as { name?: unknown } | null)?.name;
+  const code = (e as { code?: unknown } | null)?.code;
+  const timedOut =
+    name === 'TimeoutError' ||
+    name === 'AbortError' ||
+    code === 'PROVIDER_CHAT_TIMEOUT' ||
+    (typeof code === 'string' && code.startsWith('UND_ERR_') && code.includes('TIMEOUT'));
+  return timedOut
+    ? providerError('chat completion timed out', 'PROVIDER_CHAT_TIMEOUT', { timeoutMs })
+    : providerError('chat completion transport failure', 'PROVIDER_CHAT_FAILED', { reason: 'transport' });
+}
 
 export interface OpenRouterAdapterOptions {
   apiKey: string;
   defaultModel: string;
   /** Inject for tests. */
   fetchImpl?: typeof fetch;
+  /** Inject for tests; defaults to KIP_CHAT_TIMEOUT_MS or CHAT_TIMEOUT_MS. */
+  chatTimeoutMs?: number;
+  /** Inject for tests; defaults to KIP_PROVIDER_SORT (unset = the request carries no routing preference). */
+  providerSort?: string;
+  /** Inject for tests; defaults to KIP_REASONING_EFFORT (unset = the request carries no reasoning setting). */
+  reasoningEffort?: string;
 }
 
 export interface OpenRouterModelSummary {
@@ -42,10 +113,26 @@ export interface OpenRouterModelSummary {
 export class OpenRouterGateway implements ModelGateway {
   private readonly fetcher: typeof fetch;
   private readonly defaultModel: string;
+  private readonly chatTimeoutMs: number;
+  private readonly providerSort: string | undefined;
+  private readonly reasoningEffort: string | undefined;
 
   constructor(private readonly opts: OpenRouterAdapterOptions) {
     this.fetcher = opts.fetchImpl ?? fetch;
     this.defaultModel = opts.defaultModel;
+    this.chatTimeoutMs = opts.chatTimeoutMs ?? resolveChatTimeoutMs();
+    // One validation point for both sources: an invalid value is dropped, never forwarded.
+    // Tests may pass an explicit `''` to disable an env default without mutating the env.
+    this.providerSort = resolveProviderSort(opts.providerSort !== undefined ? opts.providerSort : (process.env.KIP_PROVIDER_SORT ?? ''));
+    this.reasoningEffort = resolveReasoningEffort(opts.reasoningEffort !== undefined ? opts.reasoningEffort : (process.env.KIP_REASONING_EFFORT ?? ''));
+  }
+
+  /** Combined per-call resolution: caller > env default; 'off' means suppress. */
+  private resolveReasoningForCall(caller: unknown, envDefault: string | undefined): string | undefined {
+    const perCall = resolvePerCallReasoning(typeof caller === 'string' ? caller : undefined);
+    if (perCall === 'off') return undefined;
+    if (perCall !== undefined) return perCall;
+    return envDefault;
   }
 
   /** Runtime credential set (from Vault). Never logged. */
@@ -107,25 +194,59 @@ export class OpenRouterGateway implements ModelGateway {
         ? Math.trunc(input.maxOutputTokens)
         : undefined;
 
-    const res = await this.raw('/chat/completions', {
-      method: 'POST',
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content }],
-        ...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
-      }),
-    });
+    let res: Response;
+    try {
+      res = await this.raw('/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content }],
+          ...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
+          // K29 operator settings: absent unless configured, so the default body is unchanged.
+          ...(this.providerSort ? { provider: { sort: this.providerSort } } : {}),
+          // K29-RADICAL: per-call reasoning overrides the gateway-global default for one
+          // workload/Skill without affecting the rest of the platform.
+          ...(this.resolveReasoningForCall(input.reasoning, this.reasoningEffort) ? { reasoning: { effort: this.resolveReasoningForCall(input.reasoning, this.reasoningEffort)! } } : {}),
+          // P0.4 opt-in structured output: present only when the caller asked for a schema.
+          ...(input.responseFormat
+            ? { response_format: { type: 'json_schema', json_schema: { name: input.responseFormat.name, strict: input.responseFormat.strict ?? true, schema: input.responseFormat.schema } } }
+            : {}),
+        }),
+        signal: AbortSignal.timeout(this.chatTimeoutMs),
+      });
+    } catch (e) {
+      // Socket/DNS/transport failure or timeout: normalized at the platform boundary so
+      // callers keep a technical failure distinct from a reasoning/evidence outcome.
+      throw classifyChatFailure(e, this.chatTimeoutMs);
+    }
 
     if (!res.ok) {
       throw providerError('chat completion failed', 'PROVIDER_CHAT_FAILED', { status: res.status });
     }
 
-    const body = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    let body: {
+      choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+        completion_tokens_details?: { reasoning_tokens?: number };
+      };
       model?: string;
+      /** OpenRouter reports the backend that actually served the call. */
+      provider?: string;
     };
+    try {
+      body = (await res.json()) as typeof body;
+    } catch (e) {
+      // A stall/abort AFTER the headers arrived must be classified exactly like one before.
+      throw classifyChatFailure(e, this.chatTimeoutMs);
+    }
     const text = body.choices?.[0]?.message?.content ?? '';
+    // Observability only: which backend served the call, why it stopped, and how much of the
+    // completion was hidden reasoning. Reported raw when the provider sends it, otherwise absent.
+    const reasoningTokens = body.usage?.completion_tokens_details?.reasoning_tokens;
+    const finishReason = body.choices?.[0]?.finish_reason;
     return {
       text,
       provider: 'openrouter',
@@ -134,7 +255,10 @@ export class OpenRouterGateway implements ModelGateway {
         promptTokens: body.usage?.prompt_tokens,
         completionTokens: body.usage?.completion_tokens,
         totalTokens: body.usage?.total_tokens,
+        ...(typeof reasoningTokens === 'number' ? { reasoningTokens } : {}),
       },
+      ...(typeof body.provider === 'string' && body.provider.length > 0 ? { servedBy: body.provider } : {}),
+      ...(typeof finishReason === 'string' && finishReason.length > 0 ? { finishReason } : {}),
       latencyMs: Date.now() - started,
     };
   }

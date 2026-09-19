@@ -28,7 +28,7 @@ function captureAdapter() {
     bodies.push(JSON.parse(String(init?.body ?? '{}')));
     return ok('{}');
   }) as unknown as typeof fetch;
-  const gateway = new OpenRouterGateway({ apiKey: 'test-key', defaultModel: 'google/gemini-3.5-flash', fetchImpl });
+  const gateway = new OpenRouterGateway({ apiKey: 'k', defaultModel: 'google/gemini-3.5-flash', fetchImpl, providerSort: '', reasoningEffort: '' });
   return { gateway, bodies };
 }
 

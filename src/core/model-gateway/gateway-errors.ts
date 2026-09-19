@@ -17,3 +17,11 @@ import type { ProviderError } from '../runtime/runtime.ts';
 export function providerError(message: string, code = 'PROVIDER_ERROR', details?: unknown): ProviderError {
   return { kind: 'provider', code, message, details };
 }
+
+/**
+ * True when a thrown value is a normalized provider/transport failure. Callers use this to
+ * keep a TECHNICAL failure distinct from a domain outcome (e.g. insufficient evidence).
+ */
+export function isProviderError(e: unknown): e is ProviderError {
+  return typeof e === 'object' && e !== null && (e as { kind?: unknown }).kind === 'provider';
+}
