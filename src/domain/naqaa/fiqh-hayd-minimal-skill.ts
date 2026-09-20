@@ -63,6 +63,30 @@ const MINIMAL_RESPONSE_SCHEMA = {
     message: { type: 'string' },
     question: { type: 'string' },
     evidenceRefs: { type: 'array', items: { type: 'string' } },
+    // RX1 semantic parts — ALL optional. The LLM fills only what genuinely helps the
+    // ordinary user; KIP stores semantics, never colors/design.
+    understanding: { type: 'string' },
+    summary: { type: 'string' },
+    explanation: { type: 'string' },
+    practical: { type: 'string' },
+    visual: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['timeline'] },
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { label: { type: 'string' }, duration: { type: 'string' } },
+            required: ['label'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['type', 'items'],
+      additionalProperties: false,
+    },
+    nextAction: { type: 'string' },
   },
   anyOf: [{ required: ['action'] }, { required: ['status'] }],
   additionalProperties: false,
@@ -90,24 +114,39 @@ const MINIMAL_INSTRUCTION = [
   '',
   'لا تخترع واقعة لم تقلها المستخدمة.',
   '',
-  'اجعل الرد بسيطًا ومباشرًا: ابدأ بحالتها وما الذي تفعله، ثم السبب المختصر، ثم التنبيه عند الحاجة، ثم المصدر.',
+  'أسلوب الجواب — أنت فقيه موثوق يشرح لامرأة عادية، لا فقيه يكتب لفقيه:',
+  '  - عربية بسيطة جدًا، جمل قصيرة وواضحة.',
+  '  - تجنبي المصطلحات الفقهية المعقدة؛ إن اضطررتِ لمصطلح فاشرحيه بكلمات سهلة.',
+  '  - لا مقدمة طويلة، ولا تعيدي سؤال المستخدمة كاملًا.',
+  '  - قدّمي الخلاصة مبكرًا، واشرحي السبب بأقصر قدر كافٍ.',
+  '  - إن كان للحكم أثر عملي على المستخدمة فوضّحيه.',
+  '  - لا تعطي درسًا فقهيًا طويلًا إلا إذا طلبت التفاصيل.',
+  '  - لا تختمي تلقائيًا بـ«هل لديك سؤال آخر؟».',
+  '  - إن وُجدت خطوة تالية مفيدة فعلًا فاقترحيها باختصار.',
   '',
-  'خاطبي المستخدمة بلغة بسيطة جدًا وواضحة، بحيث تفهم الجوابَ المستخدمةُ العادية دون معرفة فقهية مسبقة.',
+  'إذا كانت معلومة مادية ناقصة: لا تفترضيها — اسألي سؤالًا توضيحيًا قصيرًا (ASK_USER) بدل حكم شكلي.',
   '',
-  'تجنبي المصطلحات الفقهية المتخصصة ما أمكن، وإذا احتجتِ مصطلحًا فاشرحيه بكلمات سهلة.',
-  '',
-  'اجعلي طول الجواب متناسبًا مع السؤال: السؤال البسيط جوابه بسيط، والمسألة المعقدة تأخذ ما تحتاجه.',
-  'لا تحولي السؤال البسيط إلى درس فقهي.',
+  'أجزاء الجواب الاختيارية (املئي فقط ما يساعد المستخدمة العادية فعلًا، واتركي الباقي):',
+  '  - understanding: تأكيد شديد الاختصار لفهم الحالة المركبة (مثل: «3 أيام دم، ثم 5 أيام نقاء، ثم 4 أيام دم»). لا تستخدميه في السؤال البسيط.',
+  '  - summary: الخلاصة المباشرة — أهم جزء للمستخدمة.',
+  '  - explanation: سبب مبسط، 1–3 جمل غالبًا.',
+  '  - practical: ما الذي يعنيه الحكم عمليًا للمستخدمة، إن وُجد.',
+  '  - visual: فقط عندما يساعد عرض زمني في الفهم — {"type":"timeline","items":[{"label":"دم","duration":"3 أيام"},...]}. لا ألوان ولا تصميم — معنى فقط.',
+  '  - nextAction: خطوة تالية مفيدة مرتبطة بالسياق فقط، لا تجبري كل جواب عليها.',
+  '  - message: النص الكامل البسيط للجواب (هو ما تعرضه المحادثة)، مرتبًا: الخلاصة أولًا، ثم السبب، ثم الأثر العملي، ثم المصدر.',
   '',
   'واجهة التنفيذ (هذه ليست طريقة تفكير، بل صيغة الإخراج الموحّدة في كل رد):',
   '  - إذا احتجتِ دليلًا جديدًا: {"action":"USE_TOOL","tool":"search_knowledge","query":"نص البحث"}',
-  '  - لإجابة نهائية مع الدليل: {"action":"TERMINAL","status":"ANSWER","message":"نص الجواب","evidenceRefs":["معرّف المقطع"]}',
+  '  - لإجابة نهائية مع الدليل: {"action":"TERMINAL","status":"ANSWER","message":"نص الجواب","evidenceRefs":["معرّف المقطع"],"summary":"...","explanation":"...","practical":"..."}',
   '  - لطلب معلومة واحدة مؤثرة: {"action":"TERMINAL","status":"ASK_USER","question":"السؤال"}',
   '  - إذا لم يكفِ الدليل المتاح: {"action":"TERMINAL","status":"INSUFFICIENT_EVIDENCE","message":"بيان مختصر"}',
   '  - لا تكتب أي نص خارج الـ JSON، ولا تستخدم أكواد JSON Schema أو Markdown fences.',
   `- يبقى لك ${MAX_TOOL_CALLS} عمليات بحث بحد أقصى في الدور الواحد.`,
   '- evidenceRefs يقبل فقط معرّفات مقاطع ظهرت لك من نتيجة الأداة في هذا الدور.',
 ].join('\n');
+
+interface MinimalTimelineItem { label: string; duration?: string }
+interface MinimalVisual { type: 'timeline'; items: MinimalTimelineItem[] }
 
 interface MinimalResponse {
   action: 'USE_TOOL' | 'TERMINAL';
@@ -117,6 +156,13 @@ interface MinimalResponse {
   message?: string;
   question?: string;
   evidenceRefs?: string[];
+  // RX1 semantic parts (all optional; the LLM decides what genuinely helps).
+  understanding?: string;
+  summary?: string;
+  explanation?: string;
+  practical?: string;
+  visual?: MinimalVisual;
+  nextAction?: string;
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
@@ -177,12 +223,35 @@ function parseModelResponse(text: string): MinimalResponse | null {
   const refs = Array.isArray(o.evidenceRefs)
     ? o.evidenceRefs.map((x) => str(x)).filter(Boolean).slice(0, 6)
     : undefined;
+  // RX1 visual: accept only a well-formed semantic timeline; anything else is dropped
+  // (never a parse failure — the visual is a presentation hint, not a verdict).
+  let visual: MinimalVisual | undefined;
+  if (o.visual && typeof o.visual === 'object') {
+    const v = o.visual as Record<string, unknown>;
+    if (str(v.type).toLowerCase() === 'timeline' && Array.isArray(v.items)) {
+      const items = v.items
+        .map((it) => {
+          const r = (it ?? {}) as Record<string, unknown>;
+          const label = str(r.label);
+          return label ? { label: bounded(label, 40), ...(str(r.duration) ? { duration: bounded(str(r.duration), 40) } : {}) } : null;
+        })
+        .filter((x): x is MinimalTimelineItem => x !== null)
+        .slice(0, 12);
+      if (items.length > 0) visual = { type: 'timeline', items };
+    }
+  }
   return {
     action: 'TERMINAL',
     status: status as MinimalResponse['status'],
     ...(str(o.message) ? { message: bounded(str(o.message), 1600) } : {}),
     ...(str(o.question) ? { question: bounded(str(o.question), MAX_QUESTION_CHARS) } : {}),
     ...(refs && refs.length > 0 ? { evidenceRefs: refs } : {}),
+    ...(str(o.understanding) ? { understanding: bounded(str(o.understanding), 300) } : {}),
+    ...(str(o.summary) ? { summary: bounded(str(o.summary), 400) } : {}),
+    ...(str(o.explanation) ? { explanation: bounded(str(o.explanation), 800) } : {}),
+    ...(str(o.practical) ? { practical: bounded(str(o.practical), 400) } : {}),
+    ...(visual ? { visual } : {}),
+    ...(str(o.nextAction) ? { nextAction: bounded(str(o.nextAction), 200) } : {}),
   };
 }
 
@@ -346,12 +415,23 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
             });
           }
           const first = returned.find((p) => p.chunkId === accepted[0]);
+          // RX1: forward only the semantic parts the model actually supplied (no invented
+          // parts; `text` remains the full display string for backward compatibility).
+          const structured = {
+            ...(parsed.understanding ? { understanding: parsed.understanding } : {}),
+            ...(parsed.summary ? { summary: parsed.summary } : {}),
+            ...(parsed.explanation ? { explanation: parsed.explanation } : {}),
+            ...(parsed.practical ? { practical: parsed.practical } : {}),
+            ...(parsed.visual ? { visual: parsed.visual } : {}),
+            ...(parsed.nextAction ? { nextAction: parsed.nextAction } : {}),
+          };
           return {
             status: 'completed',
             answer: {
               text: parsed.message ?? '',
               ...(first?.sourceTitle ? { sourceTitle: first.sourceTitle } : {}),
               evidenceIds: accepted,
+              ...(Object.keys(structured).length > 0 ? { structured } : {}),
             },
             trace: {
               ...modelName,

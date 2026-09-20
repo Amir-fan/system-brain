@@ -62,7 +62,21 @@ export interface ConversationResponse {
   runId?: string;
   trace?: SkillTraceSummary;
   /** Present when the executed skill produced a grounded user-facing answer. */
-  answer?: { text: string; sourceTitle?: string; evidenceIds?: string[]; label?: string };
+  answer?: {
+    text: string;
+    sourceTitle?: string;
+    evidenceIds?: string[];
+    label?: string;
+    /** RX1: optional semantic parts of the SAME answer (semantics only, never design). */
+    structured?: {
+      understanding?: string;
+      summary?: string;
+      explanation?: string;
+      practical?: string;
+      visual?: { type: 'timeline'; items: Array<{ label: string; duration?: string }> };
+      nextAction?: string;
+    };
+  };
   /** Bounded, auditable case state (facts + provenance/certainty + grounded validity). */
   caseState?: {
     facts: Array<{ key: string; value: string; provenance: string; certainty: string }>;

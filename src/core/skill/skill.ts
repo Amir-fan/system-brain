@@ -241,6 +241,19 @@ export interface SkillAnswer {
   evidenceIds?: string[];
   /** Short label for the answer category when a skill has one (e.g. a ruling label). */
   label?: string;
+  /**
+   * Optional semantic parts of the SAME answer (never a second answer): the LLM supplies
+   * only what genuinely helps an ordinary user, and KIP stores semantics — never colors,
+   * layout or design. Backward-compatible: `text` remains the full display string.
+   */
+  structured?: {
+    understanding?: string;
+    summary?: string;
+    explanation?: string;
+    practical?: string;
+    visual?: { type: 'timeline'; items: Array<{ label: string; duration?: string }> };
+    nextAction?: string;
+  };
 }
 
 export interface SkillExecutionContext {

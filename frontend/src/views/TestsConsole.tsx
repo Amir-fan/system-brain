@@ -638,6 +638,64 @@ export function TestsConsole() {
  * compact line: source name + the cited evidence ids (no raw chunk dump).
  */
 function AnswerSource({ answer }: { answer?: ConversationResponse['answer'] }) {
+  if (!answer?.sourceTitle && !answer?.structured) return null;
+  const s = answer?.structured;
+  if (s) {
+    return (
+      <div className="max-w-[85%] space-y-2 rounded-2xl border border-brand-100 bg-brand-50/40 p-3" dir="rtl">
+        {s.understanding ? (
+          <div>
+            <div className="text-[11px] font-semibold text-brand-700">فهمت حالتج</div>
+            <p className="text-sm text-slate-800">{s.understanding}</p>
+          </div>
+        ) : null}
+        {s.summary ? (
+          <div>
+            <div className="text-[11px] font-semibold text-brand-700">الخلاصة</div>
+            <p className="text-sm font-semibold text-slate-900">{s.summary}</p>
+          </div>
+        ) : null}
+        {s.explanation ? (
+          <div>
+            <div className="text-[11px] font-semibold text-brand-700">ليش؟</div>
+            <p className="text-sm text-slate-800">{s.explanation}</p>
+          </div>
+        ) : null}
+        {s.practical ? (
+          <div>
+            <div className="text-[11px] font-semibold text-brand-700">شنو يعني لج؟</div>
+            <p className="text-sm text-slate-800">{s.practical}</p>
+          </div>
+        ) : null}
+        {s.visual && s.visual.type === 'timeline' && s.visual.items.length > 0 ? (
+          <div>
+            <div className="text-[11px] font-semibold text-brand-700">الخط الزمني</div>
+            <ol className="mt-1 space-y-0.5 border-s-2 border-brand-200 ps-3">
+              {s.visual.items.map((it, i) => (
+                <li key={i} className="text-xs text-slate-700">
+                  <b>{it.label}</b>{it.duration ? ` — ${it.duration}` : ''}
+                </li>
+              ))}
+            </ol>
+          </div>
+        ) : null}
+        {s.nextAction ? (
+          <div className="rounded-lg bg-white px-2 py-1 text-xs text-brand-800">الخطوة التالية: {s.nextAction}</div>
+        ) : null}
+        {answer?.sourceTitle ? (
+          <div className="flex flex-wrap items-center gap-1.5 border-t border-brand-100 pt-1.5 text-[11px] text-muted-soft">
+            {answer.label ? (
+              <span className="rounded-full bg-brand-50 px-2 py-0.5 font-medium text-brand-700">{answer.label}</span>
+            ) : null}
+            <span>المصدر: <b className="text-slate-600">{answer.sourceTitle}</b></span>
+            {answer.evidenceIds?.length ? (
+              <span>{`(${answer.evidenceIds.length} ${answer.evidenceIds.length === 1 ? 'مرجع' : 'مراجع'})`}</span>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
   if (!answer?.sourceTitle) return null;
   return (
     <div className="flex flex-wrap items-center gap-1.5 ps-1 text-[11px] text-muted-soft">

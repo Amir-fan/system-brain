@@ -83,11 +83,11 @@ const askTool = (q: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK
 test('Minimal/style: the answer-simplicity preference is instructed', async () => {
   const { m } = await run({ text: 'ما الحكم؟', responses: [askUser('ما صفة السائل؟')] });
   const prompt = m.captured.messages[0];
-  assert.ok(prompt.includes('لغة بسيطة جدًا وواضحة'), 'plain-language preference');
-  assert.ok(prompt.includes('ابدأ بحالتها وما الذي تفعله'), 'direct answer first');
+  assert.ok(prompt.includes('عربية بسيطة جدًا'), 'plain-language preference');
+  assert.ok(prompt.includes('جمل قصيرة وواضحة'), 'short clear sentences');
+  assert.ok(prompt.includes('قدّمي الخلاصة مبكرًا'), 'summary first');
   assert.ok(prompt.includes('تجنبي المصطلحات الفقهية'), 'avoid specialised vocabulary');
-  assert.ok(prompt.includes('اجعل') && prompt.includes('طول الجواب متناسبًا'), 'length proportional to the question');
-  assert.ok(prompt.includes('لا تحولي السؤال البسيط إلى درس فقهي'), 'no turning a simple question into a lecture');
+  assert.ok(prompt.includes('لا تعطي درسًا فقهيًا طويلًا'), 'no long fiqh lecture');
   // …and none of the intelligence instructions were displaced.
   assert.ok(prompt.includes('لا تطلب منها معلومة سبق أن ذكرتها'), 'no-re-ask preserved');
   assert.ok(prompt.includes('قبل إعطاء حكم فقهي، استخدم أداة البحث'), 'knowledge-before-ruling preserved');
@@ -286,4 +286,47 @@ test('Minimal/T: a single USE_TOOL envelope is no longer parsed as a terminal en
   assert.notEqual(out.trace.notes.includes('unreadable_model_output'), true,
     'a USE_TOOL action must not fall into the gap branch');
   assert.equal(out.trace.status, 'ANSWER');
+});
+
+// RX1 — semantic parts are forwarded into answer.structured (only when supplied)
+test('RX1/A: supplied semantic parts reach answer.structured; message stays the full text', async () => {
+  const structured = JSON.stringify({
+    action: 'TERMINAL', status: 'ANSWER',
+    message: 'كل الأيام تحسب حيضًا.',
+    evidenceRefs: [CHUNK_A],
+    understanding: '3 أيام دم، ثم 5 أيام نقاء، ثم 4 أيام دم.',
+    summary: 'الـ12 يومًا كلها تُحسب حيضًا.',
+    explanation: 'لأن مجموعها لا يتجاوز الخمسة عشر يومًا.',
+    practical: 'كل هذه الأيام لا تصلين فيها.',
+    visual: { type: 'timeline', items: [{ label: 'دم', duration: '3 أيام' }, { label: 'نقاء', duration: '5 أيام' }, { label: 'دم', duration: '4 أيام' }] },
+    nextAction: 'سجلي الأيام في التقويم.',
+  });
+  const { out } = await run({ text: 'حالة مركبة', responses: [tool('مدة الحيض القصوى'), structured] });
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.equal(out.answer.text, 'كل الأيام تحسب حيضًا.', 'backward-compatible full text preserved');
+  assert.equal(out.answer.structured.summary, 'الـ12 يومًا كلها تُحسب حيضًا.');
+  assert.equal(out.answer.structured.understanding, '3 أيام دم، ثم 5 أيام نقاء، ثم 4 أيام دم.');
+  assert.equal(out.answer.structured.visual.type, 'timeline');
+  assert.equal(out.answer.structured.visual.items.length, 3);
+  assert.equal(out.answer.structured.nextAction, 'سجلي الأيام في التقويم.');
+  assert.deepEqual(out.answer.evidenceIds, [CHUNK_A], 'citation integrity unchanged');
+});
+
+test('RX1/B: an answer WITHOUT semantic parts carries no structured block (optional fields stay optional)', async () => {
+  const { out } = await run({ text: 'سؤال بسيط', responses: [tool('حكم الصفرة'), answer('الجواب القصير.', [CHUNK_A])] });
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.equal(out.answer.text, 'الجواب القصير.');
+  assert.equal(out.answer.structured, undefined, 'no invented structured block');
+});
+
+test('RX1/C: a malformed visual is dropped, never a parse failure', async () => {
+  const badVisual = JSON.stringify({
+    action: 'TERMINAL', status: 'ANSWER', message: 'الجواب.', evidenceRefs: [CHUNK_A],
+    summary: 'الخلاصة.',
+    visual: { type: 'piechart', items: 'not-an-array' },
+  });
+  const { out } = await run({ text: 'سؤال', responses: [tool('حكم الصفرة'), badVisual] });
+  assert.equal(out.trace.status, 'ANSWER', 'still a valid answer');
+  assert.equal(out.answer.structured.summary, 'الخلاصة.', 'valid parts still forwarded');
+  assert.equal(out.answer.structured.visual, undefined, 'invalid visual silently dropped');
 });
