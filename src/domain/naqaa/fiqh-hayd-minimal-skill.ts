@@ -300,9 +300,31 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
       const input = (ctx.input ?? {}) as {
         text?: unknown;
         recentTurns?: Array<{ role?: string; text?: string }>;
+        // Session case facts + policy-gated personal-memory facts (provenance/certainty
+        // attached). In private mode this block is EMPTY by construction (the conversation
+        // never reads personal memory for private sessions), so reading it here is safe.
+        context?: Record<string, unknown>;
+        factMeta?: Record<string, { provenance?: string; certainty?: string }>;
       };
       const text = str(input.text);
       const turns = Array.isArray(input.recentTurns) ? input.recentTurns : [];
+      const facts = input.context ?? {};
+      const factMeta = input.factMeta ?? {};
+      // Known facts the user/memory already established — the Mind must NOT re-ask these.
+      // Rendered with provenance+certainty so the model can tell a user's own statement
+      // from a weaker memory hint. (Calendared Naqaa data has no KIP surface yet — see
+      // deferred note; only facts that already reach this payload are shown.)
+      const knownLines = Object.entries(facts)
+        .filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+        .map(([k, v]) => {
+          const m = factMeta[k] ?? {};
+          const certainty = m.certainty ? String(m.certainty) : '';
+          const provenance = m.provenance ? String(m.provenance) : '';
+          const tag = [certainty, provenance].filter(Boolean).join('/');
+          return `- ${k} = ${JSON.stringify(v)}${tag ? ` (${tag})` : ''}`;
+        })
+        .slice(0, 24)
+        .join('\n');
 
       let modelCalls = 0;
       let toolCalls = 0;
@@ -334,7 +356,7 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
       if (approved.length === 0) return gap('approved_sources_missing', 'المصادر المعتمدة غير متاحة الآن.');
       const approvedIds = approved.map((s) => s.id);
 
-      // 2. Natural conversation.
+      // 2. Natural conversation + known facts (so the Mind never re-asks what is known).
       const conversation = [
         ...turns
           .filter((t) => (t.role === 'user' || t.role === 'assistant') && str(t.text))
@@ -344,7 +366,8 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         .filter(Boolean)
         .join('\n');
 
-      let interaction = `${MINIMAL_INSTRUCTION}\n\nالمحادثة:\n${boundedTail(conversation, MAX_CONVERSATION_CHARS)}`;
+      const knownBlock = knownLines ? `\n\nمعلومات معروفة مسبقًا (لا تسأل عنها من جديد):\n${knownLines}` : '';
+      let interaction = `${MINIMAL_INSTRUCTION}\n\nالمحادثة:\n${boundedTail(conversation, MAX_CONVERSATION_CHARS)}${knownBlock}`;
 
       const askTool = async (query: string): Promise<{ rendered: string; newChunks: SkillKnowledgePassage[] }> => {
         const norm = normalizeQuery(query);

@@ -373,3 +373,34 @@ test('RX2/D: required mode fails closed when summary never arrives (within the m
   const { out } = await runWith(reqSkill(), { text: 'سؤال', responses: [tool('حكم الصفرة'), noSummary, noSummary, noSummary, noSummary] });
   assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
 });
+
+// STAGE2 — the Mind reads the policy-gated known-facts block (session case + personal-memory
+// facts already inside payload.context) and is told NOT to re-ask them; empty in private mode.
+test('STAGE2/A: known facts reach the model with a do-not-re-ask instruction and provenance', async () => {
+  const k = knowledge();
+  const m = model([askUser('سؤال آخر؟')]);
+  const ctx = {
+    projectId: 'p', actor: 'a',
+    input: {
+      text: 'الحين شنو حكمي؟',
+      context: { bleeding_duration_hours: 7, discharge_colour: 'أحمر' },
+      factMeta: { bleeding_duration_hours: { provenance: 'user_answer', certainty: 'CERTAIN' }, discharge_colour: { provenance: 'memory', certainty: 'UNCERTAIN' } },
+    },
+    knowledge: k, model: m,
+  } as unknown as SkillExecutionContext;
+  await skill.execute(ctx);
+  const prompt = m.captured.messages[0];
+  assert.ok(prompt.includes('معلومات معروفة مسبقًا'), 'the known-facts block is present');
+  assert.ok(prompt.includes('لا تسأل عنها من جديد'), 'the do-not-re-ask instruction is present');
+  assert.ok(prompt.includes('bleeding_duration_hours = 7 (CERTAIN/user_answer)'), 'a CERTAIN user answer travels with provenance');
+  assert.ok(prompt.includes("discharge_colour = \"أحمر\" (UNCERTAIN/memory)"), 'a memory hint is labelled weaker (UNCERTAIN/memory)');
+});
+
+test('STAGE2/C: with no known facts (private mode construction) the prompt carries NO known-facts block', async () => {
+  const k = knowledge();
+  const m = model([askUser('سؤال؟')]);
+  const ctx = { projectId: 'p', actor: 'a', input: { text: 'سؤال' }, knowledge: k, model: m } as unknown as SkillExecutionContext;
+  await skill.execute(ctx);
+  const prompt = m.captured.messages[0];
+  assert.ok(!prompt.includes('معلومات معروفة مسبقًا'), 'no known-facts block when context is empty (private mode)');
+});
