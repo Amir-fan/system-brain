@@ -219,7 +219,11 @@ async function handleProject(
   return sendJson(res, result.status, result);
 }
 
-/** Authenticate via the canonical ActorAuthenticator; writes 401 and returns null on failure. */
+/** Authenticate via the canonical ActorAuthenticator; writes 401 and returns null on failure.
+ * Stage 3: when the bearer resolves as the trusted server-to-server proxy, an explicit
+ * `x-kip-actor` header conveys the verified end-user subject (per-user memory/conversation
+ * ownership). It is honored ONLY for the proxy credential — a browser/Supabase caller can
+ * never impersonate another actor this way. */
 async function resolveActor(
   req: import('node:http').IncomingMessage,
   res: import('node:http').ServerResponse,
@@ -227,6 +231,19 @@ async function resolveActor(
 ): Promise<string | null> {
   const token = bearerFromHeader(req.headers.authorization);
   try {
+    const authenticator = deps.authenticator as unknown as {
+      authenticateComposite?: (t: string) => Promise<{ actor: string; isProxy: boolean }>;
+    };
+    if (authenticator.authenticateComposite) {
+      const { actor, isProxy } = await authenticator.authenticateComposite(token ?? '');
+      if (isProxy) {
+        const delegated = req.headers['x-kip-actor'];
+        const subj = typeof delegated === 'string' ? delegated.trim() : '';
+        if (subj) return subj; // trusted proxy conveys the verified Naqaa end-user id
+        return actor; // service actor (no delegation supplied)
+      }
+      return actor;
+    }
     const { actor } = await deps.authenticator.authenticate(token ?? '');
     return actor;
   } catch (err) {

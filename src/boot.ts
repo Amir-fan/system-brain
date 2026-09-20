@@ -27,6 +27,19 @@ function tokenActorsFromEnv(): TokenActorMap {
   return map;
 }
 
+// Stage 3 cutover — trusted server-to-server proxy credential (distinct from the dev/test
+// KIP_API_TOKENS). "actor:token" comma-separated; the actor must be a `service` member of
+// the target project. Read from KIP_PROXY_TOKENS; absent = Supabase-only (unchanged).
+function proxyTokensFromBootEnv(): TokenActorMap {
+  const map = new Map<string, string>();
+  const raw = process.env.KIP_PROXY_TOKENS;
+  for (const pair of (raw ?? '').split(',')) {
+    const [actor, token] = pair.split(':');
+    if (actor && token) map.set(token.trim(), actor.trim());
+  }
+  return map;
+}
+
 /** Reads GitHub App config from env, materialising the PEM from a path when given. */
 function githubEnv(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
@@ -46,6 +59,7 @@ async function main() {
     supabaseSecretKey: process.env.SUPABASE_SECRET_KEY ?? '',
     openRouterModel: process.env.MODEL_NAME || 'openrouter/auto',
     tokenActors: tokenActorsFromEnv(),
+    proxyTokens: proxyTokensFromBootEnv(),
     githubApp: loadGitHubAppConfig(githubEnv()),
     frontendUrl: process.env.KIP_FRONTEND_URL || 'http://localhost:5173',
   });

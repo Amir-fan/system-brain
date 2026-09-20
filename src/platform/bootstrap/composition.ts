@@ -22,6 +22,7 @@ import type { Server } from 'node:http';
 import { createHttpApi } from '../api/http-server.ts';
 import { SupabaseActorAuthenticator } from '../api/supabase-authenticator.ts';
 import { StaticTokenAuthenticator } from '../api/static-authenticator.ts';
+import { CompositeActorAuthenticator } from '../api/composite-authenticator.ts';
 import type { TokenActorMap } from '../api/auth.ts';
 import { createProjectDiscoveryStorage } from '../api/project-discovery.ts';
 import { createProviderStorage } from '../provider/provider.storage.ts';
@@ -83,6 +84,8 @@ export interface BootstrapEnv {
   openRouterModel?: string;
   /** DEV/TEST-COMPAT static tokens (legacy KIP_API_TOKENS); optional. */
   tokenActors?: TokenActorMap;
+  /** Stage 3 cutover — trusted server-to-server proxy credential (KIP_PROXY_TOKENS). Optional. */
+  proxyTokens?: TokenActorMap;
   /** GitHub App credentials (null/undefined when the connector is not configured). */
   githubApp?: GitHubAppConfig | null;
   /** Browser origin the provider redirects back to (never hardcoded in domain logic). */
@@ -104,10 +107,14 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   const projectDiscovery = createProjectDiscoveryStorage(db);
 
   // Identity source: Supabase Auth (production); static tokens only as dev/test-compat.
+  // Stage 3: when a trusted server-to-server proxy credential is configured, compose
+  // Supabase + the proxy credential into ONE authenticator (Supabase first, proxy second).
   const authenticator =
     opts.tokenActors && opts.tokenActors.size > 0
       ? new StaticTokenAuthenticator(opts.tokenActors)
-      : new SupabaseActorAuthenticator({ auth: rawClient.auth });
+      : opts.proxyTokens && opts.proxyTokens.size > 0
+        ? new CompositeActorAuthenticator({ auth: rawClient.auth }, opts.proxyTokens)
+        : new SupabaseActorAuthenticator({ auth: rawClient.auth });
 
   const registry = new MapCapabilityRegistry();
   registry.register('platform.echo', async ({ input }) => input);
