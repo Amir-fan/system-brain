@@ -50,6 +50,18 @@ const DEFAULT_QUESTION_KEY = 'minimal_followup';
  * carries the final outcome. We deliberately do NOT model a tool request inside a terminal
  * envelope (the source of the P0.4 ambiguity).
  */
+/**
+ * How this Mind shapes its answer output. Per-Skill static config (KIP enforces the
+ * contract; the LLM still owns the content).
+ *  - natural:  plain text answer; structured response NOT requested.
+ *  - flexible: LLM MAY use the structured semantic fields when useful; a plain-text
+ *              terminal is still accepted (never a failure).
+ *  - required: the structured envelope is requested AND the minimum is enforced —
+ *              `summary` is mandatory on ANSWER; every other field stays optional.
+ * Naqaa Minimal currently runs `required`.
+ */
+export type ResponseMode = 'natural' | 'flexible' | 'required';
+
 // The structured schema shapes what the provider is LIKELY to emit; the parser is the
 // authority. The schema therefore permits either envelope (USE_TOOL/TERMINAL or bare
 // {status}) so a model that drops the action label is still parsed correctly.
@@ -126,9 +138,9 @@ const MINIMAL_INSTRUCTION = [
   '',
   'إذا كانت معلومة مادية ناقصة: لا تفترضيها — اسألي سؤالًا توضيحيًا قصيرًا (ASK_USER) بدل حكم شكلي.',
   '',
-  'أجزاء الجواب الاختيارية (املئي فقط ما يساعد المستخدمة العادية فعلًا، واتركي الباقي):',
+  'أجزاء الجواب (ضعيها في حقول JSON المقابلة — summary هو أهم حقل عند الإجابة، والباقي اختياري حسب الفائدة):',
+  '  - summary: الخلاصة المباشرة في سطر واحد — أهم جزء للمستخدمة. ضعيها في الحقل summary وحدها؛ لا تكتبي كلمة «الخلاصة» داخل message.',
   '  - understanding: تأكيد شديد الاختصار لفهم الحالة المركبة (مثل: «3 أيام دم، ثم 5 أيام نقاء، ثم 4 أيام دم»). لا تستخدميه في السؤال البسيط.',
-  '  - summary: الخلاصة المباشرة — أهم جزء للمستخدمة.',
   '  - explanation: سبب مبسط، 1–3 جمل غالبًا.',
   '  - practical: ما الذي يعنيه الحكم عمليًا للمستخدمة، إن وُجد.',
   '  - visual: فقط عندما يساعد عرض زمني في الفهم — {"type":"timeline","items":[{"label":"دم","duration":"3 أيام"},...]}. لا ألوان ولا تصميم — معنى فقط.',
@@ -257,9 +269,18 @@ function parseModelResponse(text: string): MinimalResponse | null {
 
 interface MinimalDeps {
   readiness: { evaluate(input: { requirements: DecisionRequirement[]; known: KnownContextItem[] }): ReadinessResult };
+  /** Output shaping for THIS Mind. Defaults to 'required' (Naqaa Minimal's current mode). */
+  responseMode?: ResponseMode;
 }
 
 export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
+  // Default is `flexible` (NOT `required`): live evidence on the current production model
+  // (DeepSeek) shows that when `summary` is enforced fail-closed, the model answers well in
+  // text but omits the field, and the enforced re-emit turns otherwise-valid answers into
+  // `unreadable_model_output` failures. `flexible` uses the structured parts whenever the
+  // model supplies them and accepts a plain-text answer otherwise — the safe default.
+  // `required` remains available as an explicit opt-in for a model/path proven to comply.
+  const responseMode: ResponseMode = deps.responseMode ?? 'flexible';
   return {
     id: MINIMAL_SKILL_ID,
     version: MINIMAL_SKILL_VERSION,
@@ -357,7 +378,9 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
           workload: WORKLOAD,
           message: interaction,
           maxOutputTokens: MAX_OUTPUT_TOKENS,
-          responseFormat: MINIMAL_RESPONSE_FORMAT,
+          // response_mode: 'natural' never requests the structured envelope; 'flexible' and
+          // 'required' both request it (the difference is enforcement, not the request).
+          ...(responseMode === 'natural' ? {} : { responseFormat: MINIMAL_RESPONSE_FORMAT }),
           // K29-RADICAL: workload-scoped reasoning hint. Other Skills stay on the default
           // (provider-defined) budget. For Naqaa, 'off' is empirically the right choice —
           // the terminal envelope is small and the model otherwise burns the entire
@@ -413,6 +436,16 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
               retrievedEvidenceIds: [...returnedIds],
               notes: [`queries=${queries.join(' | ')}`],
             });
+          }
+          // response_mode = required: `summary` is the enforced minimum on ANSWER. If the
+          // model answered but omitted it, ask for ONE terminal re-emit (no extra LLM
+          // logic — same loop, one chance, then fail-closed). flexible/natural skip this.
+          if (responseMode === 'required' && !parsed.summary) {
+            if (modelCalls < MAX_MODEL_CALLS) {
+              interaction += `\n\nردك السابق صالح كحكم لكنه ينقصه الحقل الإلزامي summary (الخلاصة المباشرة للمستخدمة). أعد إرسال الرد نفسه الآن بصيغة TERMINAL واملأ حقل summary. الحقول الأخرى اختيارية كما هي.`;
+              continue;
+            }
+            return gap('required_summary_missing', 'تعذّر ترتيب الجواب الآن. حاولي مرة أخرى.', { ...modelName });
           }
           const first = returned.find((p) => p.chunkId === accepted[0]);
           // RX1: forward only the semantic parts the model actually supplied (no invented

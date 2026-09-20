@@ -198,7 +198,8 @@ test('K28/I: a Skill that returns no trace still gets an execution trace', async
 
 // J — the Minimal Mind's behaviour is unchanged by the diagnostics
 test('K28/J: the Minimal Mind behaves exactly as before (trace is additive only)', async () => {
-  const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
+  // flexible keeps the pre-RX2 behaviour (plain-message terminal is valid).
+  const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService(), responseMode: 'flexible' });
   const scripted = [
     JSON.stringify({ action: 'USE_TOOL', tool: 'search_knowledge', query: 'q' }),
     JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: 'الجواب.', evidenceRefs: ['chunk-a'] }),

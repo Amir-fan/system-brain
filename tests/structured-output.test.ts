@@ -55,7 +55,7 @@ test('P04/B: a non-structured request body is unchanged', async () => {
 
 // 3. The Skill accepts all three valid terminal statuses and rejects an invalid one
 test('P04/C: valid statuses are accepted; an invalid status fails closed', async () => {
-  const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
+  const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService(), responseMode: 'flexible' });
   for (const status of ['ANSWER', 'ASK_USER', 'INSUFFICIENT_EVIDENCE']) {
     const ctx = CTX('سؤال');
     (ctx.model as { generateText: (i: unknown) => Promise<{ text: string }> }).generateText = async () => ({
@@ -79,7 +79,7 @@ test('P04/C: valid statuses are accepted; an invalid status fails closed', async
 
 // 4. The terminal format is attached on every model call (superset of the tool request)
 test('P04/D: the Skill attaches the terminal format to every generation', async () => {
-  const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
+  const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService(), responseMode: 'flexible' });
   const seen: Array<Record<string, unknown>> = [];
   const ctx = CTX('سؤال');
   (ctx.model as { generateText: (i: Record<string, unknown>) => Promise<{ text: string }> }).generateText = async (input) => {
@@ -92,7 +92,7 @@ test('P04/D: the Skill attaches the terminal format to every generation', async 
 
 // 5. Citations still come only from tool-returned passages
 test('P04/E: citation validation is unchanged', async () => {
-  const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
+  const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService(), responseMode: 'flexible' });
   const ctx = CTX('سؤال');
   (ctx.model as { generateText: (i: unknown) => Promise<{ text: string }> }).generateText = async () => ({ text: JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: 'جواب', evidenceRefs: ['chunk-NOT-RETURNED'] }) });
   const out = (await skill.execute(ctx)) as Record<string, unknown>;

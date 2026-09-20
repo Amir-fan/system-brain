@@ -16,7 +16,9 @@ import type { SkillExecutionContext, SkillKnowledgePassage } from '../src/core/s
 const APPROVED_ID = 'src-approved-1';
 const CHUNK_A = 'chunk-a';
 const CHUNK_B = 'chunk-b';
-const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
+// The default test Skill runs `flexible` (backward-compatible: plain-message terminals
+// stay valid). The `required` mode is exercised explicitly in the RX2 block below.
+const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService(), responseMode: 'flexible' });
 
 const passage = (chunkId: string, sourceId = APPROVED_ID): SkillKnowledgePassage => ({
   chunkId, documentId: 'doc-1', sourceId, sourceTitle: APPROVED_SOURCE_TITLES[0], chunkIndex: 1, text: 'نص فقهي معتمد يوضح الشرط.', score: 0.5,
@@ -329,4 +331,45 @@ test('RX1/C: a malformed visual is dropped, never a parse failure', async () => 
   assert.equal(out.trace.status, 'ANSWER', 'still a valid answer');
   assert.equal(out.answer.structured.summary, 'الخلاصة.', 'valid parts still forwarded');
   assert.equal(out.answer.structured.visual, undefined, 'invalid visual silently dropped');
+});
+
+// RX2 — response_mode: natural / flexible / required
+const reqSkill = () => createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService(), responseMode: 'required' });
+const natSkill = () => createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService(), responseMode: 'natural' });
+
+async function runWith(s: ReturnType<typeof createFiqhHaydMinimalSkill>, opts: { text: string; responses: string[] }) {
+  const k = knowledge();
+  const m = model(opts.responses);
+  const ctx = { projectId: 'p', actor: 'a', input: { text: opts.text }, knowledge: k, model: m } as unknown as SkillExecutionContext;
+  const out = (await s.execute(ctx)) as Record<string, any>;
+  return { out, k, mCapture: m.captured };
+}
+
+test('RX2/A: natural mode never requests the structured envelope (plain text only)', async () => {
+  const { mCapture } = await runWith(natSkill(), { text: 'سؤال', responses: [askUser('سؤال؟')] });
+  for (const call of mCapture.perCall) assert.equal(call.responseFormat, undefined, 'no response_format in natural mode');
+});
+
+test('RX2/B: flexible mode requests the envelope but a plain-text ANSWER is still accepted', async () => {
+  const flex = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService(), responseMode: 'flexible' });
+  const { mCapture, out } = await runWith(flex, { text: 'سؤال', responses: [tool('حكم الصفرة'), answer('نص بسيط بلا summary.', [CHUNK_A])] });
+  assert.ok(mCapture.perCall.every((c) => c.responseFormat), 'envelope requested in flexible mode');
+  assert.equal(out.trace.status, 'ANSWER', 'plain message accepted (no summary enforced)');
+  assert.equal(out.answer.text, 'نص بسيط بلا summary.');
+});
+
+test('RX2/C: required mode re-emits once when summary is missing, then accepts', async () => {
+  const noSummary = JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: 'الجواب.', evidenceRefs: [CHUNK_A] });
+  const withSummary = JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: 'الجواب.', evidenceRefs: [CHUNK_A], summary: 'الخلاصة المطلوبة.' });
+  const { out, mCapture } = await runWith(reqSkill(), { text: 'سؤال', responses: [tool('حكم الصفرة'), noSummary, withSummary] });
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.equal(out.answer.structured.summary, 'الخلاصة المطلوبة.');
+  const reEmit = mCapture.messages[2];
+  assert.ok(reEmit.includes('summary'), 'the re-emit prompt names the missing summary field');
+});
+
+test('RX2/D: required mode fails closed when summary never arrives (within the model-call bound)', async () => {
+  const noSummary = JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: 'الجواب.', evidenceRefs: [CHUNK_A] });
+  const { out } = await runWith(reqSkill(), { text: 'سؤال', responses: [tool('حكم الصفرة'), noSummary, noSummary, noSummary, noSummary] });
+  assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
 });
