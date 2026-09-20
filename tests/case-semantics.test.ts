@@ -111,6 +111,40 @@ test('C. Understanding candidates are consumed by Conversation and bound into th
   assert.equal(stored.factMeta!.bleeding_duration_hours.certainty, 'CERTAIN');
 });
 
+// STAGE2 bridge — appContext (client calendar/scan facts) lands as `evidence`-provenance
+// facts in personal mode, and is STRUCTURALLY dropped in private mode.
+test('STAGE2/bridge-A: appContext reaches the case as evidence-provenance facts (personal)', async () => {
+  const store = fakeStore();
+  const seen: Array<Record<string, unknown>> = [];
+  const c = svc(store, bindingSkill(seen));
+  const s = await c.create('p', 'a', 'contextual');
+  await c.handleMessage('p', 'a', s.id, {
+    text: 'الحين شنو حكمي؟',
+    appContext: { cycle_day: 5, last_menstrual_period: '2026-09-01' },
+  });
+  const stored = store.rows.get(s.id)!.sessionContext;
+  assert.equal(stored.facts.cycle_day, 5, 'appContext fact landed in the case');
+  assert.equal(stored.factMeta!.cycle_day.provenance, 'evidence', 'ranked as evidence, below user statements');
+  assert.equal(stored.factMeta!.cycle_day.certainty, 'UNCERTAIN', 'never invented as certain');
+  // …and the skill saw it in payload.context
+  assert.equal((seen[0].context as Record<string, unknown>).cycle_day, 5, 'skill payload carries the app context');
+});
+
+test('STAGE2/bridge-B: private mode structurally drops appContext (no Calendar/Scanner/context crosses)', async () => {
+  const store = fakeStore();
+  const seen: Array<Record<string, unknown>> = [];
+  const c = svc(store, bindingSkill(seen));
+  const s = await c.create('p', 'a', 'private');
+  await c.handleMessage('p', 'a', s.id, {
+    text: 'ما الحكم؟',
+    appContext: { cycle_day: 5, scan_color: 'red' },
+  });
+  const stored = store.rows.get(s.id)!.sessionContext;
+  assert.equal(stored.facts.cycle_day, undefined, 'no appContext fact in a private case');
+  assert.equal(stored.facts.scan_color, undefined, 'no scan fact in a private case');
+  assert.equal((seen[0].context as Record<string, unknown>).cycle_day, undefined, 'skill payload is clean of app context in private mode');
+});
+
 test('D. a meaningful free-text answer to an open pending need never silently vanishes', async () => {
   const store = fakeStore();
   const c = svc(store, bindingSkill([]));

@@ -77,6 +77,9 @@ export async function handleConversationMessage(
       text: typeof body.text === 'string' ? body.text : '',
       ...(Array.isArray(body.answers) ? { answers: body.answers as Array<{ key: string; value: unknown }> } : {}),
       ...(typeof body.skillId === 'string' && body.skillId ? { skillId: body.skillId } : {}),
+      // Stage 2 bridge: pass generic app context through (opaque; the conversation layer
+      // enforces the mode gate and provenance rank).
+      ...(body.appContext && typeof body.appContext === 'object' ? { appContext: body.appContext as Record<string, unknown> } : {}),
     });
     return ok(response);
   } catch (e) {

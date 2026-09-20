@@ -205,6 +205,22 @@ export class ConversationService {
       }
     }
 
+    // 1b. Stage 2 bridge — generic app-supplied context (calendar/scan/app facts from the
+    // client). Opaque + domain-neutral: each entry becomes an `evidence`-provenance fact
+    // (ranked below user_statement/user_answer, so it can never override the user's own
+    // words) and is bounded. PRIVATE sessions receive NONE: the field is dropped here,
+    // structurally, before the case is assembled.
+    if (session.mode !== 'private' && input.appContext && typeof input.appContext === 'object') {
+      const entries = Object.entries(input.appContext).slice(0, 40);
+      for (const [k, v] of entries) {
+        if (typeof k !== 'string' || !k.trim()) continue;
+        if (v === undefined || v === null || String(v).trim?.() === '') continue;
+        const key = k.trim().slice(0, 60);
+        if (key in facts) continue; // an existing (stronger) fact is never overwritten by app context
+        writeFact(key, v, 'UNCERTAIN', 'evidence');
+      }
+    }
+
     // 2. Understanding (K19) — with bounded session context.
     stages.push('UNDERSTANDING');
     const understanding = await this.deps.understanding.evaluate({ projectId, text: input.text, context: factsToContext(facts) });

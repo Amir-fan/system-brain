@@ -121,6 +121,15 @@ export interface ConversationMessageInput {
   answers?: Array<{ key: string; value: unknown }>;
   /** Optional explicit skill to invoke (defaults to the session's configured skill). */
   skillId?: string;
+  /**
+   * Stage 2 bridge — generic app-supplied context (e.g. a client's calendar/scan facts).
+   * DOMAIN-NEUTRAL and opaque: KIP stores each entry as an `evidence`-provenance fact
+   * (ranked BELOW user statements/answers, so it never overrides the user's own words)
+   * and only when the session's mode permits app context (a `private` session receives
+   * NONE — the field is structurally dropped, not merely ignored). The client remains the
+   * source of truth for the data; KIP never stores a copy beyond the conversation case.
+   */
+  appContext?: Record<string, unknown>;
 }
 
 /**
