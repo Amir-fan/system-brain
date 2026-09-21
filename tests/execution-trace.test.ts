@@ -82,6 +82,31 @@ function runtimeFor(skill: SkillDefinition, deps: { persistence: RuntimePersiste
 const input = { projectId: 'p', actor: 'a', skillId: 'x', payload: { text: 'hi' } };
 const gatewayOk = (): ModelGateway =>
   ({ generateText: async (_i: ModelGatewayInput): Promise<ModelGatewayOutput> => ({ text: 'answer', provider: 'openrouter', model: 'test/model', usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 } }) }) as unknown as ModelGateway;
+
+// Stage 4B — the runtime MUST forward the Skill's structured-output contract and
+// reasoning hint to the Model Gateway verbatim. Dropping them silently turned
+// flexible/required skills into plain-text calls (observed: empty structured in prod).
+test('K28/forwarding: responseFormat + reasoning reach the Model Gateway verbatim', async () => {
+  const seen: ModelGatewayInput[] = [];
+  const gateway = {
+    generateText: async (i: ModelGatewayInput): Promise<ModelGatewayOutput> => {
+      seen.push(i);
+      return { text: '{}', provider: 'openrouter', model: 'test/model' };
+    },
+  } as unknown as ModelGateway;
+  const fmt = { name: 'minimal_response', strict: true, schema: { type: 'object' } };
+  const skill = skillWith({
+    id: 't.forward', model: true,
+    execute: async (ctx) => {
+      await ctx.model!.generateText({ workload: 'knowledge_answer', message: 'x', responseFormat: fmt, reasoning: 'off' });
+      return { trace: { status: 'ANSWER', acceptedEvidenceRefs: ['c1'], sourceSupport: 'SUPPORTED' } };
+    },
+  });
+  await runtimeFor(skill, { persistence: fakePersistence(), modelGateway: gateway }).execute({ ...input, skillId: 't.forward' });
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0].responseFormat, fmt, 'structured-output contract forwarded');
+  assert.equal(seen[0].reasoning, 'off', 'reasoning hint forwarded');
+});
 const knowledgeFake = { search: async () => [], resolveSources: async () => [{ id: 'src-approved-1', title: APPROVED_SOURCE_TITLES[0] }], adjacent: async () => [] };
 
 // A — a successful model call renders SUCCESS with duration + tokens

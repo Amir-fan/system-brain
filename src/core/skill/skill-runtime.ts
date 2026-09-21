@@ -458,7 +458,7 @@ export class SkillsRuntime {
     if (skill.requirements.model) {
       if (!this.deps.modelGateway) throw new SkillFailure('SKILL_INVALID_OUTPUT', 'model required but not wired');
       const capability: SkillModelCapability = {
-        generateText: async ({ workload, parts, message, maxOutputTokens }) => {
+        generateText: async ({ workload, parts, message, maxOutputTokens, responseFormat, reasoning }) => {
           const callIndex = t.model_calls.length + 1;
           const callStart = Date.now();
           try {
@@ -469,6 +469,11 @@ export class SkillsRuntime {
               model: { profile: workload } as ModelGatewayInput['model'],
               input: parts && parts.length > 0 ? { parts } : { message: message ?? '' },
               ...(typeof maxOutputTokens === 'number' ? { maxOutputTokens } : {}),
+              // Forward the Skill's structured-output contract + reasoning hint verbatim.
+              // Dropping them here silently turned 'flexible'/'required' skills into
+              // plain-text calls (observed: structured fields never populated in prod).
+              ...(responseFormat ? { responseFormat } : {}),
+              ...(reasoning ? { reasoning } : {}),
             });
             const duration = Date.now() - callStart;
             t.model_total_ms += duration;
