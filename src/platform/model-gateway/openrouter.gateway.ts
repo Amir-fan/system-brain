@@ -220,6 +220,26 @@ export class OpenRouterGateway implements ModelGateway {
       throw classifyChatFailure(e, this.chatTimeoutMs);
     }
 
+    // Some provider backends (observed: gemini via OpenRouter) reject JSON-Schema
+    // response_format with a 400 even for valid schemas. Structured output still works
+    // there in the weaker `json_object` mode — retry THAT once, same request otherwise.
+    // Provider compatibility lives at the adapter boundary; Skills never know.
+    if (!res.ok && res.status === 400 && input.responseFormat) {
+      const retryBody = JSON.parse(JSON.stringify({
+        model,
+        messages: [{ role: 'user', content }],
+        ...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
+        ...(this.providerSort ? { provider: { sort: this.providerSort } } : {}),
+        ...(this.resolveReasoningForCall(input.reasoning, this.reasoningEffort) ? { reasoning: { effort: this.resolveReasoningForCall(input.reasoning, this.reasoningEffort)! } } : {}),
+        response_format: { type: 'json_object' },
+      })) as Record<string, unknown>;
+      try {
+        res = await this.raw('/chat/completions', { method: 'POST', body: JSON.stringify(retryBody), signal: AbortSignal.timeout(this.chatTimeoutMs) });
+      } catch (e) {
+        throw classifyChatFailure(e, this.chatTimeoutMs);
+      }
+    }
+
     if (!res.ok) {
       throw providerError('chat completion failed', 'PROVIDER_CHAT_FAILED', { status: res.status });
     }
