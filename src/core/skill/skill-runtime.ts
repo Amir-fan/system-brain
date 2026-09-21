@@ -700,6 +700,37 @@ function liftSkillContext(value: unknown): SkillTurnContext | undefined {
   return { skillId, skillVersion, issueSignature, requirements, evidenceRefs, sourceIds, baseCaseSignature, at };
 }
 
+/**
+ * Bounded lift of a Skill answer's semantic parts (RX1/Stage 4B). Accepts only the
+ * contract-shaped fields with tight bounds; anything malformed is dropped, never fails.
+ */
+function liftAnswerStructured(v: unknown): SkillAnswer['structured'] | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  const out: NonNullable<SkillAnswer['structured']> = {};
+  const s = (k: string, n: number): string | undefined => str(o[k], n) || undefined;
+  const understanding = s('understanding', 300); if (understanding) out.understanding = understanding;
+  const summary = s('summary', 400); if (summary) out.summary = summary;
+  const explanation = s('explanation', 800); if (explanation) out.explanation = explanation;
+  const practical = s('practical', 400); if (practical) out.practical = practical;
+  const nextAction = s('nextAction', 200); if (nextAction) out.nextAction = nextAction;
+  if (o.visual && typeof o.visual === 'object') {
+    const vv = o.visual as Record<string, unknown>;
+    if (str(vv.type, 20) === 'timeline' && Array.isArray(vv.items)) {
+      const items = vv.items
+        .map((it) => {
+          const r = (it ?? {}) as Record<string, unknown>;
+          const label = str(r.label, 40);
+          return label ? { label, ...(str(r.duration, 40) ? { duration: str(r.duration, 40)! } : {}) } : null;
+        })
+        .filter((x): x is { label: string; duration?: string } => x !== null)
+        .slice(0, 12);
+      if (items.length > 0) out.visual = { type: 'timeline', items };
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Bounded, primitive-only case facts (no nested structures, no prose dumps). */
 function liftCaseFacts(v: unknown): Record<string, unknown> | undefined {
   if (!v || typeof v !== 'object') return undefined;
@@ -798,11 +829,15 @@ function liftFromOutput(output: unknown): { readiness?: ReadinessResult; trace?:
     const text = str(aa.text, 1200);
     if (text) {
       const evidenceIds = strList(aa.evidenceIds, 6, 64);
+      // Forward the skill's semantic parts (bounded, contract-shaped) — dropping them
+      // here stripped answer.structured even when the model supplied it (Stage 4B prod gap).
+      const structured = liftAnswerStructured(aa.structured);
       out.answer = {
         text,
         ...(str(aa.sourceTitle, 160) ? { sourceTitle: str(aa.sourceTitle, 160)! } : {}),
         ...(evidenceIds ? { evidenceIds } : {}),
         ...(str(aa.label, 80) ? { label: str(aa.label, 80)! } : {}),
+        ...(structured ? { structured } : {}),
       };
     }
   }

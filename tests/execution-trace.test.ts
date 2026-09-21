@@ -107,6 +107,32 @@ test('K28/forwarding: responseFormat + reasoning reach the Model Gateway verbati
   assert.deepEqual(seen[0].responseFormat, fmt, 'structured-output contract forwarded');
   assert.equal(seen[0].reasoning, 'off', 'reasoning hint forwarded');
 });
+
+// Stage 4B — semantic parts supplied by a Skill must survive the runtime lift into
+// answer.structured (dropping them was the second half of the production gap).
+test('K28/structured-lift: answer.structured survives the Skills Runtime', async () => {
+  const structured = {
+    summary: 'الـ12 يوم كلها حيض.',
+    explanation: 'لأن الدم لم يتجاوز 15 يوماً.',
+    practical: 'اغتسلي وصلي.',
+    understanding: 'عادتج: 6 أيام → الدم: 12 يوم → انقطع',
+    visual: { type: 'timeline', items: [{ label: 'دم', duration: '12 يوم' }] },
+  };
+  const skill = skillWith({
+    id: 't.structured', model: true,
+    execute: async (ctx) => {
+      await ctx.model!.generateText({ workload: 'knowledge_answer', message: 'x' });
+      return {
+        trace: { status: 'ANSWER', acceptedEvidenceRefs: ['c1'], sourceSupport: 'SUPPORTED' },
+        answer: { text: 'الـ12 يوم كلها حيض.', structured },
+      };
+    },
+  });
+  const res = await runtimeFor(skill, { persistence: fakePersistence(), modelGateway: gatewayOk() }).execute({ ...input, skillId: 't.structured' });
+  assert.equal(res.answer?.structured?.summary, 'الـ12 يوم كلها حيض.');
+  assert.equal(res.answer?.structured?.visual?.type, 'timeline');
+  assert.equal(res.answer?.structured?.visual?.items.length, 1);
+});
 const knowledgeFake = { search: async () => [], resolveSources: async () => [{ id: 'src-approved-1', title: APPROVED_SOURCE_TITLES[0] }], adjacent: async () => [] };
 
 // A — a successful model call renders SUCCESS with duration + tokens
