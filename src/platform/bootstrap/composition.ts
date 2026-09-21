@@ -220,7 +220,13 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   // Mind Skill V0 (experiment) — coexists with the control skill; not the default.
   skillRegistry.register(createFiqhHaydMindSkill({ readiness: readinessService }));
   // Minimal Mind V0 (experiment) — one LLM + an approved-Knowledge tool; not the default.
-  skillRegistry.register(createFiqhHaydMinimalSkill({ readiness: readinessService }));
+  // responseMode is operator-configurable per environment (default stays 'flexible';
+  // 'required' is the proven-compliant path once the gateway actually forwards the
+  // structured contract to the provider).
+  skillRegistry.register(createFiqhHaydMinimalSkill({
+    readiness: readinessService,
+    ...(process.env.KIP_MINIMAL_RESPONSE_MODE ? { responseMode: process.env.KIP_MINIMAL_RESPONSE_MODE as 'natural' | 'flexible' | 'required' } : {}),
+  }));
   const skillsRuntime = new SkillsRuntime({
     persistence,
     registry: skillRegistry,
