@@ -310,7 +310,79 @@ test('Minimal/T: a single USE_TOOL envelope is no longer parsed as a terminal en
   assert.equal(out.trace.status, 'ANSWER');
 });
 
-// RX1 — semantic parts are forwarded into answer.structured (only when supplied)
+// Stage 4B — Naqaa answer experience: the prompt must carry the agreed presentation contract.
+test('4B/style: the prompt instructs the Naqaa answer experience (ruling-first, warm, no cold openers, no tech words)', async () => {
+  const { m } = await run({ text: 'ما الحكم؟', responses: [askUser('ما صفة السائل؟')] });
+  const prompt = m.captured.messages[0];
+  // ruling-first ordering + tone
+  assert.ok(prompt.includes('الحكم أولًا'), 'ruling stated first');
+  assert.ok(prompt.includes('تفهمها بنت عمرها 12 سنة'), '12-year-old readability bar');
+  assert.ok(prompt.includes('خليجية'), 'Gulf-friendly register');
+  // banned cold openers
+  assert.ok(prompt.includes('بناءً على المعطيات'), 'cold opener banned list present');
+  assert.ok(prompt.includes('ممنوع بدء الجواب'), 'ban is explicit');
+  // no internal/technical vocabulary leaked to the user
+  assert.ok(prompt.includes('لا تذكري أبدًا كلمات تقنية داخلية'), 'tech-words ban');
+  // warm clarification instead of a cold ruling when information is missing
+  assert.ok(prompt.includes('لا حكم نهائي، لكن لا برود'), 'warm missing-info pattern');
+  // understanding field carries short factual steps, not the question repeated
+  assert.ok(prompt.includes('خطوات واقعية قصيرة'), 'understanding = factual steps');
+  // existing safeguards remain
+  assert.ok(prompt.includes('السؤال الحالي هو آخر سطر'), 'current-turn authority preserved');
+  assert.ok(prompt.includes('قبل إعطاء حكم فقهي، استخدم أداة البحث'), 'knowledge-before-ruling preserved');
+});
+
+test('4B/A: sufficient case — semantic parts carry ruling + why + practical (concise)', async () => {
+  const terminal = JSON.stringify({
+    action: 'TERMINAL', status: 'ANSWER',
+    message: 'الـ12 يوم كلها حيض.\n\nلأن الدم لم يتجاوز أكثر الحيض عند الشافعية: 15 يوماً.\n\nبعد انقطاع الدم اغتسلي وصلي، ولا يلزمج قضاء صلوات هذه الأيام.',
+    evidenceRefs: [CHUNK_A],
+    summary: 'الـ12 يوم كلها حيض.',
+    explanation: 'لأن الدم لم يتجاوز أكثر الحيض عند الشافعية: 15 يوماً.',
+    practical: 'بعد انقطاع الدم اغتسلي وصلي، ولا يلزمج قضاء صلوات هذه الأيام.',
+  });
+  const { out } = await run({ text: 'عادتي 6 أيام، فرأيت دماً 12 يوماً ثم انقطع، فما الحكم؟', responses: [tool('أكثر مدة الحيض'), terminal] });
+  assert.equal(out.trace.status, 'ANSWER');
+  const s = out.answer.structured;
+  assert.equal(s.summary, 'الـ12 يوم كلها حيض.', 'ruling first, one line');
+  assert.ok(s.explanation.length <= 120, 'shortest sufficient explanation');
+  assert.ok(s.practical.includes('اغتسلي'), 'practical now-action present');
+  assert.ok(!/بناءً على|وفقاً للمعلومات|بعد تحليل/.test(out.answer.text), 'no cold openers in prose');
+});
+
+test('4B/B: chronology is represented semantically as a timeline, not prose arrows in message', async () => {
+  const terminal = JSON.stringify({
+    action: 'TERMINAL', status: 'ANSWER',
+    message: 'الـ12 يوم كلها حيض.',
+    evidenceRefs: [CHUNK_A],
+    summary: 'الـ12 يوم كلها حيض.',
+    understanding: 'عادتج: 6 أيام → الدم الحالي: 12 يوم → ثم انقطع',
+    visual: { type: 'timeline', items: [{ label: 'العادة', duration: '6 أيام' }, { label: 'دم', duration: '12 يوم' }, { label: 'انقطع' }] },
+  });
+  const { out } = await run({ text: 'عادتي 6 أيام ورأيت دماً 12 يوماً', responses: [tool('أكثر الحيض'), terminal] });
+  assert.equal(out.answer.structured.visual.type, 'timeline');
+  assert.equal(out.answer.structured.visual.items.length, 3);
+  assert.ok(!out.answer.text.includes('→'), 'prose stays natural; arrows live in semantic fields only');
+});
+
+test('4B/C: missing material fact — no ruling, one concise warm question', async () => {
+  const ask = JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: 'فهمت إن الدم رجع بعد فترة طهر — تقريبًا جم يوم استمر الطهر؟' });
+  const { out } = await run({ text: 'رجع علي الدم بعد الطهر', responses: [tool('طهر بين دمين'), ask] });
+  assert.equal(out.readiness.status, 'NEEDS_INFORMATION');
+  assert.equal(out.answer?.text, undefined, 'no ruling prose when asking');
+  const q = out.readiness.missing[0].question.wording;
+  assert.ok(q.includes('؟'), 'one question');
+  assert.ok(q.length <= 120, 'concise');
+});
+
+test('4B/F: brevity — the model is instructed to keep phone-sized answers', async () => {
+  const { m } = await run({ text: 'هل هذا حيض؟', responses: [askUser('كم يوم؟')] });
+  const prompt = m.captured.messages[0];
+  assert.ok(prompt.includes('لا تعطي درسًا فقهيًا طويلًا'), 'no long lecture unless asked');
+  assert.ok(prompt.includes('جمل قصيرة وواضحة'), 'short sentences');
+  assert.ok(prompt.includes('جملة واحدة عند وجود أثر عملي'), 'practical = one sentence');
+});
+
 test('RX1/A: supplied semantic parts reach answer.structured; message stays the full text', async () => {
   const structured = JSON.stringify({
     action: 'TERMINAL', status: 'ANSWER',
