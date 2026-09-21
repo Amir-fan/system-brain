@@ -29,6 +29,11 @@ export interface RunRecord {
 export interface RuntimePersistence {
   getProject(projectId: string): Promise<Project | null>;
   getMembership(projectId: string, actor: Actor): Promise<ProjectMembership | null>;
+  /**
+   * Trusted provisioning primitive (Stage 3): idempotently ensure a membership exists.
+   * Never downgrades an existing row. Authorization is the caller's responsibility.
+   */
+  ensureMembership?(projectId: string, actor: Actor, role: ProjectMembership['role']): Promise<ProjectMembership>;
   createRun(record: RunRecord): Promise<void>;
   updateRun(id: string, patch: Partial<RunRecord>): Promise<void>;
 }

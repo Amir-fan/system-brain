@@ -7,7 +7,7 @@
  * @purpose Supabase persistence adapter implementing the runtime ports.
  */
 
-import type { Actor, ProjectMembership } from '../../core/authorization/actor.ts';
+import type { Actor, ProjectMembership, Role } from '../../core/authorization/actor.ts';
 import type { Project } from '../../core/project/project.ts';
 import type {
   RuntimePersistence,
@@ -71,6 +71,32 @@ export function createSupabaseRuntimePersistence(db: SupabaseDatabase): RuntimeP
             createdAt: data.created_at as string,
           }
         : null;
+    },
+
+    /**
+     * Trusted provisioning primitive: idempotently ensure a membership exists.
+     * NEVER downgrades — an existing row (any role) is returned unchanged; only a
+     * missing membership is created with the requested role. The caller is
+     * responsible for authorization (trusted proxy + manage on the project).
+     */
+    async ensureMembership(projectId: string, actor: Actor, role: Role): Promise<ProjectMembership> {
+      const existing = await this.getMembership(projectId, actor);
+      if (existing) return existing;
+      const { error } = await db.from('project_memberships').insert({
+        project_id: projectId,
+        actor_subject: actor,
+        role,
+      });
+      if (error) {
+        // Idempotency under a concurrent insert: a uniqueness violation means the
+        // row now exists — re-read it instead of failing the provisioning turn.
+        const now = await this.getMembership(projectId, actor);
+        if (now) return now;
+        throw new Error(`membership provision failed: ${(error as { code?: string }).code ?? ''} ${(error as { message?: string }).message ?? ''}`.trim());
+      }
+      const created = await this.getMembership(projectId, actor);
+      if (!created) throw new Error('membership provision failed: not readable after insert');
+      return created;
     },
 
     async createRun(record) {

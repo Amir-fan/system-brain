@@ -19,6 +19,11 @@ import type { EvaluationStorage, ProblemCategory } from '../provider/evaluation.
 export interface ConversationApiDeps {
   service: ConversationService;
   boundary: ProjectBoundaryReaders;
+  /**
+   * Trusted provisioning writer (Stage 3 cutover). Present only on the server-mediated
+   * path; used ONLY by the proxy-gated membership endpoint — never by end users.
+   */
+  membershipWriter?: { ensureMembership(projectId: string, actor: Actor, role: 'member'): Promise<unknown> };
   evaluation?: { storage: EvaluationStorage; boundary: ProjectBoundaryReaders };
 }
 
@@ -148,5 +153,40 @@ export async function handleListConversationEvaluations(
     return ok(items);
   } catch (e) {
     return fail(e instanceof Error ? e.message : 'تعذر جلب التقييمات', 'runtime', 500);
+  }
+}
+
+/**
+ * POST /v1/projects/{p}/memberships — trusted server-to-server provisioning (Stage 3).
+ *
+ * The ONLY caller is a trusted proxy-authenticated service actor (KIP_PROXY_TOKENS) that
+ * has ALREADY verified the end user's identity upstream (Naqaa JWT). The service actor
+ * must hold `manage` on the target project; the provisioned subject is always role
+ * `member` and an existing stronger membership is never downgraded (idempotent).
+ *
+ * `isProxy` is mandatory: a delegated end-user actor (`x-kip-actor`) can NEVER provision
+ * — only the service identity itself. An arbitrary client cannot reach this path.
+ */
+export async function handleProvisionMembership(
+  deps: ConversationApiDeps,
+  projectId: string,
+  serviceActor: Actor,
+  isProxy: boolean,
+  body: Record<string, unknown>,
+): Promise<ConversationApiResult> {
+  if (!isProxy) return fail('provisioning requires the trusted proxy credential', 'authorization', 403);
+  if (!deps.membershipWriter) return fail('provisioning not configured', 'runtime', 500);
+  const auth = await authorizeProject(deps.boundary, projectId, serviceActor, 'manage');
+  if (!auth.ok) return fail(auth.message, auth.kind === 'not_found' ? 'not_found' : 'authorization', auth.kind === 'not_found' ? 404 : 403);
+  const subject = typeof body.subject_id === 'string' ? body.subject_id.trim() : '';
+  if (!subject || subject.length > 200) return fail('subject_id required', 'validation');
+  // A provisioned member is ALWAYS role 'member' — the caller can never elevate a subject.
+  try {
+    const m = (await deps.membershipWriter.ensureMembership(projectId, subject, 'member')) as {
+      projectId: string; actor: string; role: string; createdAt: string;
+    };
+    return ok({ projectId: m.projectId, subject: m.actor, role: m.role }, 200);
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : 'provisioning failed', 'runtime', 500);
   }
 }

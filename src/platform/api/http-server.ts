@@ -68,7 +68,7 @@ import { handleUnderstandingEvaluate } from './understanding-handler.ts';
 import type { SkillsApiDeps } from './skill-handler.ts';
 import { handleSkillExecute, handleSkillList } from './skill-handler.ts';
 import type { ConversationApiDeps } from './conversation-handler.ts';
-import { handleConversationMessage, handleCreateConversation, handleSaveConversationEvaluation, handleListConversationEvaluations } from './conversation-handler.ts';
+import { handleConversationMessage, handleCreateConversation, handleSaveConversationEvaluation, handleListConversationEvaluations, handleProvisionMembership } from './conversation-handler.ts';
 import type { IngestionApiDeps } from './ingestion-handler.ts';
 import {
   handleCreateIngestion,
@@ -180,6 +180,9 @@ async function handleProject(
   if (url.includes('/skills')) {
     return handleSkills(req, res, url, deps);
   }
+  if (url.includes('/memberships')) {
+    return handleMemberships(req, res, url, deps);
+  }
   if (url.includes('/conversations')) {
     return handleConversations(req, res, url, deps);
   }
@@ -254,6 +257,41 @@ async function resolveActor(
     }
     return null;
   }
+}
+
+/**
+ * Stage 3 provisioning route: POST /v1/projects/{p}/memberships.
+ * Unlike every other route, this one needs the SERVICE actor + isProxy flag — the
+ * delegated end-user subject must NEVER be the provisioning authority. So this route
+ * resolves the composite identity directly and refuses delegation.
+ */
+async function handleMemberships(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  url: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  const match = /^\/v1\/projects\/([^/]+)\/memberships$/.exec(url.split('?')[0]);
+  if (!match || req.method !== 'POST') return notFound(res);
+  if (!deps.conversation) return notFound(res);
+  const token = bearerFromHeader(req.headers.authorization);
+  const authenticator = deps.authenticator as unknown as {
+    authenticateComposite?: (t: string) => Promise<{ actor: string; isProxy: boolean }>;
+  };
+  if (!authenticator.authenticateComposite) {
+    return sendJson(res, 403, { ok: false, status: 403, error: { category: 'authorization', message: 'provisioning requires the trusted proxy credential' } });
+  }
+  let identity: { actor: string; isProxy: boolean };
+  try {
+    identity = await authenticator.authenticateComposite(token ?? '');
+  } catch {
+    return sendJson(res, 401, { ok: false, status: 401, error: { category: 'authorization', message: 'authentication required' } });
+  }
+  const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
+  const result = await handleProvisionMembership(
+    deps.conversation, decodeURIComponent(match[1]), identity.actor, identity.isProxy, body,
+  );
+  return sendSourceResult(res, result);
 }
 
 async function handleSources(

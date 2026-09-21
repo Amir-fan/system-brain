@@ -319,6 +319,7 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
     conversation: {
       service: conversationService,
       boundary: persistence,
+      membershipWriter: persistence as Required<Pick<typeof persistence, 'ensureMembership'>> & typeof persistence,
       evaluation: { storage: createEvaluationStorage(db), boundary: persistence },
     },
     retrieval: {
