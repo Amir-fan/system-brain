@@ -330,6 +330,8 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
 
       let modelCalls = 0;
       let toolCalls = 0;
+      /** Stage 4A: one same-turn retry after an unusable provider response (see parser branch). */
+      let retriedEmpty = false;
       const queries: string[] = [];
       const returned: SkillKnowledgePassage[] = [];
       /** Per-turn evidence cache: identical normalised query reuses the last result. */
@@ -414,6 +416,17 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         });
         const parsed = parseModelResponse(out.text);
         if (!parsed) {
+          // Stage 4A: the conversation context is IDENTICAL on every call of this loop
+          // (the transcript + current turn live in `interaction`, rebuilt per turn), so a
+          // same-turn retry after an unusable provider response (finish_reason=error /
+          // empty content — observed transient on gemini first calls) loses NO context.
+          // One bounded retry of the SAME turn only; the loop bound (MAX_MODEL_CALLS)
+          // still applies. Only when the turn has made no model progress beyond this call
+          // and issued no tool call yet — a later failure stays fail-closed.
+          if (modelCalls < MAX_MODEL_CALLS && toolCalls === 0 && !retriedEmpty) {
+            retriedEmpty = true;
+            continue;
+          }
           return gap('unreadable_model_output', 'تعذّر ترتيب الجواب الآن. حاولي مرة أخرى.', {
             ...(str(out.model) ? { model: str(out.model) } : {}),
             notes: [`calls=${modelCalls}`, `tools=${toolCalls}`, `queries=${queries.join(' | ')}`],

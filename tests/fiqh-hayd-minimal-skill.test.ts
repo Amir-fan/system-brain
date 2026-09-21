@@ -238,6 +238,26 @@ test('Minimal: unreadable model output fails closed', async () => {
   assert.ok(out.trace.notes.includes('minimal_mind_v0'), 'the marker survives the failure path too');
 });
 
+// Stage 4A — one same-turn retry after an unusable provider response (the transient
+// finish_reason=error/empty-content mode observed on production first calls). The retry
+// reuses the SAME turn interaction (identical context), so nothing is lost.
+test('Minimal/4A: a transient empty first response is retried once, then answered', async () => {
+  const { out, m } = await run({
+    text: 'ما الحكم؟',
+    responses: ['', tool('حكم الصفرة'), answer('الجواب بعد إعادة المحاولة.', [CHUNK_A])],
+  });
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.equal(out.answer.text, 'الجواب بعد إعادة المحاولة.');
+  assert.equal(m.captured.messages.length, 3, 'one retry + tool loop; identical interaction re-sent');
+});
+
+test('Minimal/4A: a second consecutive unusable response still fails closed (bounded)', async () => {
+  const { out, m } = await run({ text: 'ما الحكم؟', responses: ['', '', ''] });
+  assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
+  assert.ok(out.trace.notes.includes('unreadable_model_output'));
+  assert.ok(m.captured.messages.length <= MAX_MODEL_CALLS, 'never exceeds the model-call bound');
+});
+
 test('Minimal: the model may declare the evidence insufficient', async () => {
   const { out } = await run({ text: 'ما الحكم؟', responses: [tool('حكم الصفرة'), insufficient('النصوص المعروضة لا تحسم الحالة.')] });
   assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
