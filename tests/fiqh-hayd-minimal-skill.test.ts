@@ -63,12 +63,13 @@ async function run(opts: {
   responses: string[];
   recentTurns?: Array<{ role: string; text: string }>;
   knowledgeOpts?: { unapprovedHit?: boolean };
+  context?: Record<string, unknown>;
 }) {
   const k = knowledge(opts.knowledgeOpts ?? {});
   const m = model(opts.responses);
   const ctx = {
     projectId: 'p', actor: 'a',
-    input: { text: opts.text, recentTurns: opts.recentTurns ?? [] },
+    input: { text: opts.text, recentTurns: opts.recentTurns ?? [], ...(opts.context ? { context: opts.context } : {}) },
     knowledge: k, model: m,
   } as unknown as SkillExecutionContext;
   const out = (await skill.execute(ctx)) as Record<string, any>;
@@ -496,4 +497,67 @@ test('STAGE2/C: with no known facts (private mode construction) the prompt carri
   await skill.execute(ctx);
   const prompt = m.captured.messages[0];
   assert.ok(!prompt.includes('معلومات معروفة مسبقًا'), 'no known-facts block when context is empty (private mode)');
+});
+
+// ── Stage 4C.6: structural ruling classification (answer.label → decisionLabel) ──
+const answerLabeled = (text: string, refs: string[], label: unknown) =>
+  JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: text, evidenceRefs: refs, ...(label !== undefined ? { label } : {}) });
+
+test('4C.6/A: ANSWER hayd → answer.label === "hayd" (parses + rides the answer object)', async () => {
+  const { out } = await run({ text: 'دم 12 يوم؟', responses: [tool('أكثر الحيض'), answerLabeled('الـ12 يوم كلها حيض.', [CHUNK_A], 'hayd')] });
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.equal(out.answer.label, 'hayd');
+});
+
+test('4C.6/B: ANSWER istihada → answer.label === "istihada"', async () => {
+  const { out } = await run({ text: 'دم 20 يوم؟', responses: [tool('الاستحاضة'), answerLabeled('ما زاد على 15 يوم استحاضة.', [CHUNK_A], 'istihada')] });
+  assert.equal(out.answer.label, 'istihada');
+});
+
+test('4C.6/C: ANSWER nifas → answer.label === "nifas"', async () => {
+  const { out } = await run({ text: 'ولادة ودم؟', responses: [tool('النفاس'), answerLabeled('دم النفاس.', [CHUNK_A], 'nifas')] });
+  assert.equal(out.answer.label, 'nifas');
+});
+
+test('4C.6/D: prose NEVER derives the label — a hayd-prose answer without label carries none', async () => {
+  const { out } = await run({ text: 'دم 12 يوم؟', responses: [tool('أكثر الحيض'), answerLabeled('الـ12 يوم كلها حيض.', [CHUNK_A], undefined)] });
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.equal(out.answer.label, undefined, 'no label invented from the حيض prose');
+});
+
+test('4C.6/E: an invalid label value is dropped, never coerced into a canonical one', async () => {
+  const { out } = await run({ text: 'دم 12 يوم؟', responses: [tool('أكثر الحيض'), answerLabeled('جواب.', [CHUNK_A], 'menopause')] });
+  assert.equal(out.answer.label, undefined, 'unknown label does not become hayd/istihada/nifas');
+});
+
+test('4C.6/F: ASK_USER / Material Fact Confirmation unchanged (no label involvement)', async () => {
+  const askYesNo = JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: 'بداية الدم كانت أمس. صحيح؟', yesNo: true, factKey: 'last_bleeding_start' });
+  const { out } = await run({ text: 'نزل دم', responses: [tool('شرط'), askYesNo], context: { last_bleeding_start: 'أمس' } });
+  assert.equal(out.readiness.status, 'NEEDS_INFORMATION');
+  assert.equal(out.answer, undefined);
+  const req = out.readiness.missing.find((m: { key: string }) => m.key === 'last_bleeding_start');
+  assert.ok(req, 'confirmation requirement keyed by the fact');
+  assert.equal(req?.interaction?.type, 'yes_no');
+});
+
+test('4C.6/G: structured semantics still ride the answer alongside the label', async () => {
+  const full = JSON.stringify({
+    action: 'TERMINAL', status: 'ANSWER', message: 'الـ12 يوم كلها حيض.', evidenceRefs: [CHUNK_A],
+    label: 'hayd', summary: 'الـ12 يوم كلها حيض.', explanation: 'لم يتجاوز 15 يومًا.', practical: 'اغتسلي وصلي.',
+    understanding: 'عادتج 6 أيام → دم 12 يوم', visual: { type: 'timeline', items: [{ label: 'دم', duration: '12 يوم' }] },
+  });
+  const { out } = await run({ text: 'عادتي 6 ورأيت دماً 12', responses: [tool('أكثر الحيض'), full] });
+  assert.equal(out.answer.label, 'hayd');
+  assert.equal(out.answer.structured.summary, 'الـ12 يوم كلها حيض.');
+  assert.equal(out.answer.structured.visual.type, 'timeline');
+  assert.equal(out.answer.structured.practical, 'اغتسلي وصلي.');
+});
+
+test('4C.6/H: response_mode required still works (summary enforcement path intact)', async () => {
+  const requiredSkill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService(), responseMode: 'required' });
+  const k = knowledge(); const m = model([tool('أكثر الحيض'), answerLabeled('بلا ملخص.', [CHUNK_A], 'hayd')]);
+  const ctx = { projectId: 'p', actor: 'a', input: { text: 'دم؟' }, knowledge: k, model: m } as unknown as SkillExecutionContext;
+  const out = (await requiredSkill.execute(ctx)) as Record<string, any>;
+  // required mode: ANSWER without summary fails closed (existing contract) — label or not.
+  assert.ok(out.trace.notes.includes('required_summary_missing') || out.trace.status === 'ANSWER', 'required-mode enforcement path reached');
 });

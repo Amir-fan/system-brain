@@ -41,6 +41,8 @@ const TOOL_TOP_K = 3;
 const TOOL_PASSAGE_CHARS = 1400;
 const MAX_CONVERSATION_CHARS = 3000;
 const MAX_QUESTION_CHARS = 300;
+/** Stage 4C.6: the ONLY structural ruling classifications the client can consume. */
+const LABELS = ['hayd', 'istihada', 'nifas'] as const;
 const DEFAULT_QUESTION_KEY = 'minimal_followup';
 
 /**
@@ -103,6 +105,9 @@ const MINIMAL_RESPONSE_SCHEMA = {
       additionalProperties: false,
     },
     nextAction: { type: 'string' },
+    // Stage 4C.6: the STRUCTURAL ruling classification the client consumes as decisionLabel.
+    // The LLM classifies its own ANSWER in the same call — never derived from prose later.
+    label: { type: 'string', enum: ['hayd', 'istihada', 'nifas'] },
   },
   anyOf: [{ required: ['action'] }, { required: ['status'] }],
   additionalProperties: false,
@@ -175,7 +180,8 @@ const MINIMAL_INSTRUCTION = [
   '',
   'واجهة التنفيذ (هذه ليست طريقة تفكير، بل صيغة الإخراج الموحّدة في كل رد):',
   '  - إذا احتجتِ دليلًا جديدًا: {"action":"USE_TOOL","tool":"search_knowledge","query":"نص البحث"}',
-  '  - لإجابة نهائية مع الدليل: {"action":"TERMINAL","status":"ANSWER","message":"نص الجواب","evidenceRefs":["معرّف المقطع"],"summary":"...","explanation":"...","practical":"..."}',
+  '  - لإجابة نهائية مع الدليل: {"action":"TERMINAL","status":"ANSWER","message":"نص الجواب","evidenceRefs":["معرّف المقطع"],"summary":"...","explanation":"...","practical":"...","label":"hayd"}',
+  '  - label إلزامي مع كل ANSWER وهو تصنيف الحكم البنيوي، قيمته واحدة فقط من: "hayd" (حيض) أو "istihada" (استحاضة) أو "nifas" (نفاس). اختاريه أنتِ بناءً على حكمك — لا يُشتق من النص لاحقًا. إذا لم يكن الحكم واحدًا من هذه الثلاثة، لا ترسلي ANSWER بلا label؛ استخدمي ASK_USER أو INSUFFICIENT_EVIDENCE.',
   '  - لطلب معلومة واحدة مؤثرة: {"action":"TERMINAL","status":"ASK_USER","question":"السؤال"}',
   '  - لطلب تأكيد حقيقة مادية (سؤال جوابه نعم/لا): {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","yesNo":true,"factKey":"اسم المعلومة"} — لا تضيفي factKey إلا إذا كان السؤال يؤكد معلومة موجودة أصلًا في قائمة المعلومات المعروفة أعلاه، واستخدمي اسمها كما هو مكتوب هناك.',
   '  - إذا لم يكفِ الدليل المتاح: {"action":"TERMINAL","status":"INSUFFICIENT_EVIDENCE","message":"بيان مختصر"}',
@@ -206,6 +212,8 @@ interface MinimalResponse {
   practical?: string;
   visual?: MinimalVisual;
   nextAction?: string;
+  /** Stage 4C.6: the ruling classification the client consumes as decisionLabel. */
+  label?: 'hayd' | 'istihada' | 'nifas';
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
@@ -297,6 +305,9 @@ function parseModelResponse(text: string): MinimalResponse | null {
     ...(str(o.practical) ? { practical: bounded(str(o.practical), 400) } : {}),
     ...(visual ? { visual } : {}),
     ...(str(o.nextAction) ? { nextAction: bounded(str(o.nextAction), 200) } : {}),
+    // Stage 4C.6: parse the structural ruling classification; only the three canonical
+    // values survive — anything else (or absent) yields NO label (never invented).
+    ...(LABELS.includes(str(o.label) as typeof LABELS[number]) ? { label: str(o.label) as MinimalResponse['label'] } : {}),
   };
 }
 
@@ -544,6 +555,10 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
               text: parsed.message ?? '',
               ...(first?.sourceTitle ? { sourceTitle: first.sourceTitle } : {}),
               evidenceIds: accepted,
+              // Stage 4C.6: the structural ruling classification rides the SAME answer
+              // object (SkillAnswer.label) so it reaches ConversationResponse and the
+              // proxy's decisionLabel without any later prose-derived guess.
+              ...(parsed.label ? { label: parsed.label } : {}),
               ...(Object.keys(structured).length > 0 ? { structured } : {}),
             },
             trace: {
