@@ -16,6 +16,7 @@
 import type { SkillAnswer, SkillTraceSummary } from '../skill/skill.ts';
 import type { SkillTurnContext } from '../skill/skill';
 import type { FactCertainty, FactProvenance } from '../understanding/understanding.ts';
+import type { RequirementInteraction } from '../readiness/readiness.ts';
 
 export type ConversationMode = 'contextual' | 'private';
 export type ConversationStatus = 'active' | 'closed';
@@ -50,6 +51,9 @@ export interface CaseFactMeta {
 export interface SessionContext {
   facts: Record<string, unknown>;
   pendingKey?: string;
+  /** B1.0: the expected-answer contract OF the pending question (persisted so the user's
+   * next plain-text answer binds against it — e.g. a yes/no confirmation binds CERTAIN). */
+  pendingInteraction?: RequirementInteraction;
   turnCount: number;
   recentTurns: SessionTurn[];
   /** Latest grounded terminal result (bounded; cleared by a material correction). */

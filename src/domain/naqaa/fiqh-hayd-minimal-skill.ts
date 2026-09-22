@@ -74,6 +74,10 @@ const MINIMAL_RESPONSE_SCHEMA = {
     status: { type: 'string', enum: ['ANSWER', 'ASK_USER', 'INSUFFICIENT_EVIDENCE'] },
     message: { type: 'string' },
     question: { type: 'string' },
+    /** Material Fact Confirmation: true when the ASK_USER question is a yes/no confirmation. */
+    yesNo: { type: 'boolean' },
+    /** When the ASK_USER confirms an EXISTING fact: the fact key being confirmed. */
+    factKey: { type: 'string' },
     evidenceRefs: { type: 'array', items: { type: 'string' } },
     // RX1 semantic parts — ALL optional. The LLM fills only what genuinely helps the
     // ordinary user; KIP stores semantics, never colors/design.
@@ -147,6 +151,15 @@ const MINIMAL_INSTRUCTION = [
   '',
   'عند نقص معلومة مؤثرة: لا حكم نهائي، لكن لا برود أيضًا — لخّصي ما فهمتِه باختصار في understanding ثم اسألي سؤالًا واحدًا واضحًا ودودًا (ASK_USER). مثال النبرة: «فهمت إن الدم رجع بعد فترة طهر، باقي أعرف شغلة وحدة: تقريبًا جم يوم استمر الطهر؟».',
   '',
+  'معنى الوسوم التي ترينها بجانب المعلومات (مثل evidence/UNCERTAIN أو user_answer/CERTAIN):',
+  '  - user_answer/CERTAIN = قالتها المستخدمة بنفسها في هذه المحادثة — تعتبرينها مؤكدة.',
+  '  - evidence أو memory أو غير مؤكدة = معلومة واردة من سياق التطبيق أو مسترجعة، قد تكون قديمة أو غير دقيقة.',
+  '',
+  'تأكيد حقيقة مادية (Material Fact Confirmation):',
+  '  - إذا كانت المعلومات موجودة لكن حقيقة مادية سيعتمد عليها الحكم مباشرة موسومة غير مؤكدة (مثل evidence/UNCERTAIN) أو قد تكون قديمة، ويجوز لكِ اختيار أهم حقيقة واحدة فقط وطلب تأكيدها قبل الحكم عبر ASK_USER بسؤال نعم/لا ودود — مثال: «حسب معلوماتج، بداية الدم كانت أمس. صحيح؟».',
+  '  - إذا أجابت نعم → الحقيقة تصبح مؤكدة وأعيدي التقييم. إذا نفي أو صحّحت → خذي التصحيح وأعيدي التقييم.',
+  '  - لا تؤكدي أكثر من حقيقة واحدة في الدورة الواحدة. لا تؤكدي ما قالته هي بنفسها مؤخراً. لا تؤكدي معلومات ثانوية لا يؤثر الحكم عليها. التأكيد خيار لكِ عند الحاجة الحقيقية فقط — ليس إلزاميًا في كل جواب ولا مجرد تفاعل.',
+  '',
   'إذا كانت معلومة مادية ناقصة: لا تفترضيها — اسألي سؤالًا توضيحيًا قصيرًا (ASK_USER) بدل حكم شكلي.',
   '',
   'السؤال الحالي هو آخر سطر للمستخدمة في المحادثة أدناه — أجيبي عنه هو. الأسطر السابقة سياق ومساند، وليست المطلوب.',
@@ -164,6 +177,7 @@ const MINIMAL_INSTRUCTION = [
   '  - إذا احتجتِ دليلًا جديدًا: {"action":"USE_TOOL","tool":"search_knowledge","query":"نص البحث"}',
   '  - لإجابة نهائية مع الدليل: {"action":"TERMINAL","status":"ANSWER","message":"نص الجواب","evidenceRefs":["معرّف المقطع"],"summary":"...","explanation":"...","practical":"..."}',
   '  - لطلب معلومة واحدة مؤثرة: {"action":"TERMINAL","status":"ASK_USER","question":"السؤال"}',
+  '  - لطلب تأكيد حقيقة مادية (سؤال جوابه نعم/لا): {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","yesNo":true,"factKey":"اسم المعلومة"} — لا تضيفي factKey إلا إذا كان السؤال يؤكد معلومة موجودة أصلًا في قائمة المعلومات المعروفة أعلاه، واستخدمي اسمها كما هو مكتوب هناك.',
   '  - إذا لم يكفِ الدليل المتاح: {"action":"TERMINAL","status":"INSUFFICIENT_EVIDENCE","message":"بيان مختصر"}',
   '  - لا تكتب أي نص خارج الـ JSON، ولا تستخدم أكواد JSON Schema أو Markdown fences.',
   `- يبقى لك ${MAX_TOOL_CALLS} عمليات بحث بحد أقصى في الدور الواحد.`,
@@ -180,6 +194,10 @@ interface MinimalResponse {
   status?: 'ANSWER' | 'ASK_USER' | 'INSUFFICIENT_EVIDENCE';
   message?: string;
   question?: string;
+  /** True when this ASK_USER is a yes/no material-fact confirmation. */
+  yesNo?: boolean;
+  /** The fact key being confirmed, when this ASK_USER confirms an EXISTING fact. */
+  factKey?: string;
   evidenceRefs?: string[];
   // RX1 semantic parts (all optional; the LLM decides what genuinely helps).
   understanding?: string;
@@ -270,6 +288,8 @@ function parseModelResponse(text: string): MinimalResponse | null {
     status: status as MinimalResponse['status'],
     ...(str(o.message) ? { message: bounded(str(o.message), 1600) } : {}),
     ...(str(o.question) ? { question: bounded(str(o.question), MAX_QUESTION_CHARS) } : {}),
+    ...(o.yesNo === true ? { yesNo: true } : {}),
+    ...(str(o.factKey) ? { factKey: str(o.factKey) } : {}),
     ...(refs && refs.length > 0 ? { evidenceRefs: refs } : {}),
     ...(str(o.understanding) ? { understanding: bounded(str(o.understanding), 300) } : {}),
     ...(str(o.summary) ? { summary: bounded(str(o.summary), 400) } : {}),
@@ -464,9 +484,20 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
           if (!parsed.question) {
             return gap('terminal_missing_question', 'تعذّر ترتيب الجواب الآن. حاولي مرة أخرى.', { ...modelName });
           }
-          const key = DEFAULT_QUESTION_KEY;
+          // Material Fact Confirmation: when the question confirms an EXISTING fact, the
+          // readiness requirement is keyed by THAT fact key (bounded) and typed yes/no —
+          // so the user's answer binds CERTAIN onto the fact itself, closing the loop.
+          const isConfirmation = parsed.yesNo === true && !!parsed.factKey && parsed.factKey in facts;
+          const key = isConfirmation ? parsed.factKey!.slice(0, 60) : DEFAULT_QUESTION_KEY;
           const readiness = deps.readiness.evaluate({
-            requirements: [{ key, description: parsed.question, material: true, question: { key, wording: parsed.question } }],
+            // yes/no confirmations carry the yes_no expected-answer contract so the
+            // user's 'نعم' binds as a CERTAIN user_answer (the confirmation loop closes);
+            // everything else stays free_text.
+            requirements: [{
+              key, description: parsed.question, material: true,
+              question: { key, wording: parsed.question },
+              interaction: parsed.yesNo === true ? { type: 'yes_no' } : { type: 'free_text' },
+            }],
             known: [],
           });
           return {

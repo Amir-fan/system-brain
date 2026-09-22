@@ -160,6 +160,7 @@ export class ConversationService {
     // A need with no trustworthy contract can never be fast-bound: the candidate is not provable.
     const skillId = input.skillId ?? this.deps.defaultSkillId;
     const contractFor = (key: string): RequirementInteraction | undefined =>
+      (key === session.sessionContext.pendingKey ? session.sessionContext.pendingInteraction as RequirementInteraction | undefined : undefined) ??
       session.sessionContext.skillContext?.requirements.find((r) => r.key === key)?.interaction ??
       this.deps.interactionsFor?.(skillId)?.[key];
 
@@ -373,8 +374,11 @@ export class ConversationService {
       facts,
       // F3: the bounded provenance/certainty metadata travels WITH the facts it describes.
       ...(Object.keys(meta).length > 0 ? { factMeta: Object.fromEntries(Object.entries(meta).slice(-24)) } : {}),
-      // A pending question exists only while the turn asked one.
-      ...(status === 'needs_information' && interaction ? { pendingKey: interaction.key } : {}),
+      // A pending question exists only while the turn asked one; its expected-answer
+      // contract is persisted so the next plain-text answer binds against it.
+      ...(status === 'needs_information' && interaction
+        ? { pendingKey: interaction.key, pendingInteraction: { type: interaction.type, ...(interaction.options ? { options: interaction.options } : {}), ...(interaction.allowOther !== undefined ? { allowOther: interaction.allowOther } : {}) } }
+        : {}),
       // A new grounded result replaces the old one; an invalidating turn clears it;
       // otherwise the existing bounded result is carried forward unchanged.
       ...(grounded

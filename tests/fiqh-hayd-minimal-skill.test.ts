@@ -127,8 +127,9 @@ test('Minimal/B: the natural conversation reaches the model verbatim', async () 
   assert.ok(prompt.includes('المستخدمة: رأيت قطرة بنية باليوم العاشر'), 'the earlier user turn must be present');
   assert.ok(prompt.includes('المساعد: هل كان هناك طهر'), 'the assistant turn must be present');
   assert.ok(prompt.includes('المستخدمة: في اليوم الثامن توقف الدم'), 'the current message must be present');
-  assert.ok(!prompt.includes('CERTAIN'), 'no fact-certainty schema is imposed');
-  assert.ok(!prompt.includes('حقائق معروفة'), 'no fact block is imposed');
+  // With NO known facts, no fact lines/certainty tags are rendered (the instruction
+  // explains the tag vocabulary, but no data block is imposed).
+  assert.ok(!prompt.includes('معلومات معروفة مسبقًا'), 'no known-facts block when there are no facts');
 });
 
 // C + E — the model requests the tool and reads its result inside the SAME interaction
