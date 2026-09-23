@@ -142,6 +142,7 @@ test('4C/C+D: a yes/no confirmation binds CERTAIN; the confirmed tag replaces th
   assert.equal(t1.status, 'needs_information');
   // the confirmation question is typed yes/no so the answer can bind CERTAIN
   assert.equal(t1.interaction?.type, 'yes_no');
+  assert.deepEqual(t1.interaction?.options, ['نعم', 'لا', 'غير متأكدة']);
 
   // Turn 2: the user confirms ("نعم") → the conversation layer binds it as a CERTAIN
   // user_answer (the yes_no contract was persisted with the pending question).

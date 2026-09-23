@@ -168,8 +168,15 @@ export function validateAnswerCompatibility(
     case 'yes_no':
       if (typeof candidate === 'boolean') return 'ACCEPTED';
       // A number where a yes/no was expected is a definite mismatch; free prose cannot be
-      // proven either way (it may well express a yes/no), so it stays UNKNOWN.
-      return typeof candidate === 'string' ? 'UNKNOWN' : 'REJECTED';
+      // proven either way (it may well express a yes/no), so it stays UNKNOWN — except
+      // the canonical chip labels, which ARE the yes/no vocabulary (Stage 4C.7 chips).
+      if (typeof candidate === 'string') {
+        const c = candidate.trim();
+        if (/^(نعم|أجل|اجل|صحيح|yes|y)$/i.test(c)) return 'ACCEPTED';
+        if (/^(لا|no|n|ليس)$/i.test(c)) return 'ACCEPTED';
+        return 'UNKNOWN';
+      }
+      return 'REJECTED';
 
     case 'number':
     case 'duration': {

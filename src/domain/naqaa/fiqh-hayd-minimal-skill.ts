@@ -80,6 +80,8 @@ const MINIMAL_RESPONSE_SCHEMA = {
     yesNo: { type: 'boolean' },
     /** When the ASK_USER confirms an EXISTING fact: the fact key being confirmed. */
     factKey: { type: 'string' },
+    /** Short, clear answer choices for the question (used INSTEAD of free text when the answer can be safely enumerated). */
+    options: { type: 'array', items: { type: 'string' }, maxItems: 6 },
     evidenceRefs: { type: 'array', items: { type: 'string' } },
     // RX1 semantic parts — ALL optional. The LLM fills only what genuinely helps the
     // ordinary user; KIP stores semantics, never colors/design.
@@ -154,14 +156,27 @@ const MINIMAL_INSTRUCTION = [
   '',
   'لا تذكري أبدًا كلمات تقنية داخلية: لا «سياق»، لا «ذاكرة»، لا «نموذج»، لا «مصاديق»، لا «محرك». تكلمي كمختصة تتحدث للمستخدمة مباشرة.',
   '',
-  'عند نقص معلومة مؤثرة: لا حكم نهائي، لكن لا برود أيضًا — لخّصي ما فهمتِه باختصار في understanding ثم اسألي سؤالًا واحدًا واضحًا ودودًا (ASK_USER). مثال النبرة: «فهمت إن الدم رجع بعد فترة طهر، باقي أعرف شغلة وحدة: تقريبًا جم يوم استمر الطهر؟».',
+  'عند نقص معلومة مؤثرة: لا حكم نهائي، لكن لا برود أيضًا — لخّصي ما فهمتِه باختصار في understanding ثم اسألي حقيقة واحدة فقط (ASK_USER).',
+  '',
+  'أسلوب أسئلة الماسح (هذه أولوية ثابتة):',
+  '  - عربية بيضاء شديدة البساطة — كلام طبيعي مفهوم لكل اللهجات، تفهمه بنت عمرها 12 سنة. قصيرة جدًا ومباشرة. لا فصحى رسمية ثقيلة ولا لهجة بلد معينة كأساس.',
+  '  - إذا واضح من كلامها أنها تستخدم لهجة معينة، جاريها بخفة وطبيعية — بدون تكلف.',
+  '  - ممنوع المقدمات الآلية: لا «حسب البيانات»، لا «بناءً على المعلومات»، لا «وفقًا للسياق». مثال الأسلوب: بدل «حسب البيانات، استمر نزول الدم معك 24 ساعة، هل هذا صحيح؟» قولي: «صار تقريبًا يوم من بداية نزول الدم؟».',
+  '  - سؤال واحد فقط في الجولة. لا تجمعي سؤالين في جملة ولا تعرضي استبيانًا.',
+  '',
+  'نوع الإجابة — اختاري أقل مجهود ممكن للمستخدمة، بهذا الترتيب:',
+  '  1. إذا كانت المعلومة موجودة ونحتاج فقط تأكيدها: سؤال نعم/لا مع yesNo (و«غير متأكدة» ستظهر لها تلقائيًا).',
+  '  2. إذا كانت المعلومة ناقصة ويمكن حصر إجاباتها في خيارات قليلة واضحة بلا فقد معلومة يحتاجها الحكم: أرسلي options قصيرة وواضحة تختاريها أنتِ بحسب السؤال (و«غير متأكدة» تضاف تلقائيًا).',
+  '  3. الكتابة الحرة (بلا options) حل أخير فقط — عندما تكون المعلومة مفتوحة أو دقيقة لدرجة أن الخيارات ستفقد معلومة يحتاجها الحكم.',
+  '',
+  'معنى «غير متأكدة»: إذا اختارتها المستخدمة فهي ليست نعم ولا لا — الحقيقة تبقى غير مؤكدة. أعيدي التقييم وقرري بنفسك: هل يكفي الدليل الآخر للحكم، أم تسألين بطريقة أبسط أو عن معلومة أخرى، أم لا يمكن الحكم بأمان. لا تكرري نفس السؤال بصياغات مختلفة بلا فائدة.',
   '',
   'معنى الوسوم التي ترينها بجانب المعلومات (مثل evidence/UNCERTAIN أو user_answer/CERTAIN):',
   '  - user_answer/CERTAIN = قالتها المستخدمة بنفسها في هذه المحادثة — تعتبرينها مؤكدة.',
   '  - evidence أو memory أو غير مؤكدة = معلومة واردة من سياق التطبيق أو مسترجعة، قد تكون قديمة أو غير دقيقة.',
   '',
   'تأكيد حقيقة مادية (Material Fact Confirmation):',
-  '  - إلزامي: إذا كان حكمك (ANSWER) سيعتمد مباشرة على حقيقة مادية ركنية — أي الحكم يتوقف عليها ولا يصح بدونها — وكانت موسومة غير مؤكدة (مثل evidence/UNCERTAIN) أو سياقًا مسترجعًا قد يكون قديمًا، فلا تصدري ANSWER قبل تأكيدها. اطلبي تأكيدها أولًا عبر ASK_USER بسؤال نعم/لا ودود — مثال: «حسب معلوماتج، بداية الدم كانت أمس. صحيح؟».',
+  '  - إلزامي: إذا كان حكمك (ANSWER) سيعتمد مباشرة على حقيقة مادية ركنية — أي الحكم يتوقف عليها ولا يصح بدونها — وكانت موسومة غير مؤكدة (مثل evidence/UNCERTAIN) أو سياقًا مسترجعًا قد يكون قديمًا، فلا تصدري ANSWER قبل تأكيدها. اطلبي تأكيدها أولًا عبر ASK_USER بسؤال نعم/لا بسيط — مثال الأسلوب: «صار تقريبًا يوم من بداية نزول الدم؟».',
   '  - إذا أجابت نعم → الحقيقة تصبح مؤكدة وأعيدي التقييم وتصدرين الحكم. إذا نفت أو صحّحت → خذي التصحيح وأعيدي التقييم.',
   '  - لا تؤكدي أكثر من حقيقة واحدة في الجولة الواحدة. لا تؤكدي ما قالته هي بنفسها مؤخراً. لا تؤكدي معلومات ثانوية أو مساندة لا يتوقف عليها الحكم، حتى لو كانت غير مؤكدة. الحقائق التي أصبحت user_answer/CERTAIN مؤكدة ولا تحتاج تأكيدًا.',
   '',
@@ -183,7 +198,8 @@ const MINIMAL_INSTRUCTION = [
   '  - لإجابة نهائية مع الدليل: {"action":"TERMINAL","status":"ANSWER","message":"نص الجواب","evidenceRefs":["معرّف المقطع"],"summary":"...","explanation":"...","practical":"...","label":"hayd"}',
   '  - label إلزامي مع كل ANSWER وهو تصنيف الحكم البنيوي، قيمته واحدة فقط من: "hayd" (حيض) أو "istihada" (استحاضة) أو "nifas" (نفاس). اختاريه أنتِ بناءً على حكمك — لا يُشتق من النص لاحقًا. إذا لم يكن الحكم واحدًا من هذه الثلاثة، لا ترسلي ANSWER بلا label؛ استخدمي ASK_USER أو INSUFFICIENT_EVIDENCE.',
   '  - لطلب معلومة واحدة مؤثرة: {"action":"TERMINAL","status":"ASK_USER","question":"السؤال"}',
-  '  - لطلب تأكيد حقيقة مادية (سؤال جوابه نعم/لا): {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","yesNo":true,"factKey":"اسم المعلومة"} — لا تضيفي factKey إلا إذا كان السؤال يؤكد معلومة موجودة أصلًا في قائمة المعلومات المعروفة أعلاه، واستخدمي اسمها كما هو مكتوب هناك.',
+  '  - لطلب معلومة واحدة مؤثرة مع خيارات: {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","options":["خيار 1","خيار 2"]}',
+  '  - لطلب تأكيد حقيقة مادية (سؤال جوابه نعم/لا): {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","yesNo":true,"factKey":"اسم المعلومة"} — لا تضيفي factKey إلا إذا كان السؤال يؤكد معلومة موجودة أصلًا في قائمة المعلومات المعروفة أعلاه، واستخدمي اسمها كما هو مكتوب هناك. نعم ولا و«غير متأكدة» تظهر تلقائيًا.',
   '  - إذا لم يكفِ الدليل المتاح: {"action":"TERMINAL","status":"INSUFFICIENT_EVIDENCE","message":"بيان مختصر"}',
   '  - لا تكتب أي نص خارج الـ JSON، ولا تستخدم أكواد JSON Schema أو Markdown fences.',
   `- يبقى لك ${MAX_TOOL_CALLS} عمليات بحث بحد أقصى في الدور الواحد.`,
@@ -204,6 +220,8 @@ interface MinimalResponse {
   yesNo?: boolean;
   /** The fact key being confirmed, when this ASK_USER confirms an EXISTING fact. */
   factKey?: string;
+  /** Short answer choices the user can tap instead of typing (bounded). */
+  options?: string[];
   evidenceRefs?: string[];
   // RX1 semantic parts (all optional; the LLM decides what genuinely helps).
   understanding?: string;
@@ -298,6 +316,7 @@ function parseModelResponse(text: string): MinimalResponse | null {
     ...(str(o.question) ? { question: bounded(str(o.question), MAX_QUESTION_CHARS) } : {}),
     ...(o.yesNo === true ? { yesNo: true } : {}),
     ...(str(o.factKey) ? { factKey: str(o.factKey) } : {}),
+    ...(Array.isArray(o.options) ? { options: o.options.map((x) => str(x)).filter(Boolean).slice(0, 6) } : {}),
     ...(refs && refs.length > 0 ? { evidenceRefs: refs } : {}),
     ...(str(o.understanding) ? { understanding: bounded(str(o.understanding), 300) } : {}),
     ...(str(o.summary) ? { summary: bounded(str(o.summary), 400) } : {}),
@@ -500,14 +519,25 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
           // so the user's answer binds CERTAIN onto the fact itself, closing the loop.
           const isConfirmation = parsed.yesNo === true && !!parsed.factKey && parsed.factKey in facts;
           const key = isConfirmation ? parsed.factKey!.slice(0, 60) : DEFAULT_QUESTION_KEY;
+          // Answer-effort priority (Stage 4C.7): yes/no → options → free text — the
+          // cheapest interaction the fact allows. yes/no confirmations carry options
+          // so the client renders نعم | لا | غير متأكدة chips (the yes_no contract
+          // accepts booleans AND the canonical chip labels; «غير متأكدة» is caught
+          // upstream by Core's UNKNOWN_ANSWER and never becomes CERTAIN).
+          const NOT_SURE = 'غير متأكدة';
+          const askedOptions = Array.isArray(parsed.options) && parsed.options.length > 0
+            ? [...new Set([...parsed.options.map((x) => str(x)).filter(Boolean), NOT_SURE])].slice(0, 7)
+            : undefined;
+          const interaction = parsed.yesNo === true
+            ? { type: 'yes_no' as const, options: ['نعم', 'لا', NOT_SURE] }
+            : askedOptions
+              ? { type: 'single_choice' as const, options: askedOptions }
+              : { type: 'free_text' as const };
           const readiness = deps.readiness.evaluate({
-            // yes/no confirmations carry the yes_no expected-answer contract so the
-            // user's 'نعم' binds as a CERTAIN user_answer (the confirmation loop closes);
-            // everything else stays free_text.
             requirements: [{
               key, description: parsed.question, material: true,
               question: { key, wording: parsed.question },
-              interaction: parsed.yesNo === true ? { type: 'yes_no' } : { type: 'free_text' },
+              interaction,
             }],
             known: [],
           });

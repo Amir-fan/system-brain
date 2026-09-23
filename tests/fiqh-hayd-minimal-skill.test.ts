@@ -538,6 +538,7 @@ test('4C.6/F: ASK_USER / Material Fact Confirmation unchanged (no label involvem
   const req = out.readiness.missing.find((m: { key: string }) => m.key === 'last_bleeding_start');
   assert.ok(req, 'confirmation requirement keyed by the fact');
   assert.equal(req?.interaction?.type, 'yes_no');
+  assert.deepEqual(req?.interaction?.options, ['نعم', 'لا', 'غير متأكدة']);
 });
 
 test('4C.6/G: structured semantics still ride the answer alongside the label', async () => {

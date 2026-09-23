@@ -66,7 +66,7 @@ function factsToContext(facts: Record<string, unknown>): BoundedUnderstandingCon
  * numbers/yes/no are certain, an unknown marker is UNKNOWN, and any other meaningful text
  * is preserved as an UNCERTAIN value the domain can bind safely.
  */
-const UNKNOWN_ANSWER = /^(UNKNOWN|ما أدري|ما ادري|ما أعرف|ما اعرف|لا أعرف|لا اعرف|مو متأكد|مو متأكدة|مب متأكد|ما أعلم|لا علم)$/;
+const UNKNOWN_ANSWER = /^(UNKNOWN|ما أدري|ما ادري|ما أعرف|ما اعرف|لا أعرف|لا اعرف|مو متأكد|مو متأكدة|مب متأكد|غير متأكدة|غير متأكد|ما أعلم|لا علم)$/;
 
 function interpretPlainAnswer(text: string): { value: unknown; certainty: FactCertainty } | undefined {
   const t = text.trim();
@@ -77,7 +77,7 @@ function interpretPlainAnswer(text: string): { value: unknown; certainty: FactCe
   }
   if (/^(نعم|أجل|اجل|صحيح|yes|y)$/i.test(t)) return { value: true, certainty: 'CERTAIN' };
   if (/^(لا|no|n|ليس)$/i.test(t)) return { value: false, certainty: 'CERTAIN' };
-  if (/(ما أدري|ما ادري|ما أعرف|ما اعرف|لا أعرف|لا اعرف|مو متأكد|مو متأكدة|مب متأكد|ما أعلم|لا علم)/.test(t)) {
+  if (/(ما أدري|ما ادري|ما أعرف|ما اعرف|لا أعرف|لا اعرف|مو متأكد|مو متأكدة|مب متأكد|غير متأكد|ما أعلم|لا علم)/.test(t)) {
     return { value: 'UNKNOWN', certainty: 'UNKNOWN' };
   }
   if (/(غالبا|غالبًا|تقريبا|تقريبًا|ربما|يمكن|أظن|اظن)/.test(t)) return { value: t.slice(0, 200), certainty: 'UNCERTAIN' };
