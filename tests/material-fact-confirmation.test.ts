@@ -120,7 +120,7 @@ test('4C/B: evidence/UNCERTAIN material fact is visible to the model with its ta
   assert.ok(prompt.includes('evidence/UNCERTAIN'), 'unconfirmed provenance tag is visible');
   // and the confirmation contract is in the same prompt
   assert.ok(prompt.includes('تأكيد حقيقة مادية'), 'confirmation contract present');
-  assert.ok(prompt.includes('أهم حقيقة واحدة فقط'), 'one-fact bound present');
+  assert.ok(prompt.includes('فلا تصدري ANSWER قبل تأكيدها'), 'direct-dependency rule: confirm before ruling');
 });
 
 test('4C/C+D: a yes/no confirmation binds CERTAIN; the confirmed tag replaces the unconfirmed one', async () => {
@@ -177,10 +177,10 @@ test('4C/E: the confirmation contract bounds confirmation to material facts (one
     appContext: { last_bleeding_start: 'أمس', madhab: 'الشافعي', theme_preference: 'dark' },
   });
   const prompt = model.prompts[0];
-  // structural bound: the ASK_USER envelope carries exactly ONE question
-  assert.ok(prompt.includes('أهم حقيقة واحدة فقط'), 'one-fact bound instructed');
-  assert.ok(prompt.includes('لا تؤكدي معلومات ثانوية'), 'secondary facts excluded');
-  assert.ok(prompt.includes('ليس إلزاميًا في كل جواب'), 'confirmation is never mandatory-by-default');
+  // structural bound: one fact per turn, secondary facts excluded
+  assert.ok(prompt.includes('لا تؤكدي أكثر من حقيقة واحدة في الجولة الواحدة'), 'one-fact bound instructed');
+  assert.ok(prompt.includes('لا تؤكدي معلومات ثانوية أو مساندة لا يتوقف عليها الحكم'), 'secondary facts excluded');
+  assert.ok(prompt.includes('فلا تصدري ANSWER قبل تأكيدها'), 'mandatory only for ruling-critical unconfirmed facts');
 });
 
 test('4C/F: sufficient + reliable info → normal ANSWER flow unchanged', async () => {
