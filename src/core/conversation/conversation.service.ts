@@ -145,6 +145,7 @@ export class ConversationService {
       certainty: FactCertainty,
       provenance: CaseFactMeta['provenance'],
       original?: string,
+      origin?: 'app',
     ): void => {
       writtenKeys.push(String(key));
       const prev = meta[key];
@@ -153,7 +154,7 @@ export class ConversationService {
         ? [...(prev.superseded ?? []), { value: String(prev.certainty === 'CERTAIN' ? prev.at : 'unknown'), at: prev.at }].slice(-2)
         : undefined;
       facts[key] = value;
-      meta[key] = { provenance, certainty, at: nowIso, ...(original ? { original } : {}), ...(superseded ? { superseded } : {}) };
+      meta[key] = { provenance, certainty, at: nowIso, ...(original ? { original } : {}), ...(superseded ? { superseded } : {}), ...(origin ? { origin } : {}) };
     };
     // B1.0 — ONE canonical expected-answer contract per pending/answered need. The persisted
     // requirement (B3a turn context) wins; the skill's static interaction hints are the fallback.
@@ -211,14 +212,37 @@ export class ConversationService {
     // (ranked below user_statement/user_answer, so it can never override the user's own
     // words) and is bounded. PRIVATE sessions receive NONE: the field is dropped here,
     // structurally, before the case is assembled.
+    //
+    // SNAPSHOT SEMANTICS: a request that carries an `appContext` OBJECT is the CURRENT complete
+    // snapshot of APP-ORIGIN facts. Such a fact (marked `origin:'app'`, or legacy provenance
+    // `evidence`, which only this bridge ever writes) is
+    //   - REFRESHED through the normal fact-write path when the snapshot carries a new value
+    //     (supersession trace + new `at`; the case signature then invalidates any grounded
+    //     result that rested on it), and
+    //   - RETRACTED when the snapshot no longer contains its key.
+    // Anything that is NOT app-origin (user answer/statement, memory, skill-bound facts, or a
+    // fact with no metadata) is stronger/unknown and is never overwritten or removed here. A
+    // request with NO `appContext` field changes nothing.
     if (session.mode !== 'private' && input.appContext && typeof input.appContext === 'object') {
+      const isAppOrigin = (m: CaseFactMeta | undefined): boolean => m?.origin === 'app' || m?.provenance === 'evidence';
+      const snapshotKeys = new Set<string>();
       const entries = Object.entries(input.appContext).slice(0, 40);
       for (const [k, v] of entries) {
         if (typeof k !== 'string' || !k.trim()) continue;
         if (v === undefined || v === null || String(v).trim?.() === '') continue;
         const key = k.trim().slice(0, 60);
-        if (key in facts) continue; // an existing (stronger) fact is never overwritten by app context
-        writeFact(key, v, 'UNCERTAIN', 'evidence');
+        snapshotKeys.add(key);
+        if (key in facts) {
+          if (!isAppOrigin(meta[key])) continue; // a stronger/unknown fact is never overwritten by app context
+          if (JSON.stringify(facts[key]) === JSON.stringify(v)) continue; // idempotent re-send: nothing changed
+        }
+        writeFact(key, v, 'UNCERTAIN', 'evidence', undefined, 'app');
+      }
+      for (const key of Object.keys(facts)) {
+        if (snapshotKeys.has(key) || !isAppOrigin(meta[key])) continue;
+        delete facts[key];
+        delete meta[key];
+        writtenKeys.push(key); // a removal is a changed fact for B3a reuse-invalidation
       }
     }
 

@@ -46,6 +46,13 @@ export interface CaseFactMeta {
   original?: string;
   /** At most a couple of superseded values (traceability without history). */
   superseded?: Array<{ value: string; at: string }>;
+  /**
+   * Set ONLY on facts that were written from the generic `appContext` bridge. It makes a fact
+   * eligible for app-snapshot refresh/removal and nothing else: a stronger write (user answer,
+   * user statement, skill-bound fact) replaces the whole meta object, so the marker disappears
+   * and the fact is protected from then on. Domain-neutral; no reasoning reads it.
+   */
+  origin?: 'app';
 }
 
 export interface SessionContext {
