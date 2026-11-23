@@ -8,10 +8,14 @@ import { createVercelHandler } from '../src/platform/vercel/vercel-handler.ts';
 
 test('Vercel configuration routes the complete API surface to the bounded function', async () => {
   const configuration = JSON.parse(await readFile('vercel.json', 'utf8')) as {
+    framework?: string | null;
+    buildCommand?: string | null;
     functions?: Record<string, { maxDuration?: number }>;
     rewrites?: Array<{ source?: string; destination?: string }>;
   };
 
+  assert.equal(configuration.framework, null);
+  assert.equal(configuration.buildCommand, null);
   assert.equal(configuration.functions?.['api/index.ts']?.maxDuration, 60);
   assert.deepEqual(configuration.rewrites, [{
     source: '/v1/:path*',
