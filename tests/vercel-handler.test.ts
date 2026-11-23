@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { readFile, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { resolve } from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 import type { HttpApiHandler } from '../src/platform/api/http-server.ts';
 import { createVercelHandler } from '../src/platform/vercel/vercel-handler.ts';
 import { createWebHandler } from '../src/platform/vercel/web-handler.ts';
+
+const GENERATED_BUNDLE = resolve('api/_bundle.mjs');
 
 test('Vercel configuration routes the complete API surface to the bounded function', async () => {
   const configuration = JSON.parse(await readFile('vercel.json', 'utf8')) as {
@@ -16,12 +21,40 @@ test('Vercel configuration routes the complete API surface to the bounded functi
   };
 
   assert.equal(configuration.framework, null);
-  assert.equal(configuration.buildCommand, null);
-  assert.equal(configuration.functions?.['api/index.ts']?.maxDuration, 60);
+  assert.equal(configuration.buildCommand, 'npm run build:vercel');
+  assert.equal(configuration.functions?.['api/index.js']?.maxDuration, 60);
   assert.deepEqual(configuration.rewrites, [{
     source: '/v1/:path*',
     destination: '/api/index?__kip_path=/v1/:path*',
   }]);
+});
+
+test('Vercel build produces a plain-Node-loadable function without embedding secrets', async () => {
+  const syntheticSecret = 'synthetic-build-secret-must-not-appear';
+  await rm(GENERATED_BUNDLE, { force: true });
+
+  try {
+    const npmExecutable = process.platform === 'win32' ? process.env.ComSpec ?? 'cmd.exe' : 'npm';
+    const npmArguments = process.platform === 'win32'
+      ? ['/d', '/s', '/c', 'npm run build:vercel']
+      : ['run', 'build:vercel'];
+    const build = spawnSync(npmExecutable, npmArguments, {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: { ...process.env, KIP_TEST_SECRET_KEY: syntheticSecret },
+    });
+    assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+
+    const bundle = await readFile(GENERATED_BUNDLE, 'utf8');
+    assert.equal(bundle.includes(syntheticSecret), false);
+    assert.equal((await stat(GENERATED_BUNDLE)).size < 250 * 1024 * 1024, true);
+
+    const entryUrl = `${pathToFileURL(resolve('api/index.js')).href}?test=${Date.now()}`;
+    const entry = await import(entryUrl) as { default?: { fetch?: unknown } };
+    assert.equal(typeof entry.default?.fetch, 'function');
+  } finally {
+    await rm(GENERATED_BUNDLE, { force: true });
+  }
 });
 
 test('Web adapter returns the canonical Node handler response expected by current Vercel functions', async () => {

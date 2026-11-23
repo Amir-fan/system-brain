@@ -36,7 +36,7 @@ npm run verify:local
 
 ## Vercel backend deployment
 
-The repository includes a Node.js Vercel Function at `api/index.ts`. Vercel rewrites public `/v1/*` requests to that function, and the adapter invokes the same authenticated KIP handler used by the local listener. The function duration is capped at 60 seconds, leaving a bounded margin over Naqaa's 45-second KIP timeout.
+The repository includes a Node.js Vercel Function at `api/index.js`. Vercel runs `npm run build:vercel` first to generate its ignored server bundle, rewrites public `/v1/*` requests to the stable function entry, and invokes the same authenticated KIP handler used by the local listener. The function duration is capped at 60 seconds, leaving a bounded margin over Naqaa's 45-second KIP timeout.
 
 Create the Vercel project from the repository root with the framework preset set to **Other**. Do not set the project root to `frontend`; that directory is a separate Vite application. Configure these server-side environment variables in every Vercel environment that will serve Naqaa:
 

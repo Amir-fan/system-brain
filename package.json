@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:vercel": "node scripts/build-vercel.mjs",
     "lint": "node scripts/lint.mjs",
     "test": "node --import tsx --test \"tests/**/*.test.ts\"",
     "test:dev": "node --import tsx --env-file=.env.local --test \"tests/**/*.test.ts\"",
@@ -14,6 +15,7 @@
   "devDependencies": {
     "@types/jszip": "^3.4.0",
     "@types/node": "^26.5.1",
+    "esbuild": "0.28.2",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   },

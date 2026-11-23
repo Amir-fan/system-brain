@@ -11,3 +11,6 @@ keys/
 *.pem
 *.private-key.pem
 *.key
+
+# Generated Vercel server bundle (created by npm run build:vercel)
+/api/_bundle.mjs
