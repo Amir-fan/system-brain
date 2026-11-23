@@ -91,24 +91,40 @@ test('Vercel adapter rejects missing, duplicate, or non-KIP route parameters', a
 
 test('Vercel adapter returns a generic error and retries a failed cold start', async () => {
   let loads = 0;
+  const originalConsoleError = console.error;
+  const originalTestSecret = process.env.KIP_TEST_SECRET_KEY;
+  const syntheticSecret = 'synthetic-private-bootstrap-secret';
+  const diagnostics: string[] = [];
+  process.env.KIP_TEST_SECRET_KEY = syntheticSecret;
+  console.error = (...values: unknown[]) => diagnostics.push(values.join(' '));
   const handler = createVercelHandler(async () => {
     loads += 1;
-    throw new Error('private bootstrap diagnostics');
+    throw new Error(`private bootstrap diagnostics: ${syntheticSecret}`);
   });
 
-  await withServer(handler, async (baseUrl) => {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const response = await fetch(`${baseUrl}/api/index?__kip_path=/v1/projects`);
-      assert.equal(response.status, 500);
-      const text = await response.text();
-      assert.equal(text.includes('private bootstrap diagnostics'), false);
-      assert.deepEqual(JSON.parse(text), {
-        ok: false,
-        status: 500,
-        error: { category: 'runtime', message: 'internal error' },
-      });
-    }
-  });
+  try {
+    await withServer(handler, async (baseUrl) => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await fetch(`${baseUrl}/api/index?__kip_path=/v1/projects`);
+        assert.equal(response.status, 500);
+        const text = await response.text();
+        assert.equal(text.includes('private bootstrap diagnostics'), false);
+        assert.deepEqual(JSON.parse(text), {
+          ok: false,
+          status: 500,
+          error: { category: 'runtime', message: 'internal error' },
+        });
+      }
+    });
+  } finally {
+    console.error = originalConsoleError;
+    if (originalTestSecret === undefined) delete process.env.KIP_TEST_SECRET_KEY;
+    else process.env.KIP_TEST_SECRET_KEY = originalTestSecret;
+  }
 
   assert.equal(loads, 2);
+  assert.equal(diagnostics.length, 2);
+  assert.equal(diagnostics.every((entry) => entry.includes('private bootstrap diagnostics')), true);
+  assert.equal(diagnostics.some((entry) => entry.includes(syntheticSecret)), false);
+  assert.equal(diagnostics.every((entry) => entry.includes('<redacted>')), true);
 });

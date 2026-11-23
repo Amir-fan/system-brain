@@ -38,6 +38,18 @@ function sendJson(
   response.end(JSON.stringify(body));
 }
 
+function redactedDiagnostic(error: unknown): string {
+  let diagnostic = error instanceof Error
+    ? error.stack ?? `${error.name}: ${error.message}`
+    : 'unknown bootstrap failure';
+
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!/(?:KEY|TOKEN|SECRET|PASSWORD)/i.test(name) || !value || value.length < 8) continue;
+    diagnostic = diagnostic.replaceAll(value, '<redacted>');
+  }
+  return diagnostic.slice(0, 4_000);
+}
+
 export function createVercelHandler(loadHandler: HttpApiHandlerLoader): HttpApiHandler {
   let handlerPromise: Promise<HttpApiHandler> | undefined;
 
@@ -65,7 +77,8 @@ export function createVercelHandler(loadHandler: HttpApiHandlerLoader): HttpApiH
     request.url = requestUrl;
     try {
       await (await handler())(request, response);
-    } catch {
+    } catch (error: unknown) {
+      console.error('KIP Vercel invocation failed', redactedDiagnostic(error));
       sendJson(response, 500, {
         ok: false,
         status: 500,
