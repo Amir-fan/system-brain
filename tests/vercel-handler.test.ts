@@ -16,12 +16,14 @@ test('Vercel configuration routes the complete API surface to the bounded functi
   const configuration = JSON.parse(await readFile('vercel.json', 'utf8')) as {
     framework?: string | null;
     buildCommand?: string | null;
+    outputDirectory?: string | null;
     functions?: Record<string, { maxDuration?: number }>;
     rewrites?: Array<{ source?: string; destination?: string }>;
   };
 
   assert.equal(configuration.framework, null);
   assert.equal(configuration.buildCommand, 'npm run build:vercel');
+  assert.equal(configuration.outputDirectory, 'public');
   assert.equal(configuration.functions?.['api/index.js']?.maxDuration, 60);
   assert.deepEqual(configuration.rewrites, [{
     source: '/v1/:path*',
@@ -44,6 +46,7 @@ test('Vercel build produces a plain-Node-loadable function without embedding sec
       env: { ...process.env, KIP_TEST_SECRET_KEY: syntheticSecret },
     });
     assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+    assert.equal((await stat(resolve('public'))).isDirectory(), true);
 
     const bundle = await readFile(GENERATED_BUNDLE, 'utf8');
     assert.equal(bundle.includes(syntheticSecret), false);
