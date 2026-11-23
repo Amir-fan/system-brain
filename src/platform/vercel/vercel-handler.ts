@@ -9,8 +9,9 @@
 
 import type { HttpApiHandler } from '../api/http-server.ts';
 
-const ROUTE_PARAMETER = '__kip_path';
+const ROUTE_PARAMETER = 'kip_path';
 const KIP_PATH = /^\/v1(?:\/[^?#\r\n]*)?$/;
+const KIP_ROUTE_FRAGMENT = /^[^?#\r\n]*$/;
 
 export type HttpApiHandlerLoader = () => Promise<HttpApiHandler>;
 
@@ -22,11 +23,14 @@ function canonicalRequestUrl(requestUrl: string | undefined): string | null {
     const query = url.searchParams.toString();
     return `${url.pathname}${query ? `?${query}` : ''}`;
   }
-  if (routedPaths.length !== 1 || !KIP_PATH.test(routedPaths[0])) return null;
+  if (routedPaths.length !== 1 || !KIP_ROUTE_FRAGMENT.test(routedPaths[0])) return null;
+
+  const routedPath = new URL(`/v1/${routedPaths[0]}`, url).pathname;
+  if (!KIP_PATH.test(routedPath)) return null;
 
   url.searchParams.delete(ROUTE_PARAMETER);
   const query = url.searchParams.toString();
-  return `${routedPaths[0]}${query ? `?${query}` : ''}`;
+  return `${routedPath}${query ? `?${query}` : ''}`;
 }
 
 function sendJson(

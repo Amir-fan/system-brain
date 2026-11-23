@@ -10,8 +10,8 @@
   },
   "rewrites": [
     {
-      "source": "/v1/:path*",
-      "destination": "/api/index?__kip_path=/v1/:path*"
+      "source": "/v1/:kip_path*",
+      "destination": "/api/index"
     }
   ]
 }

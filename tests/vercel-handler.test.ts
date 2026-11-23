@@ -26,8 +26,8 @@ test('Vercel configuration routes the complete API surface to the bounded functi
   assert.equal(configuration.outputDirectory, 'public');
   assert.equal(configuration.functions?.['api/index.js']?.maxDuration, 60);
   assert.deepEqual(configuration.rewrites, [{
-    source: '/v1/:path*',
-    destination: '/api/index?__kip_path=/v1/:path*',
+    source: '/v1/:kip_path*',
+    destination: '/api/index',
   }]);
 });
 
@@ -117,10 +117,10 @@ test('Vercel adapter restores the canonical path and preserves caller query valu
   });
 
   await withServer(handler, async (baseUrl) => {
-    const first = await fetch(`${baseUrl}/api/index?__kip_path=/v1/projects&limit=2`);
-    const second = await fetch(`${baseUrl}/api/index?__kip_path=/v1/projects/demo/runs`);
+    const first = await fetch(`${baseUrl}/api/index?kip_path=projects&limit=2`);
+    const second = await fetch(`${baseUrl}/api/index?kip_path=projects/demo/runs`);
     const rewritten = await fetch(
-      `${baseUrl}/v1/projects?__kip_path=/v1/projects/other/runs&limit=3`,
+      `${baseUrl}/v1/projects?kip_path=projects/other/runs&limit=3`,
     );
     assert.equal(first.status, 204);
     assert.equal(second.status, 204);
@@ -135,7 +135,7 @@ test('Vercel adapter restores the canonical path and preserves caller query valu
   assert.equal(loads, 1, 'composition should be reused by warm function invocations');
 });
 
-test('Vercel adapter rejects missing, duplicate, or non-KIP route parameters', async () => {
+test('Vercel adapter rejects missing, duplicate, or escaping route parameters', async () => {
   let loads = 0;
   const handler = createVercelHandler(async () => {
     loads += 1;
@@ -145,8 +145,9 @@ test('Vercel adapter rejects missing, duplicate, or non-KIP route parameters', a
   await withServer(handler, async (baseUrl) => {
     for (const path of [
       '/api/index',
-      '/api/index?__kip_path=/admin',
-      '/api/index?__kip_path=/v1/projects&__kip_path=/v1/admin',
+      '/api/index?kip_path=../admin',
+      '/api/index?kip_path=projects%3Fadmin=true',
+      '/api/index?kip_path=projects&kip_path=admin',
     ]) {
       const response = await fetch(`${baseUrl}${path}`);
       assert.equal(response.status, 404);
@@ -177,7 +178,7 @@ test('Vercel adapter returns a generic error and retries a failed cold start', a
   try {
     await withServer(handler, async (baseUrl) => {
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const response = await fetch(`${baseUrl}/api/index?__kip_path=/v1/projects`);
+        const response = await fetch(`${baseUrl}/api/index?kip_path=projects`);
         assert.equal(response.status, 500);
         const text = await response.text();
         assert.equal(text.includes('private bootstrap diagnostics'), false);
