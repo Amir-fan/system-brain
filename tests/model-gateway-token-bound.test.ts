@@ -115,6 +115,8 @@ describe('model gateway output bound (provider-neutral)', () => {
     assert.equal(calls[1].maxOutputTokens, REASONING_MAX_OUTPUT_TOKENS);
     assert.equal(calls[2].maxOutputTokens, DECISION_MAX_OUTPUT_TOKENS);
     assert.equal(calls.every((c) => c.workload === 'knowledge_answer'), true);
+    assert.equal(calls.every((c) => typeof c.instructions === 'string' && c.instructions.length > 0), true, 'every fiqh stage supplies trusted instructions separately');
+    assert.equal(calls.every((c) => !String(c.message ?? '').includes('قواعد صارمة')), true, 'trusted rules are absent from user/retrieved content');
     assert.equal([calls[0].maxOutputTokens, calls[1].maxOutputTokens, calls[2].maxOutputTokens].every((v) => typeof v === 'number' && v > 0 && v < 65536), true);
     // the bound is a plain number, never a provider field name
     assert.equal(calls.every((c) => typeof c.maxOutputTokens === 'number'), true);

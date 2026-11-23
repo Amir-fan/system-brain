@@ -13,6 +13,7 @@
 
 import {
   UnderstandingFailure,
+  correctionValuesCompatible,
   type AmbiguityResult,
   type BoundedUnderstandingContext,
   type Clarification,
@@ -26,10 +27,21 @@ import {
 } from './understanding.ts';
 
 const ARABIC = /[\u0600-\u06FF]/;
-const QUESTION_WORDS_EN = /^(what|when|where|who|why|how|which|is|are|do|does|can|would|should|will)\b/i;
-const QUESTION_WORDS_AR = /^(ما|ماذا|كيف|متى|أين|اين|هل|لماذا|كم|من|أي)\b/;
+const QUESTION_WORDS_EN = /(?:^|[,:;.!?]\s*)(what|when|where|who|why|how|which|is|are|do|does|can|would|should|will)\b/i;
+// Before a number, من can introduce a plain duration answer such as "من ٦ أيام".
+// Bare ما is ambiguous between an interrogative and ordinary negation. Recognize its
+// generic nominal question forms instead of treating every ما-prefixed sentence as a question.
+const QUESTION_WORDS_AR = /(?:^|[،,:;؛.!?؟]\s*)(?:ماذا|كيف|متى|أين|اين|هل|لماذا|كم|من(?!\s+\p{N})|أي|ما\s+(?:هو|هي|هذا|هذه|هؤلاء|ذلك|تلك|الذي|التي|معنى|سبب|اسم|نوع|طريقة|الفرق))(?![\p{L}\p{N}_])/u;
+// A question mark may be followed by closing punctuation or presentation symbols (quotes,
+// emoji, variation selectors) without changing the turn into a statement.
+const TERMINAL_QUESTION = /[?؟][\p{P}\p{S}\p{M}\u200D\uFE0F\s]*$/u;
+const UNKNOWN_MARKERS = /(ما أدري|ما ادري|ما أعرف|ما اعرف|لا أعرف|لا اعرف|مو متأكد|مو متأكدة|مب متأكد|غير متأكد|ما أعلم|لا علم)/;
 const IMPERATIVES_EN = /^(book|reserve|schedule|send|open|show|give|create|add|set|call|remind|check)\b/i;
 const IMPERATIVES_AR = /^(احجز|أرسل|افتح|أعطني|أرني|أنشئ|أضف|اضبط|اذكر|ذكرني|تحقق)\b/;
+const CORRECTION_MARKER = /\bi (?:mean|meant)\b|اقصد|أقصد|أعني|اعني|مقصودي|قصدي/i;
+const CORRECTION_PREFACE = /^(?:no|sorry|لا|آسفة?)(?:\s*[,،]\s*|\s+)/i;
+const CORRECTION_VALUE_SEPARATOR = /^(?:\s*[,،:]\s*|\s+)/;
+const CORRECTION_ALTERNATIVE = /\bor\b|(?<!\p{L})(?:أو|او)(?!\p{L})/iu;
 // Lexical-token match (B1.2): a deictic term counts only as a standalone token, never as a
 // substring of another word — Arabic نفس inside نفساء, ذلك inside كذلك. Unicode LETTERS are the
 // token class; combining marks (harakat/tanween) are not letters, so a marked standalone word
@@ -57,18 +69,31 @@ function splitIssues(text: string): string[] {
   return [t];
 }
 
-/** Minimal time extraction -> "HH:MM". */
-function extractTime(text: string): string | undefined {
-  const colon = /(\d{1,2}):(\d{2})/.exec(text);
-  if (colon) return `${colon[1].padStart(2, '0')}:${colon[2]}`;
-  const bare = /(?:at|في|الساعة|الساعه)\s+(\d{1,2})(?:\s*(am|pm|مساء|صباحا|صباحاً))?/i.exec(text);
-  if (bare) {
-    let h = Number(bare[1]);
-    if (/pm|مساء/.test(bare[2] ?? '') && h < 12) h += 12;
-    if (/am|صباحا|صباحاً/.test(bare[2] ?? '') && h === 12) h = 0;
-    return `${String(h).padStart(2, '0')}:00`;
+/** Extract clock expressions as "HH:MM". */
+function extractTimes(text: string): string[] {
+  const normalized = normalizeDigits(text);
+  const meridiem = String.raw`(?:a\.?m\.?|p\.?m\.?|مساء|صباحا|صباحاً)(?!\p{L})`;
+  const arabicMeridiem = String.raw`(?:مساء|صباحا|صباحاً)(?!\p{L})`;
+  const introduction = String.raw`(?<!\p{L})(?:at|في|الساعة|الساعه)(?!\p{L})`;
+  const clocks = normalized.matchAll(new RegExp(
+    String.raw`(?<![\d:])(?:${introduction}\s+\d{1,2}(?::\d{2})?(?:\s*${meridiem})?|\d{1,2}:\d{2}(?:\s*${meridiem})?|\d{1,2}(?::\d{2})?\s*${arabicMeridiem})(?![\d:])`,
+    'giu',
+  ));
+  const out: string[] = [];
+  for (const match of clocks) {
+    let expression = match[0];
+    const period = /([ap]\.?m\.?|مساء|صباحا|صباحاً)\s*$/iu.exec(expression)?.[1] ?? '';
+    // In the exact undotted “At 12:30 am I free?” shape, `am` begins the local
+    // question clause. A later question in another sentence must not change the
+    // preceding statement's explicit meridiem.
+    const following = text.slice((match.index ?? 0) + match[0].length);
+    if (period.toLowerCase() === 'am' && /^\s+i\b[^.!?؟,،;؛\u2013\u2014]*[?؟]/i.test(following)) {
+      expression = expression.replace(/\s*am\s*$/i, '');
+    }
+    const clock = parseClockExpression(expression);
+    if (clock) out.push(clock);
   }
-  return undefined;
+  return out;
 }
 
 /** today/tomorrow/yesterday relative to an EXPLICIT request timestamp. */
@@ -87,42 +112,50 @@ function extractTemporal(text: string, requestTimestamp?: string): Understanding
   return facts;
 }
 
-function detectDialogueAct(text: string, context: BoundedUnderstandingContext): DialogueAct {
-  const t = normalize(text);
+function detectDialogueAct(t: string): DialogueAct {
   if (t.length === 0) return 'OTHER';
+  const followUp = /^(وماذا|و ماذا|وبالنسبة|ماذا عن|وكذلك|what about|and what about|also what about)/i.test(t) || /^(و|وا)\s*(ماذا|كيف)/.test(t);
+  // Question punctuation takes precedence over wording that resembles a correction or confirmation.
+  if (TERMINAL_QUESTION.test(t)) return followUp ? 'FOLLOW_UP' : 'QUESTION';
   // Confirmation with explicit intent ("Yes, that's what I meant.", "نعم هذا ما أقصد").
   if (/^(نعم|أجل|صحيح|نعم هذا ما|yes,? that's? what i meant|yes,? that|yeah|exactly|correct)\b/i.test(t)
     || /^yes[^.]*that[^.]*(what i|meant)/i.test(t)
     || /^نعم[^.]*هذا/.test(t)) return 'CONFIRMATION';
+  if (followUp) return 'FOLLOW_UP';
+  const unmarked = t.replace(/\p{M}/gu, '');
+  if (QUESTION_WORDS_EN.test(t) || (QUESTION_WORDS_AR.test(unmarked) && UNKNOWN_MARKERS.exec(unmarked)?.index !== 0)) return 'QUESTION';
   // Correction ("No, I meant 10.", "أقصد العاشرة").
-  if (/\b(i mean|i meant)\b/i.test(t) || /اقصد|أقصد|أعني|اعني|مقصودي|قصدي/.test(t)) return 'CORRECTION';
+  if (CORRECTION_MARKER.test(t)) return 'CORRECTION';
   // Rejection ("No, not that one.", "ليس هذا").
   if (/\b(not that|that's not|not this|wrong)\b/i.test(t) || /ليس هذا|ليس ذلك|لا هذا|ليس هذا ما|هذا ليس/.test(t)) return 'REJECTION';
-  // Follow-up.
-  if (/^(وماذا|و ماذا|وبالنسبة|ماذا عن|وكذلك|what about|and what about|also what about)/i.test(t) || /^(و|وا)\s*(ماذا|كيف)/.test(t)) return 'FOLLOW_UP';
-  // Question.
-  if (t.endsWith('؟') || t.endsWith('?') || QUESTION_WORDS_AR.test(t) || QUESTION_WORDS_EN.test(t)) return 'QUESTION';
   // Command.
   if (IMPERATIVES_AR.test(t) || IMPERATIVES_EN.test(t)) return 'COMMAND';
   return 'STATEMENT';
 }
 
 function detectCorrections(text: string, context: BoundedUnderstandingContext): UnderstandingCorrection[] {
-  // The corrected value. The marker alternation mirrors detectDialogueAct (which
-  // already treats قصدي/مقصودي/أعني as a CORRECTION): the value extractor must
-  // recognize the same phrasings, or a correction is announced with no value.
-  const newValue = extractTime(text) ?? /^\s*(?:لا[،,]?\s*)?(?:أقصد|اقصد|أعني|اعني|مقصودي|قصدي|i mean|i meant)\s+(.+)$/i.exec(text)?.[1]?.trim();
-  if (newValue === undefined) return [];
-  // Find the most relevant active preference in user memory context. When the new
-  // value is a time, prefer the preference whose existing value is also a time (e.g.
-  // correcting preferred_time 09:00 -> 10:00), then fall back to the first preference.
-  const prefs = context.user.filter((m) => /preference/i.test(m.memoryType) || /preferred|time|date/i.test(m.memoryKey));
-  if (prefs.length === 0) {
-    return [{ new: newValue }];
-  }
-  const isTime = (v: unknown) => typeof v === 'string' && /^\d{1,2}:\d{2}$/.test(v);
-  const target = prefs.find((m) => isTime((m.payload as Record<string, unknown>).value) && isTime(newValue)) ?? prefs[0];
-  return [{ target: target.memoryKey, old: String((target.payload as Record<string, unknown>).value ?? ''), new: newValue }];
+  const explicit = text.replace(CORRECTION_PREFACE, '');
+  const marker = CORRECTION_MARKER.exec(explicit);
+  if (!marker || marker.index !== 0) return [];
+  const suffix = explicit.slice(marker[0].length);
+  const separator = CORRECTION_VALUE_SEPARATOR.exec(suffix);
+  if (!separator) return [];
+  const replacement = suffix.slice(separator[0].length).trim().replace(/[.!?؟]+$/, '');
+  if (!replacement || CORRECTION_ALTERNATIVE.test(replacement)) return [];
+  const clock = parseCorrectionClock(replacement);
+  // A time mentioned inside negation or speculation is not a definite replacement.
+  if (!clock && extractTimes(normalizeDigits(replacement)).length > 0) return [];
+  const newValue = clock ?? replacement;
+  // Resolve across every bounded scope, but only when exactly one fact has the same
+  // recognized scalar type. This handles session facts while refusing to guess among
+  // two dates (or to overwrite an arbitrary free-form string).
+  const matches = [...context.user, ...context.conversation, ...context.case]
+    .filter((memory) => correctionValuesCompatible(memory.payload.value, newValue));
+  if (matches.length > 1) return [{ new: newValue, targetAmbiguous: true }];
+  if (matches.length === 0) return [{ new: newValue }];
+
+  const target = matches[0];
+  return [{ target: target.memoryKey, old: String(target.payload.value), new: newValue }];
 }
 
 function resolveReferences(text: string, context: BoundedUnderstandingContext): ReferenceResult {
@@ -156,7 +189,6 @@ function clarificationFor(text: string, refs: ReferenceResult, act: DialogueAct)
 }
 
 
-const UNKNOWN_MARKERS = /(ما أدري|ما ادري|ما أعرف|ما اعرف|لا أعرف|لا اعرف|مو متأكد|مو متأكدة|مب متأكد|غير متأكد|ما أعلم|لا علم)/;
 const HEDGE_MARKERS = /(غالبا|غالبًا|تقريبا|تقريبًا|ربما|يمكن|أظن|اظن|لعل|مو متأكد|مو متأكدة)/;
 /** A speculative clause must never become current case truth (Slice B owns full F5). */
 const HYPOTHETICAL_MARKERS = /(^|\s)(لو|اذا|إذا|بفرض|في حال)(\s|$)/;
@@ -164,15 +196,16 @@ const HYPOTHETICAL_MARKERS = /(^|\s)(لو|اذا|إذا|بفرض|في حال)(\s
 /**
  * Generic candidate-fact extraction. Domain-free by construction: quantities with a time
  * unit become a duration, cessation verbs a boolean, "I don't know" an UNKNOWN categorical,
- * hedged/hypothetical language lowers certainty, everything else stays an observation.
+ * hedged/hypothetical language and mentions in questions lower certainty.
  * Interpretation ("is this enough for X?") is never done here.
  */
-function extractCandidates(text: string): CandidateFact[] {
+function extractCandidates(text: string, dialogueAct: DialogueAct): CandidateFact[] {
   const normalized = normalizeDigits(text);
   const unknown = UNKNOWN_MARKERS.test(text);
   const hedged = HEDGE_MARKERS.test(text);
   const hypothetical = HYPOTHETICAL_MARKERS.test(text);
-  const certainty: FactCertainty = unknown ? 'UNKNOWN' : hedged || hypothetical ? 'UNCERTAIN' : 'CERTAIN';
+  const question = dialogueAct === 'QUESTION' || dialogueAct === 'FOLLOW_UP';
+  const certainty: FactCertainty = unknown ? 'UNKNOWN' : hedged || hypothetical || question ? 'UNCERTAIN' : 'CERTAIN';
   const out: CandidateFact[] = [];
 
   const UNITS: Array<[RegExp, string]> = [
@@ -208,7 +241,7 @@ function extractCandidates(text: string): CandidateFact[] {
 }
 
 import type { CandidateFact, FactCertainty } from './understanding.ts';
-import { normalizeDigits, parseNumberLoose } from './numbers.ts';
+import { normalizeDigits, parseClockExpression, parseCorrectionClock, parseNumberLoose } from './numbers.ts';
 export class UnderstandingService {
   /** Deterministic: no model call. */
   async evaluate(input: UnderstandingInput): Promise<UnderstandingResult> {
@@ -217,14 +250,14 @@ export class UnderstandingService {
 
     const context: BoundedUnderstandingContext = input.context ?? { user: [], conversation: [], case: [] };
     const language = detectLanguage(text);
-    const dialogueAct = detectDialogueAct(text, context);
+    const dialogueAct = detectDialogueAct(text);
     const issues = splitIssues(text);
-    const corrections = detectCorrections(text, context);
+    const corrections = dialogueAct === 'CORRECTION' ? detectCorrections(text, context) : [];
     const references = resolveReferences(text, context);
     const ambiguity = materialAmbiguity(text, references);
 
     const facts: UnderstandingFact[] = [];
-    const time = extractTime(text);
+    const [time] = extractTimes(text);
     if (time) facts.push({ key: 'time', value: time, original: /([\d:]+)/.exec(text)?.[0] ?? text });
     facts.push(...extractTemporal(text, input.requestTimestamp));
 
@@ -249,7 +282,7 @@ export class UnderstandingService {
       corrections,
       facts,
 
-      candidates: extractCandidates(text),
+      candidates: extractCandidates(text, dialogueAct),
       ambiguity,
       ...(clarification ? { clarification } : {}),
       contextUsed: {

@@ -28,8 +28,8 @@ import {
   type SkillTurnContext,
 } from '../../core/skill/skill.ts';
 import { SkillFailure } from '../../core/skill/skill.ts';
+import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admission.ts';
 import {
-  hasKnownValue,
   isInteractionType,
   type DecisionRequirement,
   type KnownContextItem,
@@ -59,6 +59,7 @@ import {
   DECISION_MAX_OUTPUT_TOKENS,
   REASONING_MAX_OUTPUT_TOKENS,
   MADHHAB,
+  isFiqhDecisionMaterialFactKey,
   type FiqhConfidence,
 } from './fiqh-hayd-contracts.ts';
 const digestOf = (text: string): string => {
@@ -144,6 +145,8 @@ const DECISION_SYSTEM = [
   '5ج) إن تعارضت حقيقة معروفة مع وصف الحالة، لا تُصدر حكمًا: status=SOURCE_GAP بسبب صريح.',
   '5د) مفتاح كل معلومة (key) يجب أن يكون من قائمة المعرّفات المعتمدة حرفيًا؛ لا تخترع مفتاحًا جديدًا.',
   '5هـ) القيم التي وصلت معها درجة يقين غير CERTAIN (مجهولة أو غير مؤكدة) لا تُعامل كحقيقة؛ اذكرها في unresolved.',
+  '5و) عند DECIDED أرسل materialFactKeys كقائمة غير فارغة تضم حرفيًا كل مفتاح من knownFacts يتوقف عليه الحكم. لا تستخدم تفضيلات اللغة أو العرض، ولا تخترع مفتاحًا.',
+  'إذا كان الوصف غير مؤثر في الحكم، انسخه من sourceGaps حرفيًا إلى unresolved.item مع material=false.',
   `المعرّفات المعتمدة: ${Object.keys(NEED_CATALOGUE).join(', ')}.`,
   '6) إن قررت: كن مباشرًا وبسيطًا (يفهمه من عمره ١٢ سنة)، بلا مصطلحات زائدة.',
   'أجب بـ JSON فقط:',
@@ -152,6 +155,7 @@ const DECISION_SYSTEM = [
   ' "directAnswer":"جملة أو جملتان", "explanation":"سبب مختصر جدًا",',
   ' "confidence":"LOW|MEDIUM|HIGH", "sourceSupport":"SUPPORTED|PARTIAL|UNSUPPORTED",',
   ' "evidenceRefs":["chunkId"],',
+  ' "materialFactKeys":["exact_known_fact_key"],',
   ' "observationMappings":[{"observation":"...","concept":"...","evidenceRefs":["chunkId"]}],',
   ' "unresolved":[{"item":"...","material":true,"reason":"..."}],',
   ' "needsInformation":{"key":"snake_case","whyMaterial":"...","question":{"wording":"..."},"interaction":{"type":"yes_no|single_choice|number|duration|date|free_text","options":["..."]},"evidenceRefs":["chunkId"]}}',
@@ -177,7 +181,13 @@ function bounded(s: string, max: number): string {
 }
 
 const strOf = (v: unknown): string => (typeof v === 'string' ? v : '');
-const isKnown = (v: unknown): boolean => v !== undefined && v !== null && String(v).trim() !== '' && String(v).trim() !== '[]';
+
+function isExactMaterialFactKeys(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= 24
+    && value.every((key): key is string => typeof key === 'string'
+      && key.length <= 64 && /^[a-zA-Z][a-zA-Z0-9_]*$/.test(key))
+    && new Set(value).size === value.length;
+}
 
 // ---------------------------------------------------------------- skill factory
 
@@ -208,6 +218,14 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
 
       const input = (ctx.input ?? {}) as FiqhCaseInput;
       const known = (input.context ?? {}) as Record<string, unknown>;
+      const factMeta = input.factMeta ?? {};
+      const satisfies = (key: string, interaction = canonicalInteractionFor(key)): boolean =>
+        interaction !== undefined && Object.hasOwn(known, key) && isConfirmedMaterialFact(known[key], factMeta[key], interaction);
+      const knownForRequirements = (requirements: DecisionRequirement[]): KnownContextItem[] =>
+        requirements.flatMap(({ key, interaction }) => satisfies(key, canonicalInteractionFor(key) ?? interaction)
+          ? [{ key, value: known[key], source: 'conversation', certainty: 'CERTAIN' }]
+          : []);
+      const valueKnown = Object.fromEntries(Object.entries(known).filter(([key]) => satisfies(key)));
       const gaps: FiqhSourceGap = { present: false, observations: [], notes: [] };
 
       // ---- 0. follow-up on the latest grounded result (no new facts, no model call)
@@ -215,7 +233,13 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
       // valid; a material correction clears it before we ever see it.
       const stored = input.lastGroundedResult;
       const asked = strOf(input.text);
-      if (stored && stored.skillId === FIQH_HAYD_SKILL_ID && asked.length <= 60) {
+      const replayFactKeys = isExactMaterialFactKeys(stored?.materialFactKeys)
+        && stored.materialFactKeys.every((key) => isFiqhDecisionMaterialFactKey(key) && satisfies(key))
+        ? stored.materialFactKeys
+        : undefined;
+      if (stored && replayFactKeys && stored.evidenceRefs.length > 0
+        && strOf(stored.caseSignature).trim() && stored.skillId === FIQH_HAYD_SKILL_ID
+        && stored.status === 'DECIDED' && asked.length <= 60) {
         const wantsSource = /مصدر|من وين|الدليل|المرجع|مرجعك|دليلك/.test(asked);
         const wantsWhy = /ليش|ليه|لماذا|السبب|سبب|وضح|وضّح|فسر|اشرح/.test(asked);
         if (wantsSource || wantsWhy) {
@@ -252,6 +276,8 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
               sourceSupport: stored.status === 'DECIDED' ? 'SUPPORTED' : 'PARTIAL',
               acceptedEvidenceRefs: refs,
               retrievedEvidenceIds: refs,
+              materialFactKeys: replayFactKeys,
+              reusedGroundedResult: true,
               requirementKeys: [],
               workload: `${WORKLOAD}:followup_answered_from_session_result`,
             },
@@ -294,7 +320,6 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         answeredKeys?: unknown[];
         correctionsPresent?: boolean;
         skillContext?: SkillTurnContext;
-        factMeta?: Record<string, { certainty?: string }>;
       };
       const reusable = ex.skillContext;
       const answeredKeys = (Array.isArray(ex.answeredKeys) ? ex.answeredKeys : []).map(strOf).filter(Boolean);
@@ -325,16 +350,7 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
       const materialitySafe = canReuse && isMaterialityStable(pendingStored);
       if (canReuse && !materialitySafe) gaps.notes.push('b1.1_materiality_stability_unproven');
       if (materialitySafe && reusable) {
-        const metaIn = ex.factMeta ?? {};
-        const knownItems: KnownContextItem[] = Object.entries(known)
-          .filter(([, v]) => isKnown(v))
-          .map(([key, value]) => ({
-            key,
-            value,
-            source: 'conversation' as const,
-            ...(metaIn[key]?.certainty ? { certainty: metaIn[key]!.certainty as 'CERTAIN' | 'UNCERTAIN' | 'UNKNOWN' } : {}),
-          }));
-        const reusedReadiness = deps.readiness.evaluate({ requirements: reusableRequirements, known: knownItems });
+        const reusedReadiness = deps.readiness.evaluate({ requirements: reusableRequirements, known: knownForRequirements(reusableRequirements) });
         if (reusedReadiness.status !== 'READY_FOR_DECISION') {
           const refs = reusable.evidenceRefs.slice(0, MAX_SKILL_CONTEXT_EVIDENCE);
           const refreshed: SkillTurnContext = {
@@ -344,7 +360,7 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
             requirements: reusableRequirements,
             evidenceRefs: refs,
             sourceIds: reusable.sourceIds.slice(0, MAX_SKILL_CONTEXT_SOURCES),
-            baseCaseSignature: caseDigestOf({ ...known }),
+            baseCaseSignature: caseDigestOf(valueKnown),
             at: new Date().toISOString(),
           };
           return {
@@ -384,7 +400,8 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
       // ---- 3. knowledge need: bridge user language -> source language -------
       const planRes = await ctx.model.generateText({
         workload: WORKLOAD,
-        message: `${PLANNER_SYSTEM}\n\nوصف الحالة (بالعامية):\n${caseText}\n\nحقائق معروفة: ${JSON.stringify(known)}`,
+        instructions: PLANNER_SYSTEM,
+        message: `وصف الحالة (بالعامية):\n${caseText}\n\nحقائق معروفة: ${JSON.stringify(valueKnown)}`,
         maxOutputTokens: REASONING_MAX_OUTPUT_TOKENS,
       });
       const plan = parseJson<{ issue?: string; queries?: unknown[] }>(planRes.text) ?? {};
@@ -426,7 +443,8 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         .join('\n\n');
       const interpRes = await ctx.model.generateText({
         workload: WORKLOAD,
-        message: `${INTERPRETER_SYSTEM}\n\nوصف الحالة (بالعامية):\n${caseText}\n\nحقائق معروفة: ${JSON.stringify(known)}\n\nالنصوص المُسترجَعة من المصدر المعتمد:\n${evidenceBlock}`,
+        instructions: INTERPRETER_SYSTEM,
+        message: `وصف الحالة (بالعامية):\n${caseText}\n\nحقائق معروفة: ${JSON.stringify(valueKnown)}\n\nالنصوص المُسترجَعة من المصدر المعتمد:\n${evidenceBlock}`,
         maxOutputTokens: REASONING_MAX_OUTPUT_TOKENS,
       });
       const reasoning = parseJson<FiqhReasoningPlan>(interpRes.text);
@@ -447,36 +465,8 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         };
       }
 
-      // ---- 5b. F1→F3 binding + the ONE satisfaction test (B1.1/K-1, K-2).
-      // CERTAIN statement candidates become case facts bound to catalogue identities; hedged /
-      // hypothetical / unknown values are NEVER hardened here. Computed BEFORE the requirement
-      // derivation so the derivation can use the SAME certainty semantics to decide whether a need
-      // is already satisfied — presence alone is never satisfaction.
-      const statementFacts = Array.isArray(input.statementFacts) ? input.statementFacts : [];
+      // Advisory candidates can inform the narrative, but do not enter verified case context.
       const bound: Record<string, unknown> = {};
-      for (const c of statementFacts) {
-        if (c.certainty !== 'CERTAIN') continue;
-        if (c.kind === 'duration' && c.unit === 'hour') bound.bleeding_duration_hours = c.value;
-        else if (c.kind === 'duration' && c.unit === 'day') bound.bleeding_duration_days = c.value;
-        else if (c.kind === 'boolean' && c.value === true) bound.bleeding_cessation = true;
-      }
-      const factMeta = (input.factMeta ?? {}) as Record<string, { provenance?: string; certainty?: string }>;
-
-      /**
-       * B1.1/K-1 — does the CASE already legitimately satisfy this need? Reuses the one existing
-       * certainty semantics (Core's hasKnownValue): a value satisfies only when it is present AND
-       * CERTAIN. A stored `UNKNOWN` (or any non-CERTAIN value) leaves the need unresolved and
-       * still askable. `bound` values come from THIS turn's CERTAIN statement candidates.
-       */
-      const satisfies = (key: string): boolean =>
-        Object.prototype.hasOwnProperty.call(bound, key)
-          ? hasKnownValue({ key, value: bound[key], source: 'case', certainty: 'CERTAIN' })
-          : hasKnownValue({
-              key,
-              value: (known ?? {})[key],
-              source: 'conversation',
-              ...(factMeta[key]?.certainty ? { certainty: factMeta[key]!.certainty as 'CERTAIN' | 'UNCERTAIN' | 'UNKNOWN' } : {}),
-            });
 
       // ---- 6. deterministic validation (this is what makes it source-grounded)
       const validIds = new Set(evidence.map((p) => p.chunkId));
@@ -502,7 +492,7 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         const citations = citeRefs(r?.citations);
         if (!key || !wording) continue;
         // F2: identity must come from the declared catalogue — never an invented key.
-        if (!(key in NEED_CATALOGUE)) {
+        if (!Object.hasOwn(NEED_CATALOGUE, key)) {
           dropped.push(`unregistered_need:${key}`);
           continue;
         }
@@ -513,7 +503,8 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         }
         // (b) never re-ask what the case ALREADY SATISFIES — presence is not satisfaction, and a
         // mere value row (e.g. `UNKNOWN`) must not suppress a material need (B1.1/K-1).
-        if (satisfies(key)) {
+        const interaction = interactionForNeed(key, r?.interaction);
+        if (satisfies(key, interaction)) {
           dropped.push(`already_satisfied:${key}`);
           continue;
         }
@@ -526,7 +517,7 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
           whyMaterial: bounded(strOf(r?.whyMaterial), 240),
           question: { wording },
           // The Skill owns the answer contract of a known need (the model's type is at most a hint).
-          interaction: interactionForNeed(key, r?.interaction),
+          interaction,
           citations,
         });
         if (requirements.length >= MAX_REQUIREMENTS) break;
@@ -552,17 +543,7 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         question: { key: r.key, wording: r.question.wording },
         interaction: r.interaction,
       }));
-      const knownItems: KnownContextItem[] = Object.entries({ ...known, ...bound })
-        .filter(([, v]) => isKnown(v))
-        .map(([key, value]) => ({
-          key,
-          value,
-          source: 'conversation' as const,
-          // Memory-derived and hedged values never close a material need (F3).
-          ...(factMeta[key]?.certainty ? { certainty: factMeta[key]!.certainty as 'CERTAIN' | 'UNCERTAIN' | 'UNKNOWN' } : {}),
-        }));
-      const valueKnown = { ...known, ...bound };
-      const readiness = deps.readiness.evaluate({ requirements: decisionRequirements, known: knownItems });
+      const readiness = deps.readiness.evaluate({ requirements: decisionRequirements, known: knownForRequirements(decisionRequirements) });
 
       const baseTrace = (st: string, extra: Record<string, unknown> = {}) => ({
         issue,
@@ -622,10 +603,7 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
         /** The questions the user answered to produce knownFacts (bounded). */
         answeredQuestions: askedQuestions,
         /** Facts that exist but are NOT certain: never to be treated as knowledge. */
-        uncertainFacts: Object.entries(factMeta)
-          .filter(([, m]) => m.certainty && m.certainty !== 'CERTAIN')
-          .map(([k, m]) => `${k} (${m.certainty}${m.provenance === 'memory' ? ', من الذاكرة' : ''})`)
-          .slice(0, 8),
+        uncertainFacts: Object.keys(known).filter((key) => !Object.hasOwn(valueKnown, key)).slice(0, 8),
         observations: interpretations.map((i) => ({ observation: i.observation, candidateConcept: i.candidateConcept, supportedBySource: i.supported })),
         sourceGaps: gaps.observations,
         approvedSourceTitles: [...APPROVED_SOURCE_TITLES].join('، '),
@@ -633,28 +611,30 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
       };
       const decisionRes = await ctx.model.generateText({
         workload: WORKLOAD,
-        message: `${DECISION_SYSTEM}\n\nالحالة والمقاطع:\n${JSON.stringify(decisionInput)}`,
+        instructions: DECISION_SYSTEM,
+        message: `الحالة والمقاطع:\n${JSON.stringify(decisionInput)}`,
         // A bounded structured ruling: enough room for the JSON contract, and no
         // provider-side reservation of the model's full output capacity.
         maxOutputTokens: DECISION_MAX_OUTPUT_TOKENS,
       });
       const proposal = parseJson<FiqhDecisionProposal>(decisionRes.text);
-      const verdict = validateDecision({ proposal, evidence, gapObservations: gaps.observations });
+      const verdict = validateDecision({ proposal, evidence, gapObservations: gaps.observations, admittedFacts: valueKnown });
       const modelTag = [decisionRes.provider, decisionRes.model].filter(Boolean).join('/') || undefined;
 
       if (verdict.kind === 'NEEDS_INFORMATION' && verdict.requirement) {
         // The reasoning layer found one more materially necessary fact: route it through
         // the SAME dynamic-requirement path (no second question engine, no new ordering).
         const merged = [...requirements, verdict.requirement];
+        const mergedRequirements: DecisionRequirement[] = merged.map((r) => ({
+          key: r.key,
+          description: r.whyMaterial || r.question.wording,
+          material: true,
+          question: { key: r.key, wording: r.question.wording },
+          interaction: r.interaction,
+        }));
         const mergedReadiness = deps.readiness.evaluate({
-          requirements: merged.map((r) => ({
-            key: r.key,
-            description: r.whyMaterial || r.question.wording,
-            material: true,
-            question: { key: r.key, wording: r.question.wording },
-            interaction: r.interaction,
-          })),
-          known: knownItems,
+          requirements: mergedRequirements,
+          known: knownForRequirements(mergedRequirements),
         });
         return {
           status: 'NEEDS_INFORMATION',
@@ -673,15 +653,7 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
             skillId: FIQH_HAYD_SKILL_ID,
             skillVersion: FIQH_HAYD_SKILL_VERSION,
             issueSignature: digestOf(issue),
-            requirements: merged
-              .map((r) => ({
-                key: r.key,
-                description: r.whyMaterial || r.question.wording,
-                material: true,
-                question: { key: r.key, wording: r.question.wording },
-                interaction: r.interaction,
-              }))
-              .slice(0, MAX_SKILL_CONTEXT_REQUIREMENTS),
+            requirements: mergedRequirements.slice(0, MAX_SKILL_CONTEXT_REQUIREMENTS),
             evidenceRefs: evidence.map((p) => p.chunkId).slice(0, MAX_SKILL_CONTEXT_EVIDENCE),
             sourceIds: approvedIds.slice(0, MAX_SKILL_CONTEXT_SOURCES),
             baseCaseSignature: caseDigestOf(valueKnown),
@@ -723,6 +695,7 @@ export function createFiqhHaydSkill(deps: FiqhHaydSkillDeps): SkillDefinition {
             confidence: verdict.confidence,
             sourceSupport: 'SUPPORTED',
             acceptedEvidenceRefs: verdict.refs.map((r) => r.chunkId),
+            materialFactKeys: verdict.materialFactKeys,
             ...(verdict.codes.length ? { notes: verdict.codes.slice(0, 6) } : {}),
             workload: WORKLOAD,
             ...(modelTag ? { model: modelTag } : {}),
@@ -787,7 +760,7 @@ interface DecisionVerdictBase {
 }
 
 type DecisionVerdict =
-  | (DecisionVerdictBase & { kind: 'DECIDED'; directAnswer: string; explanation?: string; category?: string; confidence: FiqhConfidence; mappings: Array<{ observation: string; concept: string; evidenceRefs: string[] }> })
+  | (DecisionVerdictBase & { kind: 'DECIDED'; directAnswer: string; explanation?: string; category?: string; confidence: FiqhConfidence; mappings: Array<{ observation: string; concept: string; evidenceRefs: string[] }>; materialFactKeys: string[] })
   | (DecisionVerdictBase & { kind: 'NEEDS_INFORMATION'; requirement: FiqhMaterialRequirement })
   | (DecisionVerdictBase & { kind: 'SOURCE_GAP' });
 
@@ -796,6 +769,8 @@ export function validateDecision(args: {
   evidence: SkillKnowledgePassage[];
   /** Observations the approved source does not define (from the interpretation step). */
   gapObservations: string[];
+  /** Facts admitted by the server as CERTAIN user answers under their canonical contract. */
+  admittedFacts: Readonly<Record<string, unknown>>;
 }): DecisionVerdict {
   const { evidence, gapObservations } = args;
   const valid = new Map(evidence.map((e) => [e.chunkId, e]));
@@ -814,7 +789,7 @@ export function validateDecision(args: {
 
   const unresolved = (Array.isArray(p.unresolved) ? p.unresolved : [])
     .slice(0, 8)
-    .map((u) => ({ item: bounded(strOf(u?.item), 200), material: u?.material === true, ...(strOf(u?.reason) ? { reason: bounded(strOf(u.reason), 200) } : {}) }))
+    .map((u) => ({ item: bounded(strOf(u?.item), 200), material: u?.material !== false, ...(strOf(u?.reason) ? { reason: bounded(strOf(u.reason), 200) } : {}) }))
     .filter((u) => u.item.length > 0);
   const unresolvedMaterial = unresolved.filter((u) => u.material).map((u) => u.item);
   const sourceSupport: FiqhSourceSupport = ['SUPPORTED', 'PARTIAL', 'UNSUPPORTED'].includes(strOf(p.sourceSupport))
@@ -863,6 +838,13 @@ export function validateDecision(args: {
   if (!directAnswer) return { kind: 'SOURCE_GAP', codes: ['decision_empty_answer'], refs: [], unresolved, unresolvedMaterial, sourceSupport };
   const refs = mkRefs(p.evidenceRefs);
   if (refs.length === 0) return { kind: 'SOURCE_GAP', codes: ['decision_refs_missing_or_not_retrieved'], refs: [], unresolved, unresolvedMaterial, sourceSupport };
+  const materialFactKeys = p.materialFactKeys;
+  const validMaterialFactKeys = isExactMaterialFactKeys(materialFactKeys);
+  if (!validMaterialFactKeys) codes.push('decision_material_facts_missing_or_invalid');
+  else if (materialFactKeys.some((key) =>
+    !isFiqhDecisionMaterialFactKey(key) || !Object.hasOwn(args.admittedFacts, key))) {
+    codes.push('decision_material_facts_unconfirmed');
+  }
   if (sourceSupport !== 'SUPPORTED') codes.push('decision_source_support_not_supported');
   if (unresolvedMaterial.length > 0) codes.push('decision_with_material_source_gap');
   const mappings = (Array.isArray(p.observationMappings) ? p.observationMappings : [])
@@ -876,7 +858,7 @@ export function validateDecision(args: {
   for (const obs of gapObservations) {
     const head = obs.slice(0, 18);
     const mapped = mappings.some((m) => m.evidenceRefs.length > 0 && (m.observation.includes(head) || obs.includes(m.observation.slice(0, 18))));
-    const declaredNonMaterial = unresolved.some((u) => !u.material);
+    const declaredNonMaterial = unresolved.some((u) => !u.material && u.item === obs);
     if (!mapped && !declaredNonMaterial) { codes.push('unaccounted_unsupported_observation'); break; }
   }
   if (codes.length > 0) return { kind: 'SOURCE_GAP', codes, refs, unresolved, unresolvedMaterial, sourceSupport };
@@ -888,5 +870,6 @@ export function validateDecision(args: {
     ...(strOf(p.explanation) ? { explanation: bounded(strOf(p.explanation), 400) } : {}),
     ...(strOf(p.category) ? { category: bounded(strOf(p.category), 60) } : {}),
     confidence, refs, mappings, codes, unresolved, unresolvedMaterial, sourceSupport,
+    materialFactKeys: materialFactKeys!,
   };
 }

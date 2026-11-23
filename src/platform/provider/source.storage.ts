@@ -133,7 +133,8 @@ export function createSourceStorage(db: SupabaseDatabase): SourceStorage {
     async listByProject(projectId, includeArchived = false) {
       let q = db.from('sources').select('id, project_id, source_type, title, description, external_uri, status, role, created_by_subject, created_at, updated_at, archived_at').eq('project_id', projectId);
       if (!includeArchived) q = q.neq('status', 'archived');
-      const { data } = await q.limit(1000);
+      const { data, error } = await q.limit(1000);
+      if (error) throw new Error('source catalogue read failed', { cause: error });
       return (data ?? []).map(mapRow);
     },
     async getByProject(projectId, sourceId) {

@@ -35,6 +35,8 @@ export type ValidationOutcome = { ok: true } | { ok: false; message: string };
 export interface SkillModelCapability {
   generateText(input: {
     workload: string;
+    /** Trusted Skill instructions; never concatenate user or retrieved content here. */
+    instructions?: string;
     parts?: ModelContentPart[];
     message?: string;
     maxOutputTokens?: number;
@@ -119,6 +121,8 @@ export interface SkillTurnContext {
 export const MAX_SKILL_CONTEXT_REQUIREMENTS = 8;
 export const MAX_SKILL_CONTEXT_EVIDENCE = 10;
 export const MAX_SKILL_CONTEXT_SOURCES = 6;
+/** Canonical runtime bound for requirement/fact identifiers crossing the Skill seam. */
+export const MAX_SKILL_KEY_LENGTH = 64;
 
 /** Per-model-call timing metadata measured by the Skill runtime (never by the Skill). Safe fields only. */
 export interface SkillModelCallTiming {
@@ -217,6 +221,10 @@ export interface SkillTraceSummary {
   sourceSupport?: string;
   retrievedEvidenceIds?: string[];
   acceptedEvidenceRefs?: string[];
+  /** Exact confirmed facts authorizing a personal terminal decision (bounded by Runtime). */
+  materialFactKeys?: string[];
+  /** A follow-up reused the already-verified session result; it did not create a new ruling. */
+  reusedGroundedResult?: boolean;
   gapKeys?: string[];
   /** Model Gateway workload + provider/model actually used (never a prompt). */
   workload?: string;
@@ -304,11 +312,7 @@ export interface SkillExecutionResult {
   trace?: SkillTraceSummary;
   /** Present when the skill produced a user-facing answer (domain-neutral). */
   answer?: SkillAnswer;
-  /**
-   * Bounded case facts the skill BOUND from this turn's statement/evidence to its own
-   * declared need vocabulary. The conversation stores them in the SAME case store with
-   * provenance; Core never interprets them.
-   */
+  /** Advisory values from the skill for this execution. Conversation does not persist them as facts. */
   caseFacts?: Record<string, unknown>;
   /** B3a: refreshed bounded reusable turn context (bounded, replaced each turn). */
   skillContext?: SkillTurnContext;

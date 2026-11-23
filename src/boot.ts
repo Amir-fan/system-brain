@@ -10,61 +10,16 @@
  * Not a deploy target by itself; exists for local verification.
  */
 
-import { readFileSync } from 'node:fs';
 import { compose } from './platform/bootstrap/composition.ts';
-import { loadGitHubAppConfig } from './platform/github/github-app.ts';
-import type { TokenActorMap } from './platform/api/auth.ts';
+import { bootstrapEnvironment } from './platform/bootstrap/environment.ts';
 
 const ADMIN_PORT = Number(process.env.KIP_PORT ?? 8787);
 
-function tokenActorsFromEnv(): TokenActorMap {
-  const map = new Map<string, string>();
-  const raw = process.env.KIP_API_TOKENS; // "actor:token" comma-separated
-  for (const pair of (raw ?? '').split(',')) {
-    const [actor, token] = pair.split(':');
-    if (actor && token) map.set(token, actor);
-  }
-  return map;
-}
-
-// Stage 3 cutover — trusted server-to-server proxy credential (distinct from the dev/test
-// KIP_API_TOKENS). "actor:token" comma-separated; the actor must be a `service` member of
-// the target project. Read from KIP_PROXY_TOKENS; absent = Supabase-only (unchanged).
-function proxyTokensFromBootEnv(): TokenActorMap {
-  const map = new Map<string, string>();
-  const raw = process.env.KIP_PROXY_TOKENS;
-  for (const pair of (raw ?? '').split(',')) {
-    const [actor, token] = pair.split(':');
-    if (actor && token) map.set(token.trim(), actor.trim());
-  }
-  return map;
-}
-
-/** Reads GitHub App config from env, materialising the PEM from a path when given. */
-function githubEnv(): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = { ...process.env };
-  if (!env.GITHUB_APP_PRIVATE_KEY && env.GITHUB_APP_PRIVATE_KEY_PATH) {
-    try {
-      env.GITHUB_APP_PRIVATE_KEY = readFileSync(env.GITHUB_APP_PRIVATE_KEY_PATH, 'utf8');
-    } catch {
-      // Unreadable key file: the connector simply stays unconfigured.
-    }
-  }
-  return env;
-}
-
 async function main() {
-  const server = await compose({
-    supabaseUrl: process.env.SUPABASE_URL ?? '',
-    supabaseSecretKey: process.env.SUPABASE_SECRET_KEY ?? '',
-    openRouterModel: process.env.MODEL_NAME || 'openrouter/auto',
-    tokenActors: tokenActorsFromEnv(),
-    proxyTokens: proxyTokensFromBootEnv(),
-    githubApp: loadGitHubAppConfig(githubEnv()),
-    frontendUrl: process.env.KIP_FRONTEND_URL || 'http://localhost:5173',
-  });
+  const environment = bootstrapEnvironment();
+  const server = await compose(environment);
   console.log(
-    `KIP github connector: ${process.env.GITHUB_APP_ID && process.env.GITHUB_APP_SLUG ? 'configured' : 'not configured'}`,
+    `KIP github connector: ${environment.githubApp ? 'configured' : 'not configured'}`,
   );
   server.listen(ADMIN_PORT, () => {
     console.log(`KIP API listening on :${ADMIN_PORT}`);

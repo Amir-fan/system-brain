@@ -10,6 +10,9 @@ import { SkillsRuntime } from '../src/core/skill/skill-runtime.ts';
 import { MapSkillRegistry } from '../src/core/skill/skill-registry.ts';
 import { decisionReadinessFixture } from '../src/core/skill/decision-readiness-fixture.ts';
 import type { RunRecord } from '../src/core/runtime/runtime.ports.ts';
+import { ConversationService } from '../src/core/conversation/conversation.service.ts';
+import type { ConversationSession } from '../src/core/conversation/conversation.ts';
+import { UnderstandingService } from '../src/core/understanding/understanding.service.ts';
 
 const svc = new DecisionReadinessService();
 const reqs: DecisionRequirement[] = [
@@ -17,6 +20,18 @@ const reqs: DecisionRequirement[] = [
   { key: 'optional_note', description: 'optional', material: false },
 ];
 const known = (items: Array<[string, unknown]>): KnownContextItem[] => items.map(([key, value]) => ({ key, value, source: 'user' }));
+
+for (const value of [[], ['  '], ['UNKNOWN'], 'UNKNOWN', '  ', ['valid', ' '], ['valid', 'غير متأكدة']]) {
+  test(`canonical readiness rejects empty or unknown value ${JSON.stringify(value)}`, () => {
+    assert.equal(svc.evaluate({ requirements: reqs, known: known([['prior_complete_days', value]]) }).status, 'NEEDS_INFORMATION');
+  });
+}
+
+for (const value of [false, 0, '2026-11-02', ['valid']]) {
+  test(`canonical readiness preserves present value ${JSON.stringify(value)}`, () => {
+    assert.equal(svc.evaluate({ requirements: reqs, known: known([['prior_complete_days', value]]) }).status, 'READY_FOR_DECISION');
+  });
+}
 
 test('A clear but insufficient -> NEEDS_INFORMATION', () => {
   const r = svc.evaluate({ requirements: reqs, known: [] });
@@ -127,7 +142,9 @@ test('J(runtime) not-ready BLOCKS the skill body; K(runtime) ready ALLOWS it', a
   assert.equal(blocked.readiness?.status, 'NEEDS_INFORMATION');
   assert.equal(bodyRan, 0); // body did NOT run
 
-  const allowed = await runtime.execute({ projectId: 'p', actor: 'a', skillId: 'demo.decision-readiness', payload: { context: { prior_complete_days: 6 } } });
+  const allowed = await runtime.execute({ projectId: 'p', actor: 'a', skillId: 'demo.decision-readiness', payload: {
+    context: { prior_complete_days: 6 }, factMeta: { prior_complete_days: { provenance: 'user_answer', certainty: 'CERTAIN' } },
+  } });
   assert.equal(allowed.status, 'completed');
   assert.equal(allowed.readiness?.status, 'READY_FOR_DECISION');
   assert.equal(bodyRan, 1); // body ran exactly once (on the ready path)
@@ -141,9 +158,63 @@ test('C(bounded memory) memory is CONTEXT only: it never closes a material need 
   assert.equal(r.status, 'needs_information');
   assert.equal(r.readiness?.status, 'NEEDS_INFORMATION');
   // ...whereas a value supplied FOR THIS CASE does satisfy it.
-  const withContext = await runtime.execute({ projectId: 'p', actor: 'a', skillId: 'demo.decision-readiness', payload: { context: { prior_complete_days: 4 } } });
+  const withContext = await runtime.execute({ projectId: 'p', actor: 'a', skillId: 'demo.decision-readiness', payload: {
+    context: { prior_complete_days: 4 }, factMeta: { prior_complete_days: { provenance: 'user_answer', certainty: 'CERTAIN' } },
+  } });
   assert.equal(withContext.status, 'completed');
   assert.equal(withContext.readiness?.status, 'READY_FOR_DECISION');
+});
+
+for (const [name, meta] of [
+  ['missing fact metadata', undefined],
+  ['uncertain user answer', { provenance: 'user_answer', certainty: 'UNCERTAIN' }],
+  ['app evidence', { provenance: 'evidence', certainty: 'UNCERTAIN' }],
+  ['memory', { provenance: 'memory', certainty: 'UNCERTAIN' }],
+  ['advisory statement', { provenance: 'user_statement', certainty: 'CERTAIN' }],
+] as const) {
+  test(`admission hardening: static skill readiness rejects ${name}`, async () => {
+    const result = await rt().execute({
+      projectId: 'p', actor: 'a', skillId: decisionReadinessFixture.id,
+      payload: { context: { prior_complete_days: 6 }, ...(meta ? { factMeta: { prior_complete_days: meta } } : {}) },
+    });
+    assert.equal(result.readiness?.status, 'NEEDS_INFORMATION');
+    assert.equal(result.status, 'needs_information');
+  });
+}
+
+test('admission round 2: static readiness revalidates a value after changing skills', async () => {
+  const key = 'observation';
+  const registry = new MapSkillRegistry();
+  for (const type of ['free_text', 'date'] as const) {
+    registry.register({
+      ...decisionReadinessFixture,
+      id: type,
+      requirements: { ...decisionReadinessFixture.requirements, memory: false },
+      readiness: { requirements: [{
+        key, material: true, description: 'Observation', question: { key, wording: 'What did you observe?' }, interaction: { type },
+      }] },
+    });
+  }
+  const sessions = new Map<string, ConversationSession>();
+  const conversation = new ConversationService({
+    persistence: {
+      async create(session) { sessions.set(session.id, session); return session; },
+      async get(_project, _actor, id) { return sessions.get(id) ?? null; },
+      async save(session) { sessions.set(session.id, session); return session; },
+    },
+    understanding: new UnderstandingService(), defaultSkillId: 'free_text',
+    skills: new SkillsRuntime({ persistence: fakePersistence(), registry, readiness: svc }),
+  });
+  const session = await conversation.create('p', 'a', 'private');
+  await conversation.handleMessage('p', 'a', session.id, { text: 'Start' });
+  const description = await conversation.handleMessage('p', 'a', session.id, { text: 'an ordinary note', answers: [{ key, value: 'an ordinary note' }] });
+  assert.equal(description.readiness?.status, 'READY_FOR_DECISION');
+
+  const needsDate = await conversation.handleMessage('p', 'a', session.id, { skillId: 'date', text: 'Continue' });
+  assert.equal(needsDate.readiness?.status, 'NEEDS_INFORMATION');
+  assert.equal(needsDate.interaction?.type, 'date');
+  const hasDate = await conversation.handleMessage('p', 'a', session.id, { skillId: 'date', text: '2026-11-01' });
+  assert.equal(hasDate.readiness?.status, 'READY_FOR_DECISION');
 });
 
 test('K25: a requirement-owned interaction hint is carried into the missing item', () => {

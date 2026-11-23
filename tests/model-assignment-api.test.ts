@@ -10,7 +10,12 @@ import { createModelAssignmentStorage } from '../src/platform/provider/model-ass
 // Only run when admin token + supabase + openrouter test key are present (live-ish API),
 // but these exercise the admin route/auth contract against a real composed server.
 
-const hasAdmin = Boolean(process.env.KIP_PLATFORM_ADMIN_TOKEN);
+const hasAdmin = Boolean(
+  process.env.KIP_PLATFORM_ADMIN_TOKEN
+  && process.env.SUPABASE_URL
+  && process.env.SUPABASE_SECRET_KEY,
+);
+const hasStorage = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY);
 
 test('model-assignment API: admin auth required + assignment CRUD', { skip: !hasAdmin }, async () => {
   const server = await compose({
@@ -70,9 +75,11 @@ test('model-assignment API: admin auth required + assignment CRUD', { skip: !has
   }
 });
 
-test('model-assignment storage writes/reads (unit-ish, direct DB-path when live creds present)', { skip: !process.env.SUPABASE_SECRET_KEY }, async () => {
-  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SECRET_KEY) return;
-  const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY) as unknown as SupabaseDatabase;
+test('model-assignment storage writes/reads (unit-ish, direct DB-path when live creds present)', { skip: !hasStorage }, async () => {
+  const db = createClient(
+    process.env.SUPABASE_URL!,
+    process.env.SUPABASE_SECRET_KEY!,
+  ) as unknown as SupabaseDatabase;
   const storage = createModelAssignmentStorage(db);
   await storage.upsert('chat_assistant', 'openai/gpt-4o-mini');
   const read = await storage.get('chat_assistant');

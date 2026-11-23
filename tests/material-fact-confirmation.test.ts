@@ -18,13 +18,17 @@ import { ConversationService } from '../src/core/conversation/conversation.servi
 import type { ConversationSession } from '../src/core/conversation/conversation.ts';
 import { createFiqhHaydMinimalSkill } from '../src/domain/naqaa/fiqh-hayd-minimal-skill.ts';
 import { DecisionReadinessService } from '../src/core/readiness/readiness.service.ts';
+import { UnderstandingService } from '../src/core/understanding/understanding.service.ts';
 import { APPROVED_SOURCE_TITLES } from '../src/domain/naqaa/fiqh-hayd-contracts.ts';
 import type { SkillExecutionContext, SkillKnowledgePassage } from '../src/core/skill/skill.ts';
+import { MapSkillRegistry } from '../src/core/skill/skill-registry.ts';
+import { SkillsRuntime } from '../src/core/skill/skill-runtime.ts';
+import { handleSkillExecute } from '../src/platform/api/skill-handler.ts';
 
 const P = 'p';
 const ACTOR = 'a';
-const passage = (chunkId: string): SkillKnowledgePassage => ({
-  chunkId, documentId: 'doc-1', sourceId: 'src-approved-1', sourceTitle: APPROVED_SOURCE_TITLES[0], chunkIndex: 1, text: 'نص فقهي معتمد.', score: 0.5,
+const passage = (chunkId: string, text = 'نص فقهي معتمد.'): SkillKnowledgePassage => ({
+  chunkId, documentId: 'doc-1', sourceId: 'src-approved-1', sourceTitle: APPROVED_SOURCE_TITLES[0], chunkIndex: 1, text, score: 0.5,
 });
 
 function fakeStore() {
@@ -43,8 +47,8 @@ function scriptedModel(script: (prompt: string, callOfTurn: number) => string) {
   let turnCalls = 0;
   return {
     prompts,
-    async generateText(input: { message?: string }) {
-      const prompt = String(input.message ?? '');
+    async generateText(input: { instructions?: string; message?: string }) {
+      const prompt = [input.instructions, input.message].filter(Boolean).join('\n\n');
       const firstOfTurn = !prompt.includes('طلبك:');
       if (firstOfTurn) turnCalls = 0;
       turnCalls += 1;
@@ -56,25 +60,75 @@ function scriptedModel(script: (prompt: string, callOfTurn: number) => string) {
 
 const tool = (q: string) => JSON.stringify({ action: 'USE_TOOL', tool: 'search_knowledge', query: q });
 const answer = (text: string) => JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: text, evidenceRefs: ['chunk-a'] });
-const ask = (q: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q });
-const askYesNo = (q: string, factKey?: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q, yesNo: true, ...(factKey ? { factKey } : {}) });
+const ask = (q: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q, factKey: 'requested_fact', answerType: 'free_text' });
+const askYesNo = (q: string, factKey?: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q, yesNo: true, answerType: 'yes_no', ...(factKey ? { factKey } : {}) });
 
-function svc(store: ReturnType<typeof fakeStore>, model: ReturnType<typeof scriptedModel>, mode: 'contextual' | 'private' = 'contextual') {
+test('admission hardening: raw skill execution accepts fact provenance only from a trusted service', async () => {
+  const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
+  const registry = new MapSkillRegistry();
+  registry.register(skill);
+  const persistence = {
+    async getProject(id: string) { return { id, name: 'test', status: 'active' as const, createdAt: '', updatedAt: '' }; },
+    async getMembership(projectId: string, actor: string) {
+      return { projectId, actor, role: actor === 'trusted' ? 'service' as const : 'member' as const, createdAt: '' };
+    },
+    async createRun() {}, async updateRun() {},
+  };
+  let calls = 0;
+  const runtime = new SkillsRuntime({
+    persistence, registry,
+    knowledge: () => ({
+      async resolveSources() { return [{ id: 'src-approved-1', title: APPROVED_SOURCE_TITLES[0] }]; },
+      async search() { return [passage('chunk-a')]; }, async adjacent() { return []; },
+    }),
+    modelGateway: {
+      async generateText({ input }) {
+        if (calls++ % 2 === 0) return { text: tool('الحكم') };
+        const educational = JSON.stringify(input).includes('سؤال تعليمي');
+        return { text: educational ? answer('الطهر هو انقطاع الحيض.') : JSON.stringify({
+          status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['onset'],
+        }) };
+      },
+      async embedTexts() { throw new Error('unexpected embed'); },
+    },
+  });
+  const deps = { boundary: persistence, registry, runtime };
+  const payload = {
+    text: 'ما الحكم؟', context: { onset: 'yesterday' },
+    factMeta: { onset: { certainty: 'CERTAIN', provenance: 'user_answer' } },
+  };
+  const forged = await handleSkillExecute(deps, P, ACTOR, skill.id, { payload });
+  assert.equal(forged.status, 403);
+  assert.equal(calls, 0);
+  const trusted = await handleSkillExecute(deps, P, 'trusted', skill.id, { payload });
+  assert.equal(trusted.status, 200);
+  assert.ok(trusted.ok);
+  assert.equal((trusted.data as { answer?: { label?: string } }).answer?.label, 'hayd');
+  const advisory = await handleSkillExecute(deps, P, ACTOR, skill.id, { payload: { text: payload.text, context: payload.context } });
+  assert.equal(advisory.status, 200);
+  assert.ok(advisory.ok);
+  assert.equal((advisory.data as { answer?: { label?: string } }).answer?.label, undefined);
+  const educational = await handleSkillExecute(deps, P, ACTOR, skill.id, { payload: { text: 'سؤال تعليمي' } });
+  assert.equal(educational.status, 200);
+  assert.ok(educational.ok);
+  assert.equal((educational.data as { answer?: { text?: string } }).answer?.text, 'الطهر هو انقطاع الحيض.');
+});
+
+function svc(
+  store: ReturnType<typeof fakeStore>,
+  model: ReturnType<typeof scriptedModel>,
+  mode: 'contextual' | 'private' = 'contextual',
+  evidence = passage('chunk-a'),
+  understanding: ConstructorParameters<typeof ConversationService>[0]['understanding'] = new UnderstandingService(),
+) {
   const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
   return new ConversationService({
     persistence: store,
-    understanding: {
-      evaluate: async ({ text }) => ({
-        status: 'CLEAR', dialogueAct: 'QUESTION', language: 'ar', issues: [text],
-        references: { resolved: true }, corrections: [], candidates: [], facts: [],
-        ambiguity: { material: false },
-        contextUsed: { userCount: 0, conversationCount: 0, caseCount: 0, scopes: [] },
-      }),
-    },
+    understanding,
     skills: {
       execute: async ({ payload }) => {
         const ctx = { projectId: P, actor: ACTOR, input: payload, knowledge: {
-          async search() { return [passage('chunk-a')]; },
+          async search() { return [evidence]; },
           async resolveSources(t: string[]) { return t.includes(APPROVED_SOURCE_TITLES[0]) ? [{ id: 'src-approved-1', title: APPROVED_SOURCE_TITLES[0] }] : []; },
           async adjacent() { return []; },
         }, model } as unknown as SkillExecutionContext;
@@ -88,6 +142,615 @@ function svc(store: ReturnType<typeof fakeStore>, model: ReturnType<typeof scrip
       },
     },
     defaultSkillId: skill.id,
+  });
+}
+
+function runtimeSvc(
+  store: ReturnType<typeof fakeStore>,
+  model: ReturnType<typeof scriptedModel>,
+  evidence = passage('chunk-a'),
+) {
+  const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
+  const registry = new MapSkillRegistry();
+  registry.register(skill);
+  const persistence = {
+    async getProject(id: string) { return { id, name: 'test', status: 'active' as const, createdAt: '', updatedAt: '' }; },
+    async getMembership(projectId: string, actor: string) { return { projectId, actor, role: 'member' as const, createdAt: '' }; },
+    async createRun() {},
+    async updateRun() {},
+  };
+  const runtime = new SkillsRuntime({
+    persistence,
+    registry,
+    knowledge: () => ({
+      async search() { return [evidence]; },
+      async resolveSources(titles: string[]) {
+        return titles.includes(APPROVED_SOURCE_TITLES[0])
+          ? [{ id: 'src-approved-1', title: APPROVED_SOURCE_TITLES[0] }]
+          : [];
+      },
+      async adjacent() { return []; },
+    }),
+    modelGateway: {
+      async generateText({ instructions, input }) {
+        const request = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+        return model.generateText({
+          ...(instructions ? { instructions } : {}),
+          ...(typeof request.message === 'string' ? { message: request.message } : {}),
+        });
+      },
+      async embedTexts() { throw new Error('unexpected embed'); },
+    },
+  });
+  return new ConversationService({
+    persistence: store,
+    understanding: new UnderstandingService(),
+    skills: {
+      execute: async ({ skillId, payload }) => runtime.execute({ projectId: P, actor: ACTOR, skillId, payload }),
+    },
+    defaultSkillId: skill.id,
+  });
+}
+
+test('Minimal personal fact gate rejects CERTAIN values not admitted as user answers', async () => {
+  const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
+  let calls = 0;
+  const out = await skill.execute({
+    projectId: P,
+    actor: ACTOR,
+    input: {
+      text: 'ما الحكم؟',
+      context: { onset: 'yesterday' },
+      factMeta: { onset: { certainty: 'CERTAIN', provenance: 'user_statement' } },
+    },
+    knowledge: {
+      async resolveSources() { return [{ id: 'src-approved-1', title: APPROVED_SOURCE_TITLES[0] }]; },
+      async search() { return [passage('chunk-a', 'يشترط تأكيد البداية.')]; },
+      async adjacent() { return []; },
+    },
+    model: {
+      async generateText() {
+        return { text: ++calls === 1 ? tool('البداية') : JSON.stringify({
+          status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['onset'],
+        }) };
+      },
+    },
+  } as SkillExecutionContext) as { answer?: { label?: string }; trace?: { status?: string } };
+
+  assert.equal(out.answer?.label, undefined);
+  assert.equal(out.trace?.status, 'INSUFFICIENT_EVIDENCE');
+});
+
+for (const key of ['output_style', 'responseStyle', 'preferred_format']) {
+  test(`final fiqh fix round 1: private admitted presentation key ${key} cannot authorize Minimal`, async () => {
+    const store = fakeStore();
+    const model = scriptedModel((prompt, call) => {
+      if (!prompt.includes(`- ${key} =`)) return JSON.stringify({
+        action: 'TERMINAL', status: 'ASK_USER', question: 'ما تفضيل العرض؟', factKey: key, answerType: 'free_text',
+      });
+      return call === 1
+        ? tool('حكم الحالة')
+        : JSON.stringify({
+          action: 'TERMINAL', status: 'ANSWER', message: 'هذا حيض.', label: 'hayd',
+          evidenceRefs: ['chunk-a'], materialFactKeys: [key],
+        });
+    });
+    const conversation = runtimeSvc(store, model);
+    const session = await conversation.create(P, ACTOR, 'private');
+    await conversation.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+    const response = await conversation.handleMessage(P, ACTOR, session.id, {
+      text: 'مختصر', answers: [{ key, value: 'مختصر' }],
+    });
+    const context = store.rows.get(session.id)!.sessionContext;
+    assert.equal(context.factMeta?.[key]?.certainty, 'CERTAIN');
+    assert.equal(response.answer?.label, undefined);
+    assert.equal(context.lastGroundedResult, undefined);
+  });
+}
+
+test('final transition: a Runtime-backed Minimal ruling persists its validated decision label and exact proof', async () => {
+  const store = fakeStore();
+  const model = scriptedModel((_prompt, call) => call === 1
+    ? tool('حكم البداية')
+    : JSON.stringify({
+        action: 'TERMINAL', status: 'ANSWER', message: 'هذا حيض.', label: 'hayd',
+        evidenceRefs: ['chunk-a'], materialFactKeys: ['onset'],
+      }));
+  const conversation = runtimeSvc(store, model);
+  const session = await conversation.create(P, ACTOR, 'private');
+  const context = store.rows.get(session.id)!.sessionContext;
+  context.facts.onset = 'yesterday';
+  context.factMeta = { onset: { certainty: 'CERTAIN', provenance: 'user_answer', at: '2026-11-01T00:00:00.000Z' } };
+
+  const response = await conversation.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+  assert.equal(response.trace?.decisionLabel, 'hayd');
+  assert.equal(response.answer?.label, 'hayd');
+  assert.deepEqual(store.rows.get(session.id)!.sessionContext.lastGroundedResult, {
+    skillId: 'naqaa.fiqh-hayd-minimal', status: 'ANSWER', decision: 'hayd', explanation: 'هذا حيض.',
+    sourceTitle: APPROVED_SOURCE_TITLES[0], evidenceRefs: ['chunk-a'], materialFactKeys: ['onset'],
+    caseSignature: store.rows.get(session.id)!.sessionContext.lastGroundedResult?.caseSignature,
+  });
+});
+
+test('final follow-up: Runtime-backed Minimal reuses source and why without a model call or stored-result rewrite', async () => {
+  const store = fakeStore();
+  const model = scriptedModel((_prompt, call) => call === 1
+    ? tool('حكم البداية')
+    : JSON.stringify({
+        action: 'TERMINAL', status: 'ANSWER', message: 'هذا حيض.', label: 'hayd',
+        evidenceRefs: ['chunk-a'], materialFactKeys: ['onset'],
+      }));
+  const conversation = runtimeSvc(store, model);
+  const session = await conversation.create(P, ACTOR, 'private');
+  const context = store.rows.get(session.id)!.sessionContext;
+  context.facts.onset = 'yesterday';
+  context.factMeta = { onset: { certainty: 'CERTAIN', provenance: 'user_answer', at: '2026-11-01T00:00:00.000Z' } };
+  await conversation.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+  const original = structuredClone(store.rows.get(session.id)!.sessionContext.lastGroundedResult);
+  assert.equal(model.prompts.length, 2);
+
+  const source = await conversation.handleMessage(P, ACTOR, session.id, { text: 'شنو المصدر؟' });
+  assert.equal(model.prompts.length, 2, 'source reuse must not call the model');
+  assert.equal(source.trace?.status, 'FOLLOWUP_SOURCE');
+  assert.equal(source.trace?.reusedGroundedResult, true);
+  assert.deepEqual(source.trace?.materialFactKeys, ['onset']);
+  assert.match(source.answer?.text ?? '', /المصدر المعتمد/);
+  assert.deepEqual(store.rows.get(session.id)!.sessionContext.lastGroundedResult, original);
+
+  const why = await conversation.handleMessage(P, ACTOR, session.id, { text: 'ليش؟' });
+  assert.equal(model.prompts.length, 2, 'why reuse must not call the model');
+  assert.equal(why.trace?.status, 'FOLLOWUP_WHY');
+  assert.equal(why.answer?.text, 'هذا حيض.');
+  assert.deepEqual(store.rows.get(session.id)!.sessionContext.lastGroundedResult, original);
+});
+
+test('final follow-up: Minimal refuses replay when the stored dependency is no longer confirmed', async () => {
+  const store = fakeStore();
+  const model = scriptedModel((_prompt, call) => call === 1
+    ? tool('حكم البداية')
+    : JSON.stringify({
+        action: 'TERMINAL', status: 'ANSWER', message: 'هذا حيض.', label: 'hayd',
+        evidenceRefs: ['chunk-a'], materialFactKeys: ['onset'],
+      }));
+  const conversation = runtimeSvc(store, model);
+  const session = await conversation.create(P, ACTOR, 'private');
+  const context = store.rows.get(session.id)!.sessionContext;
+  context.facts.onset = 'yesterday';
+  context.factMeta = { onset: { certainty: 'CERTAIN', provenance: 'user_answer', at: '2026-11-01T00:00:00.000Z' } };
+  await conversation.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+  store.rows.get(session.id)!.sessionContext.factMeta!.onset = {
+    certainty: 'UNCERTAIN', provenance: 'user_answer', at: '2026-11-02T00:00:00.000Z',
+  };
+
+  const response = await conversation.handleMessage(P, ACTOR, session.id, { text: 'ليش؟' });
+  assert.ok(model.prompts.length > 2, 'invalid stored proof must fall through to the normal safe path');
+  assert.notEqual(response.trace?.status, 'FOLLOWUP_WHY');
+  assert.equal(store.rows.get(session.id)!.sessionContext.lastGroundedResult, undefined);
+});
+
+test('admission round 6: Conversation never forwards personal verdict text hidden in a Minimal gap status', async () => {
+  const personalGap = JSON.stringify({
+    action: 'TERMINAL', status: 'INSUFFICIENT_EVIDENCE', message: 'هذا حيض شخصيًا.',
+    label: 'hayd', materialFactKeys: ['onset'],
+  });
+  const store = fakeStore();
+  const c = svc(store, scriptedModel(() => personalGap), 'private');
+  const session = await c.create(P, ACTOR, 'private');
+  store.rows.set(session.id, { ...session, sessionContext: {
+    ...session.sessionContext,
+    reconfirmation: { keys: ['legacy_onset'] },
+  } });
+
+  const turn = await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+  assert.equal(turn.status, 'completed');
+  assert.notEqual(turn.message, 'هذا حيض شخصيًا.');
+  assert.equal(turn.answer?.label, undefined);
+  assert.deepEqual(store.rows.get(session.id)!.sessionContext.reconfirmation?.keys, ['legacy_onset']);
+  assert.equal(store.rows.get(session.id)!.sessionContext.lastGroundedResult, undefined);
+});
+
+test('a general question can receive a cited educational answer without a personal ruling label', async () => {
+  const wording = 'الطهر هو انقطاع الحيض.';
+  const evidence = passage('chunk-a', 'الطهر انقطاع الحيض.');
+  const model = scriptedModel((prompt, call) => {
+    if (call === 1) return tool('معنى الطهر');
+    assert.ok(prompt.includes(evidence.text));
+    return answer(wording);
+  });
+  const c = svc(fakeStore(), model, 'private', evidence);
+  const session = await c.create(P, ACTOR, 'private');
+  const turn = await c.handleMessage(P, ACTOR, session.id, { text: 'سؤال عام: ما معنى الطهر؟' });
+  assert.equal(turn.status, 'completed');
+  assert.equal(turn.message, wording);
+  assert.deepEqual(turn.answer?.evidenceIds, ['chunk-a']);
+  assert.equal(turn.answer?.sourceTitle, APPROVED_SOURCE_TITLES[0]);
+  assert.equal(turn.answer?.label, undefined);
+  assert.equal(turn.interaction, undefined);
+  assert.doesNotMatch(model.prompts[0], /label إلزامي مع كل ANSWER/);
+  assert.match(model.prompts[0], /التعليمي العام[^\n]*دون label/);
+});
+
+test('Minimal rejects a cited personal proposal relying on UNCERTAIN onset in Conversation', async () => {
+  const evidence = passage('chunk-a', 'لا يطبق الحكم الشخصي حتى يتأكد وقت بداية الدم.');
+  const model = scriptedModel((_prompt, call) => call === 1 ? tool('وقت البداية') : JSON.stringify({
+    status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'],
+    materialFactKeys: ['last_bleeding_start'],
+  }));
+  const store = fakeStore();
+  const c = svc(store, model, 'contextual', evidence);
+  const session = await c.create(P, ACTOR, 'contextual');
+  const turn = await c.handleMessage(P, ACTOR, session.id, {
+    text: 'ما الحكم؟', appContext: { last_bleeding_start: 'أمس' },
+  });
+  assert.equal(turn.answer?.label, undefined);
+  assert.notEqual(turn.message, 'هذا حيض.');
+  assert.equal(store.rows.get(session.id)?.sessionContext.lastGroundedResult, undefined);
+});
+
+for (const [scenario, keys, certainty, value, permitted, ...provenance] of [
+  ['confirmed material fact', ['onset'], 'CERTAIN', 'yesterday', true],
+  ['uncertain material fact', ['onset'], 'UNCERTAIN', 'yesterday', false],
+  ['unknown material fact', ['onset'], 'UNKNOWN', 'yesterday', false],
+  ['missing certainty', ['onset'], undefined, 'yesterday', false],
+  ['missing value', ['onset'], 'CERTAIN', undefined, false],
+  ['blank value', ['onset'], 'CERTAIN', '   ', false],
+  ['empty collection', ['onset'], 'CERTAIN', [], false],
+  ['blank collection contents', ['onset'], 'CERTAIN', ['  '], false],
+  ['unknown sentinel value', ['onset'], 'CERTAIN', 'UNKNOWN', false],
+  ['unknown collection contents', ['onset'], 'CERTAIN', ['UNKNOWN'], false],
+  ['stored uncertainty option', ['onset'], 'CERTAIN', ['الأول', 'غير متأكدة'], false],
+  ['stored uncertainty phrase', ['onset'], 'CERTAIN', 'ما أدري', false],
+  ['certain user statement', ['onset'], 'CERTAIN', 'yesterday', false, 'user_statement'],
+  ['certain app evidence', ['onset'], 'CERTAIN', 'yesterday', false, 'evidence'],
+  ['certain Memory', ['onset'], 'CERTAIN', 'yesterday', false, 'memory'],
+  ['missing provenance', ['onset'], 'CERTAIN', 'yesterday', false, undefined],
+  ['confirmed false boolean', ['onset'], 'CERTAIN', false, true],
+  ['confirmed zero number', ['onset'], 'CERTAIN', 0, true],
+  ['confirmed date', ['onset'], 'CERTAIN', '2026-11-02', true],
+  ['undeclared dependencies', undefined, 'CERTAIN', 'yesterday', false],
+  ['empty dependencies', [], 'CERTAIN', 'yesterday', false],
+  ['unknown dependency', ['invented'], 'CERTAIN', 'yesterday', false],
+  ['malformed dependency', ['onset', 42], 'CERTAIN', 'yesterday', false],
+  ['padded dependency', [' onset '], 'CERTAIN', 'yesterday', false],
+  ['duplicate dependency', ['onset', 'onset'], 'CERTAIN', 'yesterday', false],
+] as const) {
+  test(`Minimal personal fact gate: ${scenario}`, async () => {
+    const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
+    let calls = 0;
+    const out = await skill.execute({
+      projectId: P, actor: ACTOR,
+      input: { text: 'ما الحكم؟', context: { onset: value, secondary: 'hint' }, factMeta: {
+        onset: { certainty, provenance: provenance.length ? provenance[0] : 'user_answer' }, secondary: { certainty: 'UNCERTAIN', provenance: 'memory' },
+      } },
+      knowledge: {
+        async resolveSources() { return [{ id: 'src-approved-1', title: APPROVED_SOURCE_TITLES[0] }]; },
+        async search() { return [passage('chunk-a', 'يشترط تأكيد البداية.')]; },
+        async adjacent() { return []; },
+      },
+      model: { async generateText() { return { text: ++calls === 1 ? tool('البداية') : JSON.stringify({
+        status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: keys,
+      }) }; } },
+    } as SkillExecutionContext) as { answer?: { text?: string; label?: string }; trace?: { status?: string } };
+    assert.equal(out.answer?.label, permitted ? 'hayd' : undefined);
+    assert.equal(out.trace?.status, permitted ? 'ANSWER' : 'INSUFFICIENT_EVIDENCE');
+    if (!permitted) assert.notEqual(out.answer?.text, 'هذا حيض.');
+  });
+}
+
+test('Minimal clarification binds onset and permits a personal answer on the second turn', async () => {
+  const store = fakeStore();
+  const model = scriptedModel((prompt, call) => {
+    if (!prompt.includes('- onset =')) return JSON.stringify({
+      status: 'ASK_USER', question: 'متى بدأ الدم؟', factKey: 'onset', answerType: 'date',
+    });
+    assert.match(prompt, /- onset = "2026-11-02" \(CERTAIN\/user_answer\)/);
+    return call === 1 ? tool('بداية الدم') : JSON.stringify({
+      status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['onset'],
+    });
+  });
+  const c = svc(store, model);
+  const session = await c.create(P, ACTOR, 'contextual');
+  const first = await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+  assert.equal(first.status, 'needs_information');
+  assert.equal(store.rows.get(session.id)?.sessionContext.pendingKey, 'onset');
+  const second = await c.handleMessage(P, ACTOR, session.id, { text: '2026-11-02' });
+  const state = store.rows.get(session.id)!.sessionContext;
+  assert.equal(state.facts.onset, '2026-11-02');
+  assert.equal(state.factMeta?.onset.certainty, 'CERTAIN');
+  assert.equal(state.facts.minimal_followup, undefined);
+  assert.equal(second.status, 'completed');
+  assert.equal(second.answer?.label, 'hayd');
+  assert.deepEqual(second.answer?.evidenceIds, ['chunk-a']);
+});
+
+test('Minimal numeric clarification binds a confirmed scalar and permits a personal answer', async () => {
+  const store = fakeStore();
+  const model = scriptedModel((prompt, call) => {
+    if (!prompt.includes('- duration_days =')) return JSON.stringify({
+      status: 'ASK_USER', question: 'كم يوم استمر الدم؟', factKey: 'duration_days', answerType: 'number',
+    });
+    assert.match(prompt, /- duration_days = 6 \(CERTAIN\/user_answer\)/);
+    return call === 1 ? tool('مدة الدم') : JSON.stringify({
+      status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['duration_days'],
+    });
+  });
+  const c = svc(store, model);
+  const session = await c.create(P, ACTOR, 'contextual');
+  const first = await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+  assert.equal(first.status, 'needs_information');
+  assert.equal(first.interaction?.type, 'number');
+  const second = await c.handleMessage(P, ACTOR, session.id, { text: '6' });
+  const state = store.rows.get(session.id)!.sessionContext;
+  assert.equal(state.facts.duration_days, 6);
+  assert.equal(state.factMeta?.duration_days.certainty, 'CERTAIN');
+  assert.equal(second.answer?.label, 'hayd');
+  assert.deepEqual(second.answer?.evidenceIds, ['chunk-a']);
+});
+
+for (const [question, answerType, directAnswer, expectedValue] of [
+  ['What does purity mean?', 'free_text', '2026-11-02', '2026-11-02'],
+  ['ما معنى الطهر', 'free_text', '2026-11-02', '2026-11-02'],
+  ['كم يوم أحتاج بعد 6 أيام', 'number', '٦', 6],
+  ['السلام عليكم، كم يوم أحتاج بعد 6 أيام', 'number', '٦', 6],
+  ['أحتاج أنتظر ٦ أيام؟ 🙏', 'number', '٦', 6],
+  ['‘What does purity mean?’', 'free_text', '2026-11-02', '2026-11-02'],
+  ['I mean 6?', 'number', '6', 6],
+  ['I mean 6?.', 'number', '٦', 6],
+] as const) {
+  test(`Minimal pending material fact is not answered by an unrelated question: ${question}`, async () => {
+    const store = fakeStore();
+    const model = scriptedModel((prompt, call) => {
+      if (!prompt.includes('المساعد:')) return JSON.stringify({
+        status: 'ASK_USER', question: 'ما المعلومة المطلوبة؟', factKey: 'observation', answerType,
+      });
+      return call === 1 ? tool('الحكم') : JSON.stringify({
+        status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['observation'],
+      });
+    });
+    const c = svc(store, model);
+    const session = await c.create(P, ACTOR, 'contextual');
+    assert.equal((await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' })).status, 'needs_information');
+    const unrelated = await c.handleMessage(P, ACTOR, session.id, { text: question });
+    const state = store.rows.get(session.id)!.sessionContext;
+    assert.equal(state.facts.observation, undefined);
+    assert.equal(state.factMeta?.observation, undefined);
+    assert.equal(state.pendingKey, 'observation');
+    assert.equal(state.pendingInteraction?.type, answerType);
+    assert.equal(unrelated.understanding.dialogueAct, 'QUESTION');
+    assert.equal(unrelated.answer?.label, undefined);
+    const answered = await c.handleMessage(P, ACTOR, session.id, {
+      text: directAnswer, answers: [{ key: 'observation', value: expectedValue }],
+    });
+    assert.equal(store.rows.get(session.id)!.sessionContext.facts.observation, expectedValue);
+    assert.equal(answered.answer?.label, 'hayd');
+  });
+}
+
+for (const [question, answerType] of [
+  ['ما لون الدم', 'free_text'],
+  ['السلام عليكم كم يوم أحتاج بعد 6 أيام', 'number'],
+  ['Could I wait 6 days', 'number'],
+] as const) {
+  test(`contract admission ignores a compatible value inside an unlisted question: ${question}`, async () => {
+    const store = fakeStore();
+    const model = scriptedModel((prompt, call) => {
+      if (!prompt.includes('المساعد:')) return JSON.stringify({
+        status: 'ASK_USER', question: 'ما المعلومة المطلوبة؟', factKey: 'observation', answerType,
+      });
+      return call === 1 ? tool('الحكم') : JSON.stringify({
+        status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['observation'],
+      });
+    });
+    const c = svc(store, model);
+    const session = await c.create(P, ACTOR, 'contextual');
+    assert.equal((await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' })).status, 'needs_information');
+
+    const turn = await c.handleMessage(P, ACTOR, session.id, { text: question });
+    const state = store.rows.get(session.id)!.sessionContext;
+    assert.equal(state.facts.observation, undefined);
+    assert.equal(state.factMeta?.observation, undefined);
+    assert.equal(state.pendingKey, 'observation');
+    assert.equal(turn.answer?.label, undefined);
+  });
+}
+
+test('contract admission is safe even when Understanding misclassifies a scalar question as a statement', async () => {
+  const store = fakeStore();
+  const model = scriptedModel((prompt, call) => {
+    if (!prompt.includes('المساعد:')) return JSON.stringify({
+      status: 'ASK_USER', question: 'كم يوم؟', factKey: 'duration_days', answerType: 'number',
+    });
+    return call === 1 ? tool('الحكم') : JSON.stringify({
+      status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['duration_days'],
+    });
+  });
+  const misclassifyingUnderstanding: ConstructorParameters<typeof ConversationService>[0]['understanding'] = {
+    async evaluate({ text }) {
+      return {
+        status: 'CLEAR', dialogueAct: 'STATEMENT', language: 'en', issues: [text],
+        references: { resolved: true }, corrections: [], facts: [], candidates: [{
+          kind: 'duration', value: 6, unit: 'day', originalText: '6 days', certainty: 'CERTAIN', provenance: 'user_statement',
+        }],
+        ambiguity: { material: false },
+        contextUsed: { userCount: 0, conversationCount: 0, caseCount: 0, scopes: [] },
+      };
+    },
+  };
+  const c = svc(store, model, 'contextual', passage('chunk-a'), misclassifyingUnderstanding);
+  const session = await c.create(P, ACTOR, 'contextual');
+  await c.handleMessage(P, ACTOR, session.id, { text: 'start' });
+
+  const turn = await c.handleMessage(P, ACTOR, session.id, { text: 'Could I wait 6 days' });
+  const state = store.rows.get(session.id)!.sessionContext;
+  assert.equal(state.facts.duration_days, undefined);
+  assert.equal(state.factMeta?.duration_days, undefined);
+  assert.equal(turn.answer?.label, undefined);
+});
+
+for (const confirmation of ['أي نعم', 'إي نعم'] as const) {
+  test(`a pending yes/no contract accepts the Gulf Arabic confirmation ${confirmation}`, async () => {
+    const store = fakeStore();
+    const model = scriptedModel((prompt, call) => {
+      if (!prompt.includes('- bleeding_stopped =')) return JSON.stringify({
+        status: 'ASK_USER', question: 'هل توقف الدم؟', factKey: 'bleeding_stopped', yesNo: true, answerType: 'yes_no',
+      });
+      return call === 1 ? tool('الحكم') : JSON.stringify({
+        status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['bleeding_stopped'],
+      });
+    });
+    const c = svc(store, model);
+    const session = await c.create(P, ACTOR, 'contextual');
+    await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+
+    const turn = await c.handleMessage(P, ACTOR, session.id, { text: confirmation });
+    const state = store.rows.get(session.id)!.sessionContext;
+    assert.equal(state.facts.bleeding_stopped, true);
+    assert.equal(state.factMeta?.bleeding_stopped?.certainty, 'CERTAIN');
+    assert.equal(state.factMeta?.bleeding_stopped?.provenance, 'user_answer');
+    assert.equal(turn.answer?.label, 'hayd');
+  });
+}
+
+test('raw free text cannot become a confirmed material fact without a structured answer', async () => {
+  const store = fakeStore();
+  const model = scriptedModel((prompt, call) => {
+    if (!prompt.includes('المساعد:')) return JSON.stringify({
+      status: 'ASK_USER', question: 'صفي ما حدث.', factKey: 'observation', answerType: 'free_text',
+    });
+    return call === 1 ? tool('الحكم') : JSON.stringify({
+      status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['observation'],
+    });
+  });
+  const c = svc(store, model);
+  const session = await c.create(P, ACTOR, 'contextual');
+  await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+
+  const turn = await c.handleMessage(P, ACTOR, session.id, { text: 'ما نزل دم' });
+  const state = store.rows.get(session.id)!.sessionContext;
+  assert.equal(state.facts.observation, undefined);
+  assert.equal(state.factMeta?.observation, undefined);
+  assert.equal(turn.answer?.label, undefined);
+});
+
+test('structured free text is explicit intent and may confirm the active material fact', async () => {
+  const store = fakeStore();
+  const model = scriptedModel((prompt, call) => {
+    if (!prompt.includes('- observation =')) return JSON.stringify({
+      status: 'ASK_USER', question: 'صفي ما حدث.', factKey: 'observation', answerType: 'free_text',
+    });
+    return call === 1 ? tool('الحكم') : JSON.stringify({
+      status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['observation'],
+    });
+  });
+  const c = svc(store, model);
+  const session = await c.create(P, ACTOR, 'contextual');
+  await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+
+  const turn = await c.handleMessage(P, ACTOR, session.id, {
+    text: 'ما نزل دم', answers: [{ key: 'observation', value: 'ما نزل دم' }],
+  });
+  const state = store.rows.get(session.id)!.sessionContext;
+  assert.equal(state.facts.observation, 'ما نزل دم');
+  assert.equal(state.factMeta?.observation?.certainty, 'CERTAIN');
+  assert.equal(state.factMeta?.observation?.provenance, 'user_answer');
+  assert.equal(turn.answer?.label, 'hayd');
+});
+
+for (const [answerType, reply, expectedValue] of [
+  ['free_text', 'ما نزل دم', 'ما نزل دم'],
+  ['duration', 'ما نزل دم لمدة ٦ أيام', '٦ أيام'],
+] as const) {
+  test(`Minimal pending ${answerType} accepts an explicit structured Arabic negative reply`, async () => {
+    const store = fakeStore();
+    const model = scriptedModel((prompt, call) => {
+      if (!prompt.includes('- observation =')) return JSON.stringify({
+        status: 'ASK_USER', question: 'ما المعلومة المطلوبة؟', factKey: 'observation', answerType,
+      });
+      return call === 1 ? tool('الحكم') : JSON.stringify({
+        status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['observation'],
+      });
+    });
+    const c = svc(store, model);
+    const session = await c.create(P, ACTOR, 'contextual');
+    assert.equal((await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' })).status, 'needs_information');
+    const answered = await c.handleMessage(P, ACTOR, session.id, {
+      text: reply, answers: [{ key: 'observation', value: expectedValue }],
+    });
+    const state = store.rows.get(session.id)!.sessionContext;
+    assert.equal(answered.understanding.dialogueAct, 'STATEMENT');
+    assert.equal(state.facts.observation, expectedValue);
+    assert.equal(state.factMeta?.observation?.certainty, 'CERTAIN');
+    assert.equal(answered.answer?.label, 'hayd');
+  });
+}
+
+for (const [scenario, type, value, expectedValue, certainty, expectedLabel] of [
+  ['mixed selections', 'multiple_choice', ['الأول', 'غير متأكدة'], 'UNKNOWN', 'UNKNOWN', undefined],
+  ['uncertainty only', 'multiple_choice', ['غير متأكدة'], 'UNKNOWN', 'UNKNOWN', undefined],
+  ['all real selections', 'multiple_choice', ['الأول', 'الثاني'], ['الأول', 'الثاني'], 'CERTAIN', 'hayd'],
+  ['single selection', 'single_choice', 'الأول', 'الأول', 'CERTAIN', 'hayd'],
+] as const) {
+  test(`Minimal structured material answer: ${scenario}`, async () => {
+    const store = fakeStore();
+    const model = scriptedModel((prompt, call) => {
+      if (!prompt.includes('المساعد:')) return JSON.stringify({
+        status: 'ASK_USER', question: 'أي وصف ينطبق؟', factKey: 'observation', answerType: type, options: ['الأول', 'الثاني'],
+      });
+      return call === 1 ? tool('الحكم') : JSON.stringify({
+        status: 'ANSWER', message: 'هذا حيض.', label: 'hayd', evidenceRefs: ['chunk-a'], materialFactKeys: ['observation'],
+      });
+    });
+    const c = svc(store, model);
+    const session = await c.create(P, ACTOR, 'contextual');
+    const first = await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+    assert.equal(first.interaction?.key, 'observation');
+    assert.equal(first.interaction?.type, type);
+    assert.deepEqual(first.interaction?.options, ['الأول', 'الثاني', 'غير متأكدة']);
+    const answered = await c.handleMessage(P, ACTOR, session.id, {
+      text: 'ما معنى الطهر؟', answers: [{ key: 'observation', value }],
+    });
+    const state = store.rows.get(session.id)!.sessionContext;
+    assert.deepEqual(state.facts.observation, expectedValue);
+    assert.equal(state.factMeta?.observation?.certainty, certainty);
+    assert.equal(answered.answer?.label, expectedLabel);
+  });
+}
+
+for (const answerType of [undefined, '', 'numeric', 42, { type: 'number' }, ['number']]) {
+  test(`Minimal rejects a material question with invalid answer type ${JSON.stringify(answerType)}`, async () => {
+    const store = fakeStore();
+    const c = svc(store, scriptedModel(() => JSON.stringify({
+      status: 'ASK_USER', question: 'كم يوم؟', factKey: 'duration_days', answerType,
+    })));
+    const session = await c.create(P, ACTOR, 'contextual');
+    const turn = await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+    assert.equal(turn.interaction, undefined);
+    assert.equal(store.rows.get(session.id)?.sessionContext.pendingKey, undefined);
+  });
+}
+
+test('Minimal rejects a categorical material question without choices', async () => {
+  const store = fakeStore();
+  const c = svc(store, scriptedModel(() => JSON.stringify({
+    status: 'ASK_USER', question: 'ما اللون؟', factKey: 'colour', answerType: 'single_choice',
+  })));
+  const session = await c.create(P, ACTOR, 'contextual');
+  const turn = await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+  assert.equal(turn.interaction, undefined);
+  assert.equal(store.rows.get(session.id)?.sessionContext.pendingKey, undefined);
+});
+
+for (const key of [undefined, '', '   ', 42, ['onset'], 'a'.repeat(61), '__proto__', 'constructor', 'minimal_followup']) {
+  test(`Minimal rejects a material question with invalid fact key ${JSON.stringify(key)}`, async () => {
+    const model = scriptedModel(() => JSON.stringify({ status: 'ASK_USER', question: 'متى بدأ الدم؟', factKey: key, answerType: 'date' }));
+    const store = fakeStore();
+    const c = svc(store, model);
+    const session = await c.create(P, ACTOR, 'contextual');
+    const turn = await c.handleMessage(P, ACTOR, session.id, { text: 'ما الحكم؟' });
+    assert.notEqual(turn.status, 'needs_information');
+    assert.equal(turn.interaction, undefined);
+    assert.equal(store.rows.get(session.id)?.sessionContext.pendingKey, undefined);
+    assert.equal(turn.answer?.label, undefined);
   });
 }
 
@@ -210,4 +873,33 @@ test('4C/G: private mode — appContext facts never reach the model (privacy unc
   assert.ok(!/last_bleeding_start = /.test(prompt), 'appContext fact absent in private');
   assert.ok(!/date_of_birth = /.test(prompt), 'personal context absent in private');
   assert.ok(!/\(UNCERTAIN\/evidence\)/.test(prompt), 'no app-context provenance tags leak in private');
+});
+
+test('the corrected bleeding start reaches the skill as a confirmed date and supersedes the prior result', async () => {
+  const store = fakeStore();
+  const model = scriptedModel(() => ask('متى توقف الدم؟'));
+  const c = svc(store, model);
+  const session = await c.create(P, ACTOR, 'contextual');
+  const at = '2026-11-01T00:00:00.000Z';
+  store.rows.set(session.id, {
+    ...session,
+    sessionContext: {
+      ...session.sessionContext,
+      facts: { last_bleeding_start: '2026-11-01' },
+      factMeta: { last_bleeding_start: {
+        provenance: 'user_answer', certainty: 'CERTAIN', at,
+        admission: { skillId: 'naqaa.fiqh-hayd-minimal', interaction: { type: 'date' } },
+      } },
+      lastGroundedResult: { skillId: 'naqaa.fiqh-hayd-minimal', status: 'DECIDED', evidenceRefs: ['chunk-old'] },
+    },
+  });
+
+  const turn = await c.handleMessage(P, ACTOR, session.id, { text: 'لا، قصدي 2026-11-02' });
+  const stored = store.rows.get(session.id)!.sessionContext;
+  const knownFact = model.prompts[0].split('\n').find((line) => line.startsWith('- last_bleeding_start = '));
+  assert.equal(knownFact, '- last_bleeding_start = "2026-11-02" (CERTAIN/user_answer)');
+  assert.equal(stored.facts.last_bleeding_start, '2026-11-02');
+  assert.equal(stored.lastGroundedResult, undefined);
+  assert.equal(turn.caseState?.groundedResult, 'invalidated');
+  assert.deepEqual(stored.factMeta?.last_bleeding_start.superseded, [{ value: '2026-11-01', at }]);
 });

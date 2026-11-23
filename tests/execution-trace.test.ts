@@ -86,7 +86,7 @@ const gatewayOk = (): ModelGateway =>
 // Stage 4B — the runtime MUST forward the Skill's structured-output contract and
 // reasoning hint to the Model Gateway verbatim. Dropping them silently turned
 // flexible/required skills into plain-text calls (observed: empty structured in prod).
-test('K28/forwarding: responseFormat + reasoning reach the Model Gateway verbatim', async () => {
+test('K28/forwarding: instructions + responseFormat + reasoning reach the Model Gateway verbatim', async () => {
   const seen: ModelGatewayInput[] = [];
   const gateway = {
     generateText: async (i: ModelGatewayInput): Promise<ModelGatewayOutput> => {
@@ -98,12 +98,13 @@ test('K28/forwarding: responseFormat + reasoning reach the Model Gateway verbati
   const skill = skillWith({
     id: 't.forward', model: true,
     execute: async (ctx) => {
-      await ctx.model!.generateText({ workload: 'knowledge_answer', message: 'x', responseFormat: fmt, reasoning: 'off' });
+      await ctx.model!.generateText({ workload: 'knowledge_answer', instructions: 'trusted rules', message: 'x', responseFormat: fmt, reasoning: 'off' });
       return { trace: { status: 'ANSWER', acceptedEvidenceRefs: ['c1'], sourceSupport: 'SUPPORTED' } };
     },
   });
   await runtimeFor(skill, { persistence: fakePersistence(), modelGateway: gateway }).execute({ ...input, skillId: 't.forward' });
   assert.equal(seen.length, 1);
+  assert.equal(seen[0].instructions, 'trusted rules', 'trusted instructions forwarded separately');
   assert.deepEqual(seen[0].responseFormat, fmt, 'structured-output contract forwarded');
   assert.equal(seen[0].reasoning, 'off', 'reasoning hint forwarded');
 });

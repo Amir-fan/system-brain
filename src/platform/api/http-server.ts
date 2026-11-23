@@ -7,7 +7,7 @@
  * @purpose Minimal Node-native HTTP listener for the KIP API (project + admin routes).
  */
 
-import type { Server } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createServer } from 'node:http';
 import { handleInvoke } from './api-handler.ts';
 import type { TokenActorMap } from './auth.ts';
@@ -88,6 +88,11 @@ import type { ActorAuthenticator } from './actor-authenticator.ts';
 import { UnauthenticatedError } from './actor-authenticator.ts';
 import type { ProjectDiscoveryStorage } from './project-discovery.ts';
 import { handleListMyProjects } from './project-discovery.ts';
+import {
+  CyclePredictionRequestFailure,
+  handleCyclePredictionRequest,
+  type CyclePredictionApiDeps,
+} from './cycle-prediction-handler.ts';
 
 export interface HttpApiDeps {
   runtime: Pick<import('../../core/runtime/runtime.service.ts').RuntimeService, 'execute'>;
@@ -106,6 +111,7 @@ export interface HttpApiDeps {
   understanding?: UnderstandingApiDeps;
   skills?: SkillsApiDeps;
   conversation?: ConversationApiDeps;
+  cyclePrediction?: CyclePredictionApiDeps;
   admin?: {
     storage: ProviderStorage;
     adminApi: AdminProviderApiDeps;
@@ -121,10 +127,18 @@ export interface HttpApiDeps {
 const ROUTE = /^\/v1\/projects\/([^/]+)\/runs$/;
 const SOURCES_RE = /^\/v1\/projects\/([^/]+)\/sources(?:\/([^/]+))?$/;
 const MY_PROJECTS_RE = /^\/v1\/projects$/;
+const CYCLE_PREDICTION_RE = /^\/v1\/projects\/([^/]+)\/naqaa\/cycle-predictions$/;
 const ADMIN_ROUTE = /^\/v1\/admin\/providers(?:\/([^/]+)(?:\/(test|revoke|models))?)?$/;
 
-export function createHttpApi(deps: HttpApiDeps): Server {
-  return createServer(async (req, res) => {
+export type HttpApiHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+
+/**
+ * Framework-neutral Node request handler. Local development wraps this in a
+ * `Server`; serverless adapters invoke it directly so every deployment target
+ * crosses the same authentication and authorization boundary.
+ */
+export function createHttpApiHandler(deps: HttpApiDeps): HttpApiHandler {
+  return async (req, res) => {
     try {
       const url = req.url ?? '';
       if (url.startsWith('/v1/admin')) {
@@ -139,7 +153,11 @@ export function createHttpApi(deps: HttpApiDeps): Server {
     } catch {
       return sendJson(res, 500, { ok: false, status: 500, error: { category: 'runtime', message: 'internal error' } });
     }
-  });
+  };
+}
+
+export function createHttpApi(deps: HttpApiDeps): Server {
+  return createServer(createHttpApiHandler(deps));
 }
 
 async function handleProject(
@@ -155,6 +173,10 @@ async function handleProject(
     if (!actor) return;
     const result = await handleListMyProjects(deps.projects, actor);
     return sendJson(res, result.status, { ok: result.ok, status: result.status, ...(result.ok ? { data: result.data } : { error: result.error }) } as ApiResult);
+  }
+  const cyclePredictionMatch = CYCLE_PREDICTION_RE.exec(url.split('?')[0]);
+  if (cyclePredictionMatch) {
+    return handleCyclePredictionRoute(req, res, cyclePredictionMatch[1], deps);
   }
   if (url.includes('/chunks')) {
     return handleChunks(req, res, url, deps);
@@ -220,6 +242,30 @@ async function handleProject(
     request: body as never,
   });
   return sendJson(res, result.status, result);
+}
+
+async function handleCyclePredictionRoute(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  encodedProjectId: string,
+  deps: HttpApiDeps,
+): Promise<void> {
+  if (req.method !== 'POST' || !deps.cyclePrediction) return notFound(res);
+  let projectId: string;
+  try {
+    projectId = decodeURIComponent(encodedProjectId);
+  } catch {
+    return notFound(res);
+  }
+  const actor = await resolveActor(req, res, deps);
+  if (!actor) return;
+  const result = await handleCyclePredictionRequest(
+    deps.cyclePrediction,
+    projectId,
+    actor,
+    () => readCyclePredictionJson(req),
+  );
+  return sendSourceResult(res, result);
 }
 
 /** Authenticate via the canonical ActorAuthenticator; writes 401 and returns null on failure.
@@ -923,6 +969,65 @@ function readJson(req: import('node:http').IncomingMessage): Promise<unknown> {
       }
     });
     req.on('error', reject);
+  });
+}
+
+const MAX_CYCLE_PREDICTION_BODY_CHARACTERS = 1_000_000;
+
+function readCyclePredictionJson(req: import('node:http').IncomingMessage): Promise<unknown> {
+  const contentType = req.headers['content-type'];
+  if (typeof contentType !== 'string'
+    || contentType.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+    return Promise.reject(new CyclePredictionRequestFailure());
+  }
+  if (req.destroyed || req.aborted) {
+    return Promise.reject(new Error('request stream unavailable'));
+  }
+
+  return new Promise((resolve, reject) => {
+    let data = '';
+    let decodedCharacters = 0;
+    let settled = false;
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => {
+      if (settled) return;
+      decodedCharacters += chunk.length;
+      if (decodedCharacters > MAX_CYCLE_PREDICTION_BODY_CHARACTERS) {
+        settled = true;
+        data = '';
+        reject(new CyclePredictionRequestFailure());
+        return;
+      }
+      data += chunk;
+    });
+    req.on('end', () => {
+      if (settled) return;
+      settled = true;
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        data = '';
+        reject(new CyclePredictionRequestFailure());
+      }
+    });
+    req.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      data = '';
+      reject(error);
+    });
+    req.on('aborted', () => {
+      if (settled) return;
+      settled = true;
+      data = '';
+      reject(new Error('request stream aborted'));
+    });
+    req.on('close', () => {
+      if (settled || req.readableEnded) return;
+      settled = true;
+      data = '';
+      reject(new Error('request stream closed'));
+    });
   });
 }
 

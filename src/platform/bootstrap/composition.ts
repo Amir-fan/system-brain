@@ -18,8 +18,8 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
-import type { Server } from 'node:http';
-import { createHttpApi } from '../api/http-server.ts';
+import { createServer, type Server } from 'node:http';
+import { createHttpApiHandler, type HttpApiHandler } from '../api/http-server.ts';
 import { SupabaseActorAuthenticator } from '../api/supabase-authenticator.ts';
 import { StaticTokenAuthenticator } from '../api/static-authenticator.ts';
 import { CompositeActorAuthenticator } from '../api/composite-authenticator.ts';
@@ -93,6 +93,10 @@ export interface BootstrapEnv {
 }
 
 export async function compose(opts: BootstrapEnv): Promise<Server> {
+  return createServer(await composeHttpHandler(opts));
+}
+
+export async function composeHttpHandler(opts: BootstrapEnv): Promise<HttpApiHandler> {
   const rawClient = createClient(opts.supabaseUrl, opts.supabaseSecretKey);
   const db = rawClient as unknown as SupabaseDatabase;
   const persistence = createSupabaseRuntimePersistence(db);
@@ -282,9 +286,10 @@ export async function compose(opts: BootstrapEnv): Promise<Server> {
   });
 
   const runtime = new RuntimeService(persistence, registry);
-  return createHttpApi({
+  return createHttpApiHandler({
     runtime,
     authenticator,
+    cyclePrediction: { boundary: persistence },
     projects: projectDiscovery,
     sources: {
       storage: sourceStorage,

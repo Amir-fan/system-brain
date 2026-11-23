@@ -89,7 +89,12 @@ export async function handleConversationMessage(
     return ok(response);
   } catch (e) {
     if (e instanceof ConversationFailure) {
-      return fail(e.message, 'conversation', e.code === 'CONVERSATION_NOT_FOUND' ? 404 : 400, e.code);
+      const status = e.code === 'CONVERSATION_NOT_FOUND'
+        ? 404
+        : e.code === 'CONVERSATION_WRITE_CONFLICT'
+          ? 409
+          : 400;
+      return fail(e.message, 'conversation', status, e.code);
     }
     // Provider/transport failure = temporary infrastructure problem, NOT a domain verdict:
     // reported as retryable, with no provider name, stack trace or HTTP internals exposed.
@@ -122,6 +127,13 @@ export async function handleSaveConversationEvaluation(
   const note = typeof body.note === 'string' && body.note.trim() ? body.note.trim() : undefined;
   const runId = typeof body.runId === 'string' && body.runId ? body.runId : undefined;
   try {
+    const actorSubject = auth.membership.role === 'service' ? undefined : actor;
+    if (!await deps.evaluation.storage.conversationAccessible(projectId, conversationId, actorSubject)) {
+      return fail('evaluation target not found', 'not_found', 404, 'EVALUATION_TARGET_NOT_FOUND');
+    }
+    if (runId && !await deps.evaluation.storage.runAccessible(projectId, runId, actorSubject)) {
+      return fail('evaluation target not found', 'not_found', 404, 'EVALUATION_TARGET_NOT_FOUND');
+    }
     const record = await deps.evaluation.storage.save({
       id: crypto.randomUUID(),
       projectId,
@@ -134,8 +146,8 @@ export async function handleSaveConversationEvaluation(
       createdAt: new Date().toISOString(),
     });
     return ok({ id: record.id, ...(record.problemCategory ? { problemCategory: record.problemCategory } : {}) }, 201);
-  } catch (e) {
-    return fail(e instanceof Error ? e.message : 'تعذر حفظ التقييم', 'runtime', 500);
+  } catch {
+    return fail('تعذر حفظ التقييم', 'runtime', 500);
   }
 }
 
@@ -151,8 +163,8 @@ export async function handleListConversationEvaluations(
   try {
     const items = await deps.evaluation.storage.listRecent(projectId, actor, 10);
     return ok(items);
-  } catch (e) {
-    return fail(e instanceof Error ? e.message : 'تعذر جلب التقييمات', 'runtime', 500);
+  } catch {
+    return fail('تعذر جلب التقييمات', 'runtime', 500);
   }
 }
 

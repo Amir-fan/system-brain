@@ -66,8 +66,8 @@ function staleAnchoringModel() {
   let turnCalls = 0;
   return {
     calls,
-    async generateText(input: { message?: string }) {
-      const prompt = String(input.message ?? '');
+    async generateText(input: { instructions?: string; message?: string }) {
+      const prompt = [input.instructions, input.message].filter(Boolean).join('\n\n');
       calls.push(prompt);
       const idx = prompt.lastIndexOf('\nالمحادثة:\n');
       const convo = idx >= 0 ? prompt.slice(idx + '\nالمحادثة:\n'.length) : '';
@@ -100,9 +100,8 @@ function staleAnchoringModel() {
   };
 }
 
-// The scripted model cannot emit caseFacts (it is a model stub). The service wrapper
-// below binds the established observation fact on behalf of the skill for the
-// 'رأيت السائل الساعة 9' turn, mirroring what a domain skill does when it binds a fact.
+// The service wrapper emits an advisory caseFacts value to prove it cannot change an
+// observation the user supplied through the declared answer control.
 
 function svcWith(store: ReturnType<typeof fakeStore>, model: ReturnType<typeof staleAnchoringModel>) {
   const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
@@ -135,13 +134,12 @@ function svcWith(store: ReturnType<typeof fakeStore>, model: ReturnType<typeof s
           ...(out.answer ? { answer: out.answer } : {}),
           ...(out.trace ? { trace: out.trace } : {}),
           ...(out.caseFacts ? { caseFacts: out.caseFacts } : {}),
-          // The skill binds the observation fact it derived from this turn's statement.
-          ...(/رأيت السائل الساعة/.test(text) ? { caseFacts: { time_of_observation: '9' } } : {}),
+          ...(/رأيت السائل الساعة/.test(text) ? { caseFacts: { time_of_observation: '08:00' } } : {}),
         } as never;
       },
     },
     defaultSkillId: skill.id,
-    interactionsFor: () => ({ time_of_observation: { type: 'free_text' } }),
+    interactionsFor: () => ({ time_of_observation: { type: 'time' } }),
   });
 }
 
@@ -179,12 +177,12 @@ test('stale-turn regression: A/B/C/D/E — new question is the current task; fol
   assert.match(t4.message, /[مصدر|كتاب|فقه]/, 'D: source follow-up is contextual');
 
   // E — a correction supersedes the prior fact. First establish the fact, then correct it.
-  const t5a = await c.handleMessage('p', 'a', s.id, { text: 'رأيت السائل الساعة 9' });
+  const t5a = await c.handleMessage('p', 'a', s.id, { text: 'رأيت السائل الساعة 9', answers: [{ key: 'time_of_observation', value: '09:00' }] });
   assert.equal(t5a.status, 'completed');
   const sessPre = store.rows.get(s.id)!;
-  assert.equal(String(sessPre.sessionContext.facts.time_of_observation), '9', 'E setup: fact established');
+  assert.equal(sessPre.sessionContext.facts.time_of_observation, '09:00', 'E setup: fact established');
   const t5 = await c.handleMessage('p', 'a', s.id, { text: 'لا قصدي كانت الساعة 10' });
   assert.equal(t5.status, 'completed');
   const sess = store.rows.get(s.id)!;
-  assert.match(String(sess.sessionContext.facts.time_of_observation), /10/, 'E: correction superseded the prior fact');
+  assert.equal(sess.sessionContext.facts.time_of_observation, '10:00', 'E: correction superseded the prior fact');
 });

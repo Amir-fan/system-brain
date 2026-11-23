@@ -127,7 +127,7 @@ describe('K25 fiqh skill — source-grounded reasoning', () => {
           citations: ['chunk-7'],
         }],
       }),
-      { context: { bleeding_cessation: 'توقف تمامًا' } },
+      { context: { bleeding_cessation: true }, factMeta: { bleeding_cessation: { certainty: 'CERTAIN', provenance: 'user_answer' } } },
     );
     assert.deepEqual(out.requirementKeys, []);
     // B1.1/K-1: the drop is CERTAINTY-aware now — a CERTAIN case value satisfies the need.

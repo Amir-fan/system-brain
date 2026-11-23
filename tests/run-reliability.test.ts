@@ -13,17 +13,27 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createClient } from '@supabase/supabase-js';
 
 import { SkillsRuntime } from '../src/core/skill/skill-runtime.ts';
 import { MapSkillRegistry } from '../src/core/skill/skill-registry.ts';
 import { providerError } from '../src/core/model-gateway/gateway-errors.ts';
 import { OpenRouterGateway } from '../src/platform/model-gateway/openrouter.gateway.ts';
+import { createKnowledgeEvidence } from '../src/platform/provider/knowledge-evidence.ts';
+import { createSourceStorage } from '../src/platform/provider/source.storage.ts';
+import { createIngestionPersistence } from '../src/platform/provider/ingestion.storage.ts';
+import type { SupabaseDatabase } from '../src/platform/supabase/supabase.persistence.ts';
+import { createFiqhHaydMinimalSkill } from '../src/domain/naqaa/fiqh-hayd-minimal-skill.ts';
+import { APPROVED_SOURCE_TITLES } from '../src/domain/naqaa/fiqh-hayd-contracts.ts';
+import { DecisionReadinessService } from '../src/core/readiness/readiness.service.ts';
 import { handleConversationMessage } from '../src/platform/api/conversation-handler.ts';
 import type { SkillDefinition, SkillExecutionContext, SkillKnowledgeCapability } from '../src/core/skill/skill.ts';
 import type { RunRecord, RuntimePersistence } from '../src/core/runtime/runtime.ports.ts';
 import type { ProjectBoundaryReaders } from '../src/core/authorization/project-boundary.ts';
 import type { ModelGateway, ModelGatewayInput, ModelGatewayOutput } from '../src/core/model-gateway/model-gateway.ts';
-import type { ConversationService } from '../src/core/conversation/conversation.service.ts';
+import { ConversationService } from '../src/core/conversation/conversation.service.ts';
+import { ConversationFailure, type ConversationSession } from '../src/core/conversation/conversation.ts';
+import { UnderstandingService } from '../src/core/understanding/understanding.service.ts';
 
 // ── fakes (external boundaries only) ────────────────────────────────────────
 
@@ -294,6 +304,141 @@ test('A2: a stall AFTER the response headers is still classified as a provider t
 
 // ── A3: technical failure stays distinct from a domain verdict ─────────────
 
+const minimalFiqh = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
+const approvedCatalogue = (): SkillKnowledgeCapability => ({
+  async resolveSources() { return [{ id: 'source', title: APPROVED_SOURCE_TITLES[0] }]; },
+  async search() { return []; },
+  async adjacent() { return []; },
+});
+
+const questionReply = JSON.stringify({ status: 'ASK_USER', question: 'متى بدأ الدم؟', factKey: 'onset', answerType: 'date' });
+for (const [scenario, response, expectedCode] of [
+  ['provider unavailable', () => new Response(null, { status: 503 }), 'PROVIDER_CHAT_FAILED'],
+  ['request timed out', () => { throw new DOMException('timeout', 'TimeoutError'); }, 'PROVIDER_CHAT_TIMEOUT'],
+  ['error envelope with successful HTTP status', () => Response.json({ error: { message: 'unavailable' } }), 'PROVIDER_CHAT_FAILED'],
+  ['failed generation with a partial question', () => Response.json({
+    choices: [{ finish_reason: 'error', message: { content: questionReply } }],
+  }), 'PROVIDER_CHAT_FAILED'],
+  ['missing completion choice', () => Response.json({ choices: [] }), 'PROVIDER_CHAT_FAILED'],
+  ['error on the completion choice', () => Response.json({
+    choices: [{ error: { message: 'backend unavailable' }, message: { content: questionReply } }],
+  }), 'PROVIDER_CHAT_FAILED'],
+  ['missing assistant content', () => Response.json({ choices: [{ message: {} }] }), 'PROVIDER_CHAT_FAILED'],
+  ['filtered empty completion', () => Response.json({ choices: [{ finish_reason: 'content_filter', message: { content: '' } }] }), 'PROVIDER_CHAT_INCOMPLETE'],
+  ['truncated completion', () => Response.json({ choices: [{ finish_reason: 'length', message: { content: '{"status":"ANSWER"' } }] }), 'PROVIDER_CHAT_INCOMPLETE'],
+  ['truncated but parseable question', () => Response.json({ choices: [{ finish_reason: 'length', message: { content: questionReply } }] }), 'PROVIDER_CHAT_INCOMPLETE'],
+  ['tool call with parseable question', () => Response.json({ choices: [{ finish_reason: 'tool_calls', message: { content: questionReply } }] }), 'PROVIDER_CHAT_INCOMPLETE'],
+] as const) {
+  test(`a fiqh turn fails at the provider boundary on ${scenario}`, async () => {
+    const persistence = fakePersistence();
+    let attempts = 0;
+    const runtime = runtimeFor(minimalFiqh, {
+      persistence,
+      knowledge: approvedCatalogue,
+      modelGateway: new OpenRouterGateway({
+        apiKey: 'test-key', defaultModel: 'test/model',
+        fetchImpl: async () => { attempts++; return response(); },
+      }),
+    });
+    await assert.rejects(runtime.execute({ ...input, skillId: minimalFiqh.id }), { kind: 'provider', code: expectedCode });
+    assert.equal(attempts, 1);
+    assert.deepEqual(Object.values(persistence.runs).map(r => [r.status, r.errorCategory]), [['failed', 'provider']]);
+  });
+}
+
+test('a provider outage on the JSON-mode compatibility retry terminates the same fiqh run', async () => {
+  const persistence = fakePersistence();
+  const requests: Array<{ model: string; response_format: { type: string } }> = [];
+  const runtime = runtimeFor(minimalFiqh, {
+    persistence,
+    knowledge: approvedCatalogue,
+    modelGateway: new OpenRouterGateway({
+      apiKey: 'fixture', defaultModel: 'test/model',
+      fetchImpl: async (_url, init) => {
+        requests.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: requests.length === 1 ? 400 : 503 });
+      },
+    }),
+  });
+  await assert.rejects(runtime.execute({ ...input, skillId: minimalFiqh.id }), { code: 'PROVIDER_CHAT_FAILED' });
+  assert.deepEqual(requests.map(r => [r.model, r.response_format.type]), [
+    ['test/model', 'json_schema'], ['test/model', 'json_object'],
+  ]);
+  assert.deepEqual(Object.values(persistence.runs).map(r => [r.status, r.errorCategory]), [['failed', 'provider']]);
+});
+
+function evidenceDb(fetchImpl: typeof fetch) {
+  return createClient('https://fixture.invalid', 'test-key', {
+    global: { fetch: fetchImpl }, auth: { persistSession: false, autoRefreshToken: false },
+  }) as unknown as SupabaseDatabase;
+}
+
+const readFailure = () => Response.json({ code: 'TEST', message: 'internal detail' }, { status: 400 });
+
+test('unavailable approved-source storage fails the fiqh run, while an empty catalogue yields an evidence gap', async () => {
+  let unavailable = true;
+  const db = evidenceDb(async () => unavailable ? readFailure() : Response.json([]));
+  const persistence = fakePersistence();
+  const runtime = runtimeFor(minimalFiqh, {
+    persistence,
+    modelGateway: fakeGateway(async () => assert.fail('no model call before approved sources are resolved')),
+    knowledge: projectId => createKnowledgeEvidence({
+      projectId,
+      sources: createSourceStorage(db),
+      retrieval: { async search() { return assert.fail('no retrieval before approved sources are resolved'); } },
+      chunks: { async getChunk() { return null; }, async listChunkSummaries() { return []; } },
+    }),
+  });
+  await assert.rejects(runtime.execute({ ...input, skillId: minimalFiqh.id }), /source catalogue read failed/);
+  unavailable = false;
+  const empty = await runtime.execute({ ...input, skillId: minimalFiqh.id });
+  assert.deepEqual(Object.values(persistence.runs).map(r => [r.status, r.errorCategory]), [
+    ['failed', 'runtime'], ['completed', undefined],
+  ]);
+  assert.equal(empty.trace?.status, 'INSUFFICIENT_EVIDENCE');
+  assert.equal(empty.answer?.label, undefined);
+});
+
+test('fiqh evidence reads preserve a failed chunk lookup, neighbour listing, or source-title read', async t => {
+  const anchor = { id: 'a', document_id: 'd', source_id: 's', chunk_index: 1 };
+  const neighbour = { ...anchor, id: 'b', chunk_index: 2 };
+  for (const [stage, responses, operation] of [
+    ['anchor', [], 'adjacent'],
+    ['neighbour list', [[anchor]], 'adjacent'],
+    ['neighbour text', [[anchor], [neighbour]], 'adjacent'],
+    ['cached chunk', [], 'loadByIds'],
+    ['source title', [[anchor]], 'loadByIds'],
+    ['retrieved chunk index', [], 'search'],
+  ] as const) {
+    await t.test(stage, async () => {
+      let i = 0;
+      const db = evidenceDb(async () => i < responses.length ? Response.json(responses[i++]) : readFailure());
+      const evidence = createKnowledgeEvidence({
+        projectId: 'p', sources: createSourceStorage(db), chunks: createIngestionPersistence(db),
+        retrieval: { async search({ query }) { return {
+          query, modelId: 'test', candidates: { semantic: 1, lexical: 0 }, rawBest: { semantic: 1, lexical: null },
+          results: [{
+            chunkId: 'a', documentId: 'd', sourceId: 's', text: 'passage', score: 1,
+            retrievalSignals: { foundBy: ['semantic'], fusedScore: 1, diverse: true },
+          }],
+          confidence: { resultCount: 1, topFusedScore: 1, topSemanticScore: 1, topLexicalScore: null, agreement: 0, singleRetrieverEvidence: true },
+          timings: { queryEmbeddingMs: 0, vectorSearchMs: 0, lexicalSearchMs: 0, fusionMs: 0, totalMs: 0 },
+        }; } },
+      });
+      const reads = {
+        adjacent: () => evidence.adjacent('a'),
+        loadByIds: () => evidence.loadByIds!(['a']),
+        search: () => evidence.search({ query: 'q' }),
+      };
+      await assert.rejects(reads[operation], /read failed/);
+    });
+  }
+  const db = evidenceDb(async () => Response.json([]));
+  const emptyChunks = createIngestionPersistence(db);
+  assert.equal(await emptyChunks.getChunk('p', 'missing'), null);
+  assert.deepEqual(await emptyChunks.listChunkSummaries('p', 'empty'), []);
+});
+
 test('A3: a provider timeout is a technical failure — never a needs_information/insufficient result', async () => {
   const persistence = fakePersistence();
   const skill = skillWith({
@@ -357,6 +502,40 @@ test('A3: the conversation API reports a provider failure as a temporary technic
   }
 });
 
+test('the conversation API stops at the selected fiqh skill on outage even with a prior grounded result', async () => {
+  const boundary = fakePersistence();
+  const runtime = runtimeFor(minimalFiqh, {
+    persistence: boundary,
+    modelGateway: fakeGateway(async () => { throw providerError('unavailable', 'PROVIDER_CHAT_FAILED'); }),
+    knowledge: approvedCatalogue,
+  });
+  const requested: string[] = [];
+  let session: ConversationSession;
+  const service = new ConversationService({
+    persistence: {
+      async create(s) { session = s; return s; },
+      async get() { return session; },
+      async save() { return assert.fail('a failed turn cannot publish a replacement answer'); },
+    },
+    understanding: new UnderstandingService(),
+    skills: { execute(input) { requested.push(input.skillId); return runtime.execute(input); } },
+    defaultSkillId: 'demo.conversation-eligibility',
+  });
+  session = await service.create('p', 'a', 'private');
+  session.sessionContext.lastGroundedResult = {
+    skillId: minimalFiqh.id, status: 'DECIDED', decision: 'prior decision', evidenceRefs: ['earlier'],
+  };
+  const res = await handleConversationMessage({ boundary, service }, 'p', 'a', session.id, {
+    text: 'رأيت دما اليوم، ما الحكم؟', skillId: minimalFiqh.id,
+  });
+  assert.ok(!res.ok);
+  assert.equal(res.status, 503);
+  assert.equal(res.error.category, 'provider');
+  assert.equal('data' in res, false);
+  assert.doesNotMatch(JSON.stringify(res), /prior decision|earlier/);
+  assert.deepEqual(requested, [minimalFiqh.id]);
+});
+
 test('A3 regression: a non-provider execution failure keeps the existing generic error', async () => {
   const boundary: ProjectBoundaryReaders = {
     async getProject(id: string) {
@@ -380,6 +559,46 @@ test('A3 regression: a non-provider execution failure keeps the existing generic
     assert.equal(res.status, 500);
     assert.equal(res.error.message, 'تعذر معالجة الرسالة.');
   }
+});
+
+test('a stale conversation write returns a 409 without replaying the skill', async () => {
+  const boundary = fakePersistence();
+  let session: ConversationSession | undefined;
+  let skillCalls = 0;
+  let saveAttempts = 0;
+  const service = new ConversationService({
+    persistence: {
+      async create(created) {
+        session = created;
+        return created;
+      },
+      async get() {
+        return session ?? null;
+      },
+      async save() {
+        saveAttempts++;
+        throw new ConversationFailure('CONVERSATION_WRITE_CONFLICT');
+      },
+    },
+    understanding: new UnderstandingService(),
+    skills: {
+      async execute({ skillId }) {
+        skillCalls++;
+        return { status: 'completed', skillId, skillVersion: 1, runId: 'run-conflict' };
+      },
+    },
+    defaultSkillId: 't.conflict',
+  });
+  const created = await service.create('p', 'a', 'private');
+
+  const res = await handleConversationMessage({ boundary, service }, 'p', 'a', created.id, { text: 'hi' });
+
+  assert.ok(!res.ok);
+  assert.equal(res.status, 409);
+  assert.equal(res.error.category, 'conversation');
+  assert.equal(res.error.code, 'CONVERSATION_WRITE_CONFLICT');
+  assert.equal(skillCalls, 1);
+  assert.equal(saveAttempts, 1);
 });
 
 // ── A+: generic stage timings ───────────────────────────────────────────────

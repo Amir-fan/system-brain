@@ -81,6 +81,10 @@ export interface SupersedeInput extends Omit<RememberInput, 'provenance' | 'vali
 export interface ArchiveInput {
   projectId: string;
   memoryId: string;
+  /** Optional ownership filter used by public API callers. */
+  scope?: MemoryScope;
+  /** Optional ownership filter used by public API callers. */
+  subjectId?: string;
 }
 
 export interface RelevantMemoryQuery {

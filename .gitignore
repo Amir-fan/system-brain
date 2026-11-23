@@ -1,5 +1,7 @@
 node_modules/
 dist/
+.quality-fixture-*/
+.superpowers/
 .env
 .env.*
 !.env.example

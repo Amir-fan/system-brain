@@ -17,8 +17,10 @@
  */
 
 import type { SkillDefinition, SkillExecutionContext, SkillKnowledgePassage } from '../../core/skill/skill.ts';
-import type { DecisionRequirement, KnownContextItem, ReadinessResult } from '../../core/readiness/readiness.ts';
-import { APPROVED_SOURCE_TITLES } from './fiqh-hayd-contracts.ts';
+import type { DecisionRequirement, InteractionType, KnownContextItem, ReadinessResult } from '../../core/readiness/readiness.ts';
+import { UNCERTAINTY_OPTION, hasContextValue, hasKnownValue, isInteractionType } from '../../core/readiness/readiness.ts';
+import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admission.ts';
+import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MINIMAL_SKILL_ID = 'naqaa.fiqh-hayd-minimal';
 export const MINIMAL_SKILL_VERSION = 3; // v2 → v3: single terminal envelope, workload-scoped budget, dedup
@@ -43,7 +45,11 @@ const MAX_CONVERSATION_CHARS = 3000;
 const MAX_QUESTION_CHARS = 300;
 /** Stage 4C.6: the ONLY structural ruling classifications the client can consume. */
 const LABELS = ['hayd', 'istihada', 'nifas'] as const;
-const DEFAULT_QUESTION_KEY = 'minimal_followup';
+const LEGACY_QUESTION_KEY = 'minimal_followup';
+const FACT_KEY_PATTERN = new RegExp(FIQH_FACT_KEY_PATTERN);
+const isFactKey = (value: unknown): value is string => typeof value === 'string'
+  && value.length <= 60 && FACT_KEY_PATTERN.test(value)
+  && !['constructor', 'prototype', LEGACY_QUESTION_KEY].includes(value);
 
 /**
  * ONE canonical response envelope for the WHOLE turn. The model picks ONE of two top-level
@@ -78,11 +84,13 @@ const MINIMAL_RESPONSE_SCHEMA = {
     question: { type: 'string' },
     /** Material Fact Confirmation: true when the ASK_USER question is a yes/no confirmation. */
     yesNo: { type: 'boolean' },
-    /** When the ASK_USER confirms an EXISTING fact: the fact key being confirmed. */
-    factKey: { type: 'string' },
+    /** Stable identity for every ASK_USER material fact, new or already present. */
+    factKey: { type: 'string', pattern: FIQH_FACT_KEY_PATTERN, maxLength: 60 },
+    answerType: { type: 'string', enum: ['number', 'duration', 'date', 'time', 'yes_no', 'single_choice', 'multiple_choice', 'free_text'] },
     /** Short, clear answer choices for the question (used INSTEAD of free text when the answer can be safely enumerated). */
     options: { type: 'array', items: { type: 'string' }, maxItems: 6 },
     evidenceRefs: { type: 'array', items: { type: 'string' } },
+    materialFactKeys: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 60 }, minItems: 1, maxItems: 24 },
     // RX1 semantic parts — ALL optional. The LLM fills only what genuinely helps the
     // ordinary user; KIP stores semantics, never colors/design.
     understanding: { type: 'string' },
@@ -147,7 +155,7 @@ const MINIMAL_INSTRUCTION = [
   '  - لا تختمي تلقائيًا بـ«هل لديك سؤال آخر؟».',
   '  - إن وُجدت خطوة تالية مفيدة فعلًا فاقترحيها باختصار.',
   '',
-  'شكل الجواب عند كفاية المعلومات (هذا هو ترتيب التجربة المعتمد):',
+  'شكل الحكم الشخصي عند كفاية المعلومات:',
   '  1) الحكم أولًا وبشكل مباشر — مثل: «نعم، هذا يُعد حيضًا» أو «هذه الأيام كلها حيض».',
   '  2) السبب في جملة أو جملتين قصيرتين فقط.',
   '  3) ماذا تفعل الآن عمليًا — جملة واحدة عند وجود أثر عملي.',
@@ -190,22 +198,26 @@ const MINIMAL_INSTRUCTION = [
   '  - إذا كانت الرسالة الأخيرة مسألة جديدة ومستقلة، فركزي على إجابة المسألة الجديدة ولا تكرري جواب المسألة السابقة.',
   '',
   'أجزاء الجواب (ضعيها في حقول JSON المقابلة):',
-  '  - summary: إلزامي عند كل ANSWER — سطر واحد يحمل الحكم المباشر (مثل: «الـ12 يوم كلها حيض»). لا يُقبل جواب بلا summary. لا تكتبي كلمة «الخلاصة» داخله.',
+  '  - summary: إلزامي عند كل ANSWER — سطر واحد يحمل خلاصة الشرح أو الحكم المباشر. لا تكتبي كلمة «الخلاصة» داخله.',
   '  - explanation: إلزامي عند كل ANSWER — السبب في جملة أو جملتين قصيرتين.',
   '  - practical: إلزامي عندما للحكم أثر عملي — جملة واحدة: ماذا تفعل المستخدمة الآن.',
   '  - understanding: خطوات واقعية قصيرة عندما تفيد التسلسل الزمني (مثل: «عادتج 6 أيام → الدم استمر 12 يوم → ثم انقطع»). لا تعيدي السؤال ولا تخترعي واقعة.',
   '  - visual: عندما يكون للحالة تسلسل زمني أضيفي {"type":"timeline","items":[{"label":"دم","duration":"3 أيام"},...]}. لا ألوان ولا تصميم — معنى فقط.',
   '  - nextAction: خطوة تالية مفيدة مرتبطة بالسياق فقط، لا تجبري كل جواب عليها.',
-  '  - message: النص الكامل البسيط للجواب (هو ما تعرضه المحادثة)، مرتبًا: الحكم أولًا، ثم السبب، ثم الأثر العملي.',
+  '  - message: النص الكامل البسيط للجواب. في الحكم الشخصي اذكري الحكم أولًا، ثم السبب، ثم الأثر العملي.',
   '',
   'واجهة التنفيذ (هذه ليست طريقة تفكير، بل صيغة الإخراج الموحّدة في كل رد):',
   '  - إذا احتجتِ دليلًا جديدًا: {"action":"USE_TOOL","tool":"search_knowledge","query":"نص البحث"}',
-  '  - لإجابة نهائية مع الدليل: {"action":"TERMINAL","status":"ANSWER","message":"نص الجواب","evidenceRefs":["معرّف المقطع"],"summary":"...","explanation":"...","practical":"...","label":"hayd"}',
-  '  - label إلزامي مع كل ANSWER وهو تصنيف الحكم البنيوي، قيمته واحدة فقط من: "hayd" (حيض) أو "istihada" (استحاضة) أو "nifas" (نفاس). اختاريه أنتِ بناءً على حكمك — لا يُشتق من النص لاحقًا. إذا لم يكن الحكم واحدًا من هذه الثلاثة، لا ترسلي ANSWER بلا label؛ استخدمي ASK_USER أو INSUFFICIENT_EVIDENCE.',
-  '  - لطلب معلومة واحدة مؤثرة: {"action":"TERMINAL","status":"ASK_USER","question":"السؤال"}',
-  '  - لطلب معلومة واحدة مؤثرة مع خيارات: {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","options":["خيار 1","خيار 2"]}',
-  '  - لطلب تأكيد حقيقة مادية (سؤال جوابه نعم/لا): {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","yesNo":true,"factKey":"اسم المعلومة"} — لا تضيفي factKey إلا إذا كان السؤال يؤكد معلومة موجودة أصلًا في قائمة المعلومات المعروفة أعلاه، واستخدمي اسمها كما هو مكتوب هناك. نعم ولا و«غير متأكدة» تظهر تلقائيًا.',
-  '  - إذا لم يكفِ الدليل المتاح: {"action":"TERMINAL","status":"INSUFFICIENT_EVIDENCE","message":"بيان مختصر"}',
+  '  - لإجابة نهائية مع الدليل: {"action":"TERMINAL","status":"ANSWER","message":"نص الجواب","evidenceRefs":["معرّف المقطع"],"summary":"...","explanation":"...","practical":"...","label":"hayd","materialFactKeys":["اسم الحقيقة المؤكدة"]}',
+  '  - للسؤال التعليمي العام: استخدمي أداة البحث واشرحي ما ورد في الدليل دون تطبيقه على المستخدمة. أرسلي ANSWER مع evidenceRefs ودون label.',
+  '  - للحكم الشخصي: عند اكتمال الحقائق المادية ودعم الدليل، أرسلي ANSWER مع label يطابق الحكم: "hayd" أو "istihada" أو "nifas". إذا تعذر التصنيف فاسألي عن الحقيقة المؤثرة أو اختاري INSUFFICIENT_EVIDENCE.',
+  '  - مع كل label أرسلي materialFactKeys: قائمة غير فارغة بأسماء كل الحقائق المادية التي يعتمد عليها الحكم من المعلومات المعروفة. يجب أن تكون قيمها موجودة وموسومة CERTAIN؛ لا تختلقي أسماء أو يقينًا. إن لم تتوفر حقيقة مؤكدة فاختاري ASK_USER أو INSUFFICIENT_EVIDENCE. الشرح التعليمي دون label لا يحتاج هذه القائمة.',
+  '  - لطلب معلومة واحدة مؤثرة: {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","factKey":"onset","answerType":"date"}',
+  '  - لطلب معلومة واحدة مؤثرة مع خيارات: {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","factKey":"onset","answerType":"single_choice","options":["خيار 1","خيار 2"]}',
+  '  - factKey إلزامي مع كل ASK_USER: اسم ثابت ودقيق للحقيقة المطلوبة، بحروف إنجليزية وأرقام وشرطة سفلية، يبدأ بحرف ولا يتجاوز 60 حرفًا. اختاري الاسم بحسب الحقيقة نفسها لا اسمًا عامًا للسؤال، واحتفظي به في materialFactKeys بعد الإجابة. للحقيقة الموجودة استخدمي اسمها نفسه.',
+  '  - answerType إلزامي مع كل ASK_USER ويحدد نوع الجواب المتوقع: number لعدد، duration لمدة رقمية، date لتاريخ، time لوقت على الساعة، yes_no لنعم/لا، single_choice أو multiple_choice لخيارات محددة في options، وfree_text فقط لوصف مفتوح. استخدمي النوع المحدد للعدد أو التاريخ أو الوقت واذكري نوع الخيارات.',
+  '  - لطلب تأكيد حقيقة مادية (سؤال جوابه نعم/لا): {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","yesNo":true,"factKey":"onset","answerType":"yes_no"}. نعم ولا و«غير متأكدة» تظهر تلقائيًا.',
+  '  - إذا لم يكفِ الدليل المتاح: {"action":"TERMINAL","status":"INSUFFICIENT_EVIDENCE"}',
   '  - لا تكتب أي نص خارج الـ JSON، ولا تستخدم أكواد JSON Schema أو Markdown fences.',
   `- يبقى لك ${MAX_TOOL_CALLS} عمليات بحث بحد أقصى في الدور الواحد.`,
   '- evidenceRefs يقبل فقط معرّفات مقاطع ظهرت لك من نتيجة الأداة في هذا الدور.',
@@ -223,11 +235,15 @@ interface MinimalResponse {
   question?: string;
   /** True when this ASK_USER is a yes/no material-fact confirmation. */
   yesNo?: boolean;
-  /** The fact key being confirmed, when this ASK_USER confirms an EXISTING fact. */
+  /** Stable material fact key for any ASK_USER, including a new clarification. */
   factKey?: string;
+  /** Explicit expected-answer contract for this named material fact. */
+  answerType?: InteractionType;
   /** Short answer choices the user can tap instead of typing (bounded). */
   options?: string[];
   evidenceRefs?: string[];
+  /** Required for personal labels; validated against input facts, never model certainty. */
+  materialFactKeys?: string[];
   // RX1 semantic parts (all optional; the LLM decides what genuinely helps).
   understanding?: string;
   summary?: string;
@@ -286,14 +302,30 @@ function parseModelResponse(text: string): MinimalResponse | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
   const action = str(o.action).toUpperCase();
+  const status = str(o.status).toUpperCase().replace(/[\s-]/g, '_');
+  const hasLabel = Object.hasOwn(o, 'label');
+  const hasMaterialFactKeys = Object.hasOwn(o, 'materialFactKeys');
+  if ((hasLabel || hasMaterialFactKeys)
+    && (status !== 'ANSWER' || (Object.hasOwn(o, 'action') && action !== 'TERMINAL'))) return null;
   if (action === 'USE_TOOL') {
     const tool = str(o.tool);
     const query = normalizeQuery(str(o.query));
     if (tool !== 'search_knowledge' || !query) return null;
     return { action: 'USE_TOOL', tool: 'search_knowledge', query: bounded(query, 300) };
   }
-  const status = str(o.status).toUpperCase().replace(/[\s-]/g, '_');
   if (!['ANSWER', 'ASK_USER', 'INSUFFICIENT_EVIDENCE'].includes(status)) return null;
+  const label = str(o.label);
+  const validLabel = LABELS.includes(label as typeof LABELS[number]);
+  const materialFactKeys = Array.isArray(o.materialFactKeys)
+    && o.materialFactKeys.length > 0
+    && o.materialFactKeys.length <= 24
+    && o.materialFactKeys.every(isFactKey)
+    && new Set(o.materialFactKeys).size === o.materialFactKeys.length
+    ? o.materialFactKeys
+    : undefined;
+  // Explicit personal-classification metadata is security-relevant model output. A
+  // malformed label/key list cannot be downgraded into apparently educational prose.
+  if ((hasLabel && !validLabel) || (hasMaterialFactKeys && (!materialFactKeys || !validLabel))) return null;
   const refs = Array.isArray(o.evidenceRefs)
     ? o.evidenceRefs.map((x) => str(x)).filter(Boolean).slice(0, 6)
     : undefined;
@@ -320,9 +352,11 @@ function parseModelResponse(text: string): MinimalResponse | null {
     ...(str(o.message) ? { message: bounded(str(o.message), 1600) } : {}),
     ...(str(o.question) ? { question: bounded(str(o.question), MAX_QUESTION_CHARS) } : {}),
     ...(o.yesNo === true ? { yesNo: true } : {}),
-    ...(str(o.factKey) ? { factKey: str(o.factKey) } : {}),
+    ...(isFactKey(o.factKey) ? { factKey: o.factKey } : {}),
+    ...(isInteractionType(o.answerType) ? { answerType: o.answerType } : {}),
     ...(Array.isArray(o.options) ? { options: o.options.map((x) => str(x)).filter(Boolean).slice(0, 6) } : {}),
     ...(refs && refs.length > 0 ? { evidenceRefs: refs } : {}),
+    ...(materialFactKeys ? { materialFactKeys } : {}),
     ...(str(o.understanding) ? { understanding: bounded(str(o.understanding), 300) } : {}),
     ...(str(o.summary) ? { summary: bounded(str(o.summary), 400) } : {}),
     ...(str(o.explanation) ? { explanation: bounded(str(o.explanation), 800) } : {}),
@@ -331,7 +365,7 @@ function parseModelResponse(text: string): MinimalResponse | null {
     ...(str(o.nextAction) ? { nextAction: bounded(str(o.nextAction), 200) } : {}),
     // Stage 4C.6: parse the structural ruling classification; only the three canonical
     // values survive — anything else (or absent) yields NO label (never invented).
-    ...(LABELS.includes(str(o.label) as typeof LABELS[number]) ? { label: str(o.label) as MinimalResponse['label'] } : {}),
+    ...(validLabel ? { label: label as MinimalResponse['label'] } : {}),
   };
 }
 
@@ -373,17 +407,80 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         // never reads personal memory for private sessions), so reading it here is safe.
         context?: Record<string, unknown>;
         factMeta?: Record<string, { provenance?: string; certainty?: string }>;
+        lastGroundedResult?: {
+          skillId?: unknown;
+          status?: unknown;
+          decision?: unknown;
+          explanation?: unknown;
+          sourceTitle?: unknown;
+          evidenceRefs?: unknown;
+          materialFactKeys?: unknown;
+          caseSignature?: unknown;
+        };
       };
       const text = str(input.text);
       const turns = Array.isArray(input.recentTurns) ? input.recentTurns : [];
       const facts = input.context ?? {};
       const factMeta = input.factMeta ?? {};
+      const stored = input.lastGroundedResult;
+      const storedLabel = str(stored?.decision);
+      const replayFactKeys = Array.isArray(stored?.materialFactKeys)
+        && stored.materialFactKeys.length > 0
+        && stored.materialFactKeys.length <= 24
+        && stored.materialFactKeys.every(isFactKey)
+        && new Set(stored.materialFactKeys).size === stored.materialFactKeys.length
+        && stored.materialFactKeys.every((key) => isFiqhDecisionMaterialFactKey(key)
+          && Object.hasOwn(facts, key)
+          && isConfirmedMaterialFact(facts[key], factMeta[key]))
+        ? stored.materialFactKeys
+        : undefined;
+      const replayEvidenceRefs = Array.isArray(stored?.evidenceRefs)
+        && stored.evidenceRefs.length > 0
+        && stored.evidenceRefs.length <= 6
+        && stored.evidenceRefs.every((ref): ref is string => typeof ref === 'string'
+          && ref.length > 0 && ref.length <= 64 && ref.trim() === ref)
+        ? stored.evidenceRefs
+        : undefined;
+      if (stored && replayFactKeys && replayEvidenceRefs
+        && stored.skillId === MINIMAL_SKILL_ID && stored.status === 'ANSWER'
+        && LABELS.includes(storedLabel as typeof LABELS[number])
+        && str(stored.caseSignature) && text.length <= 60) {
+        const wantsSource = /مصدر|من وين|الدليل|المرجع|مرجعك|دليلك/.test(text);
+        const wantsWhy = /ليش|ليه|لماذا|السبب|سبب|وضح|وضّح|فسر|اشرح/.test(text);
+        if (wantsSource || wantsWhy) {
+          const sourceTitle = bounded(str(stored.sourceTitle) || 'المصدر المعتمد في المشروع', 160);
+          const answerText = wantsSource
+            ? `المصدر المعتمد: «${sourceTitle}».\nالمقاطع المستشهد بها: ${replayEvidenceRefs.map((ref) => ref.slice(0, 8)).join('، ')}.`
+            : (bounded(str(stored.explanation), 700) || 'الحكم مبني على المصدر المعتمد عندي.');
+          return {
+            status: 'completed',
+            answer: {
+              text: answerText,
+              ...(str(stored.sourceTitle) ? { sourceTitle: bounded(str(stored.sourceTitle), 160) } : {}),
+              evidenceIds: replayEvidenceRefs,
+              label: storedLabel as typeof LABELS[number],
+            },
+            trace: {
+              status: wantsSource ? 'FOLLOWUP_SOURCE' : 'FOLLOWUP_WHY',
+              decisionStatus: 'ANSWER',
+              decisionLabel: storedLabel,
+              sourceSupport: 'SUPPORTED',
+              acceptedEvidenceRefs: replayEvidenceRefs,
+              retrievedEvidenceIds: replayEvidenceRefs,
+              materialFactKeys: replayFactKeys,
+              reusedGroundedResult: true,
+              workload: `${WORKLOAD}:followup_answered_from_session_result`,
+              notes: [MINIMAL_TRACE_MARKER, `v=${MINIMAL_SKILL_VERSION}`, 'model_calls=0', 'tool_calls=0'],
+            },
+          };
+        }
+      }
       // Known facts the user/memory already established — the Mind must NOT re-ask these.
       // Rendered with provenance+certainty so the model can tell a user's own statement
       // from a weaker memory hint. (Calendared Naqaa data has no KIP surface yet — see
       // deferred note; only facts that already reach this payload are shown.)
       const knownLines = Object.entries(facts)
-        .filter(([k, v]) => k !== DEFAULT_QUESTION_KEY && v !== undefined && v !== null && String(v).trim() !== '')
+        .filter(([k, v]) => k !== LEGACY_QUESTION_KEY && hasContextValue(v))
         .map(([k, v]) => {
           const m = factMeta[k] ?? {};
           const certainty = m.certainty ? String(m.certainty) : '';
@@ -437,7 +534,7 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         .join('\n');
 
       const knownBlock = knownLines ? `\n\nمعلومات معروفة مسبقًا (لا تسأل عنها من جديد):\n${knownLines}` : '';
-      let interaction = `${MINIMAL_INSTRUCTION}\n\nالمحادثة:\n${boundedTail(conversation, MAX_CONVERSATION_CHARS)}${knownBlock}`;
+      let interaction = `المحادثة:\n${boundedTail(conversation, MAX_CONVERSATION_CHARS)}${knownBlock}`;
 
       const askTool = async (query: string): Promise<{ rendered: string; newChunks: SkillKnowledgePassage[] }> => {
         const norm = normalizeQuery(query);
@@ -469,6 +566,7 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         modelCalls += 1;
         const out = await ctx.model!.generateText({
           workload: WORKLOAD,
+          instructions: MINIMAL_INSTRUCTION,
           message: interaction,
           maxOutputTokens: MAX_OUTPUT_TOKENS,
           // response_mode: 'natural' never requests the structured envelope; 'flexible' and
@@ -484,8 +582,7 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         if (!parsed) {
           // Stage 4A: the conversation context is IDENTICAL on every call of this loop
           // (the transcript + current turn live in `interaction`, rebuilt per turn), so a
-          // same-turn retry after an unusable provider response (finish_reason=error /
-          // empty content — observed transient on gemini first calls) loses NO context.
+          // same-turn retry after a successful completion with unusable text loses no context.
           // One bounded retry of the SAME turn only; the loop bound (MAX_MODEL_CALLS)
           // still applies. Only when the turn has made no model progress beyond this call
           // and issued no tool call yet — a later failure stays fail-closed.
@@ -519,25 +616,30 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
           if (!parsed.question) {
             return gap('terminal_missing_question', 'تعذّر ترتيب الجواب الآن. حاولي مرة أخرى.', { ...modelName });
           }
-          // Material Fact Confirmation: when the question confirms an EXISTING fact, the
-          // readiness requirement is keyed by THAT fact key (bounded) and typed yes/no —
-          // so the user's answer binds CERTAIN onto the fact itself, closing the loop.
-          const isConfirmation = parsed.yesNo === true && !!parsed.factKey && parsed.factKey in facts;
-          const key = isConfirmation ? parsed.factKey!.slice(0, 60) : DEFAULT_QUESTION_KEY;
+          if (!parsed.factKey) {
+            return gap('terminal_missing_fact_key', 'تعذّر ترتيب السؤال الآن. حاولي مرة أخرى.', { ...modelName });
+          }
+          // A stable requirement key lets Conversation bind a new answer or a
+          // confirmation to the exact fact later declared by materialFactKeys.
+          const key = parsed.factKey;
+          if (!parsed.answerType || (parsed.yesNo && parsed.answerType !== 'yes_no')) {
+            return gap('terminal_invalid_answer_type', 'تعذّر ترتيب السؤال الآن. حاولي مرة أخرى.', { ...modelName });
+          }
           // Answer-effort priority (Stage 4C.7): yes/no → options → free text — the
           // cheapest interaction the fact allows. yes/no confirmations carry options
           // so the client renders نعم | لا | غير متأكدة chips (the yes_no contract
-          // accepts booleans AND the canonical chip labels; «غير متأكدة» is caught
-          // upstream by Core's UNKNOWN_ANSWER and never becomes CERTAIN).
-          const NOT_SURE = 'غير متأكدة';
+          // accepts booleans and the canonical chip labels). Conversation records
+          // «غير متأكدة» with UNKNOWN certainty.
           const askedOptions = Array.isArray(parsed.options) && parsed.options.length > 0
-            ? [...new Set([...parsed.options.map((x) => str(x)).filter(Boolean), NOT_SURE])].slice(0, 7)
+            ? [...new Set([...parsed.options.map((x) => str(x)).filter(Boolean), UNCERTAINTY_OPTION])].slice(0, 7)
             : undefined;
-          const interaction = parsed.yesNo === true
-            ? { type: 'yes_no' as const, options: ['نعم', 'لا', NOT_SURE] }
-            : askedOptions
-              ? { type: 'single_choice' as const, options: askedOptions }
-              : { type: 'free_text' as const };
+          const categorical = parsed.answerType === 'single_choice' || parsed.answerType === 'multiple_choice';
+          if (categorical && !askedOptions) {
+            return gap('terminal_missing_options', 'تعذّر ترتيب السؤال الآن. حاولي مرة أخرى.', { ...modelName });
+          }
+          const interaction = parsed.answerType === 'yes_no'
+            ? { type: 'yes_no' as const, options: ['نعم', 'لا', UNCERTAINTY_OPTION] }
+            : { type: parsed.answerType, ...(categorical ? { options: askedOptions } : {}) };
           const readiness = deps.readiness.evaluate({
             requirements: [{
               key, description: parsed.question, material: true,
@@ -562,6 +664,13 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
               retrievedEvidenceIds: [...returnedIds],
               notes: [`queries=${queries.join(' | ')}`],
             });
+          }
+          if (parsed.label && (!parsed.materialFactKeys?.length || !parsed.materialFactKeys.every((key) =>
+            isFiqhDecisionMaterialFactKey(key)
+              && Object.hasOwn(facts, key)
+              && isConfirmedMaterialFact(facts[key], factMeta[key]),
+          ))) {
+            return gap('personal_facts_unconfirmed', 'المعلومات المؤكدة غير كافية للحكم الآن.', { ...modelName });
           }
           // response_mode = required: `summary` is the enforced minimum on ANSWER. If the
           // model answered but omitted it, ask for ONE terminal re-emit (no extra LLM
@@ -604,6 +713,11 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
               evidence: returned.map((p) => ({ chunkId: p.chunkId, sourceId: p.sourceId })),
               approvedSourceIds: approvedIds,
               sourceSupport: 'SUPPORTED',
+              ...(parsed.label ? {
+                decisionStatus: 'ANSWER',
+                decisionLabel: parsed.label,
+                materialFactKeys: parsed.materialFactKeys,
+              } : {}),
               workload: WORKLOAD,
               notes: notes([`queries=${queries.join(' | ')}`]).slice(0, 8),
             },
@@ -611,7 +725,7 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         }
 
         // INSUFFICIENT_EVIDENCE
-        return gap('mind_reported_insufficient_evidence', parsed.message ?? 'الدليل المتاح غير كافٍ للحكم.', {
+        return gap('mind_reported_insufficient_evidence', FIQH_EVIDENCE_GAP_MESSAGE, {
           ...modelName,
           retrievedEvidenceIds: [...returned.map((p) => p.chunkId)],
           notes: [`queries=${queries.join(' | ')}`],

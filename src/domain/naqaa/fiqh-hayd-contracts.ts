@@ -23,6 +23,26 @@ export const FIQH_HAYD_SKILL_VERSION = 1;
  * never ground a ruling — even when it shares the same retrieval role.
  */
 export const APPROVED_SOURCE_TITLES = ['الحيض الالوكة'] as const;
+export const FIQH_EVIDENCE_GAP_MESSAGE = 'الدليل المتاح غير كافٍ للإجابة.';
+export const FIQH_FACT_KEY_PATTERN = '^[a-zA-Z][a-zA-Z0-9_]*$';
+
+const NON_MATERIAL_PRESENTATION_FACT_KEYS = new Set([
+  'preferredlanguage', 'language', 'locale', 'outputlanguage', 'responselanguage',
+  'preferredlocale', 'outputlocale', 'responselocale',
+  'outputstyle', 'responsestyle', 'preferredstyle',
+  'outputformat', 'responseformat', 'preferredformat',
+  'format', 'style', 'tone', 'verbosity',
+]);
+
+/**
+ * Presentation preferences may shape wording, but can never authorize a personal ruling.
+ * Normalization handles snake/camel/case/separator aliases; membership remains exact so a
+ * clinical key merely containing one of these words is still material.
+ */
+export function isFiqhDecisionMaterialFactKey(key: string): boolean {
+  const normalized = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+  return normalized.length > 0 && !NON_MATERIAL_PRESENTATION_FACT_KEYS.has(normalized);
+}
 
 /** Bounded budgets (small surface: no giant context windows). */
 export const MAX_QUERIES = 5;
@@ -59,10 +79,12 @@ export interface FiqhCaseInput {
   lastGroundedResult?: {
     skillId: string;
     status: string;
+    caseSignature?: string;
     decision?: string;
     explanation?: string;
     sourceTitle?: string;
     evidenceRefs: string[];
+    materialFactKeys?: string[];
   };
 }
 
@@ -130,6 +152,8 @@ export interface FiqhDecisionProposal {
   sourceSupport?: string;
   /** Retrieved chunk ids the ruling is grounded in. */
   evidenceRefs?: string[];
+  /** Exact server-admitted facts on which a personal ruling depends. */
+  materialFactKeys?: string[];
   /** OBSERVATION -> FIQH CONCEPT, each with its own source support. */
   observationMappings?: Array<{ observation?: string; concept?: string; evidenceRefs?: string[] }>;
   unresolved?: Array<{ item?: string; material?: boolean; reason?: string }>;

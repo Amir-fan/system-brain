@@ -30,7 +30,14 @@ type SkillScript = (payload: Record<string, any>, call: number) => Record<string
 const plain = (): Record<string, unknown> => ({ status: 'completed', skillId: 's', skillVersion: 1, runId: 'r', answer: { text: 'ok' } });
 const grounded = (): Record<string, unknown> => ({
   status: 'completed', skillId: 's', skillVersion: 1, runId: 'r',
-  answer: { text: 'ruling' }, trace: { decisionStatus: 'DECIDED', decisionLabel: 'hayd' },
+  answer: { text: 'ruling', evidenceIds: ['chunk-grounded'] },
+  trace: {
+    decisionStatus: 'DECIDED',
+    decisionLabel: 'hayd',
+    sourceSupport: 'SUPPORTED',
+    acceptedEvidenceRefs: [{ sourceId: 'source-grounded', version: 1, chunkIds: ['chunk-grounded'] }],
+    materialFactKeys: ['grounding_control'],
+  },
 });
 
 function make(opts: {
@@ -72,6 +79,13 @@ const msg = (text: string, appContext?: Record<string, unknown>, extra: Record<s
   ({ text, ...(appContext !== undefined ? { appContext } : {}), ...extra }) as never;
 const tick = () => new Promise((r) => setTimeout(r, 6));
 const CHOICE = { current_state: { type: 'single_choice', options: ['hayd', 'tuhr'] } };
+const seedGroundingControl = (session: ConversationSession) => {
+  session.sessionContext.facts.grounding_control = true;
+  session.sessionContext.factMeta = {
+    ...(session.sessionContext.factMeta ?? {}),
+    grounding_control: { certainty: 'CERTAIN', provenance: 'user_answer', at: '2026-11-01T00:00:00.000Z' },
+  };
+};
 
 // ------------------------------------------------------------------ UPDATE --
 test('1/2. an app-origin fact is UPDATED by a later snapshot — the first app value no longer wins forever', async () => {
@@ -129,15 +143,15 @@ test('4. a user_answer (CERTAIN) is NOT overwritten by a later appContext', asyn
   assert.equal(sc(s.id).factMeta!.current_state.provenance, 'user_answer');
 });
 
-test('5. a CERTAIN user_statement bound by the skill is protected from appContext', async () => {
+test('5. a skill proposal never supersedes an app snapshot', async () => {
   const { svc, sc } = make({ script: (_p, call) => (call === 1 ? { ...plain(), caseFacts: { current_state: 'tuhr' } } : plain()) });
   const s = await svc.create('p', 'u', 'contextual');
   await svc.handleMessage('p', 'u', s.id, msg('q1', { current_state: 'hayd' }));
-  assert.equal(sc(s.id).facts.current_state, 'tuhr', 'the stronger skill-bound fact superseded the app evidence');
-  assert.equal(sc(s.id).factMeta!.current_state.certainty, 'CERTAIN');
+  assert.equal(sc(s.id).facts.current_state, 'hayd');
+  assert.equal(sc(s.id).factMeta!.current_state.certainty, 'UNCERTAIN');
   await svc.handleMessage('p', 'u', s.id, msg('q2', { current_state: 'hayd' }));
-  assert.equal(sc(s.id).facts.current_state, 'tuhr');
-  assert.equal(sc(s.id).factMeta!.current_state.provenance, 'user_statement');
+  assert.equal(sc(s.id).facts.current_state, 'hayd');
+  assert.equal(sc(s.id).factMeta!.current_state.provenance, 'evidence');
 });
 
 test('5b. a memory fact is not overwritten by app evidence (unchanged behaviour)', async () => {
@@ -206,13 +220,13 @@ test('8. a user_answer is NOT removed by app snapshot omission', async () => {
   assert.equal(sc(s.id).factMeta!.current_state.provenance, 'user_answer');
 });
 
-test('9. a user_statement is NOT removed by app snapshot omission', async () => {
+test('9. a prior skill proposal cannot prevent app snapshot retraction', async () => {
   const { svc, sc } = make({ script: (_p, call) => (call === 1 ? { ...plain(), caseFacts: { current_state: 'tuhr' } } : plain()) });
   const s = await svc.create('p', 'u', 'contextual');
   await svc.handleMessage('p', 'u', s.id, msg('q1', { current_state: 'hayd' }));
   await svc.handleMessage('p', 'u', s.id, msg('q2', { duration_hours: 80 }));
-  assert.equal(sc(s.id).facts.current_state, 'tuhr');
-  assert.equal(sc(s.id).factMeta!.current_state.provenance, 'user_statement');
+  assert.equal(sc(s.id).facts.current_state, undefined);
+  assert.equal(sc(s.id).factMeta?.current_state, undefined);
 });
 
 test('10. a memory fact is NOT removed by app snapshot omission', async () => {
@@ -267,6 +281,7 @@ test('15. an app fact UPDATE or REMOVAL invalidates a previously grounded result
   ] as const) {
     const { svc, seen } = make({ script: (_p, call) => (call === 1 ? grounded() : plain()) });
     const s = await svc.create('p', 'u', 'contextual');
+    seedGroundingControl(s);
     await svc.handleMessage('p', 'u', s.id, msg('q1', { current_state: 'hayd', duration_hours: 72 }));
     const r = await svc.handleMessage('p', 'u', s.id, msg('q2', second));
     assert.equal(r.caseState?.groundedResult, 'invalidated', label);
@@ -275,9 +290,30 @@ test('15. an app fact UPDATE or REMOVAL invalidates a previously grounded result
   }
 });
 
+for (const action of ['update', 'retract'] as const) {
+  test(`admission round 2: a max-size app snapshot can ${action} its earliest fact`, async () => {
+    const { svc, sc, seen } = make({ script: (_p, call) => (call === 1 ? grounded() : plain()) });
+    const s = await svc.create('p', 'u', 'contextual');
+    seedGroundingControl(s);
+    const original = Object.fromEntries(Array.from({ length: 39 }, (_, index) => [`app_${index}`, index]));
+    await svc.handleMessage('p', 'u', s.id, msg('q1', original));
+    const unchanged = await svc.handleMessage('p', 'u', s.id, msg('Same snapshot', original));
+    assert.equal(unchanged.caseState?.groundedResult, 'valid');
+    const { app_0: _, ...withoutFirst } = original;
+    const updated = action === 'update' ? { ...withoutFirst, app_0: 100 } : withoutFirst;
+    const turn = await svc.handleMessage('p', 'u', s.id, msg('q2', updated));
+    assert.equal(turn.caseState?.groundedResult, 'invalidated');
+    assert.equal(seen[2].lastGroundedResult, undefined);
+    assert.equal(sc(s.id).facts.app_0, action === 'update' ? 100 : undefined);
+    assert.equal(sc(s.id).factMeta?.app_0?.origin, action === 'update' ? 'app' : undefined);
+    assert.equal(Object.keys(sc(s.id).factMeta ?? {}).length, action === 'update' ? 40 : 39);
+  });
+}
+
 test('15b. control: an unchanged snapshot keeps the grounded result valid', async () => {
   const { svc, seen } = make({ script: (_p, call) => (call === 1 ? grounded() : plain()) });
   const s = await svc.create('p', 'u', 'contextual');
+  seedGroundingControl(s);
   await svc.handleMessage('p', 'u', s.id, msg('q1', { current_state: 'hayd', duration_hours: 72 }));
   const r = await svc.handleMessage('p', 'u', s.id, msg('q2', { current_state: 'hayd', duration_hours: 72 }));
   assert.equal(r.caseState?.groundedResult, 'valid');

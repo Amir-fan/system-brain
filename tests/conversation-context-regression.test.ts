@@ -17,6 +17,7 @@ import { createFiqhHaydMinimalSkill } from '../src/domain/naqaa/fiqh-hayd-minima
 import { DecisionReadinessService } from '../src/core/readiness/readiness.service.ts';
 import { APPROVED_SOURCE_TITLES } from '../src/domain/naqaa/fiqh-hayd-contracts.ts';
 import type { SkillExecutionContext, SkillKnowledgePassage } from '../src/core/skill/skill.ts';
+import type { DecisionRequirement } from '../src/core/readiness/readiness.ts';
 
 function fakeStore() {
   const rows = new Map<string, ConversationSession>();
@@ -28,6 +29,15 @@ function fakeStore() {
       return s && s.projectId === p && s.actorSubject === a ? JSON.parse(JSON.stringify(s)) : null;
     },
     async save(s: ConversationSession) { rows.set(s.id, JSON.parse(JSON.stringify(s))); return s; },
+  };
+}
+
+/** These continuity fixtures start with an already-confirmed material fact. */
+function confirmedFact(store: ReturnType<typeof fakeStore>, session: ConversationSession, key: string, value: unknown) {
+  const stored = store.rows.get(session.id)!;
+  stored.sessionContext.facts[key] = value;
+  stored.sessionContext.factMeta = { ...stored.sessionContext.factMeta,
+    [key]: { certainty: 'CERTAIN', provenance: 'user_answer', at: session.updatedAt },
   };
 }
 
@@ -52,7 +62,7 @@ function knowledge() {
 }
 
 const tool = (query: string) => JSON.stringify({ action: 'USE_TOOL', tool: 'search_knowledge', query });
-const answerTerminal = (msg: string, summary: string, label = 'hayd') =>
+const answerTerminal = (msg: string, summary: string, label = 'hayd', materialFactKey = 'bleeding_days') =>
   JSON.stringify({
     action: 'TERMINAL',
     status: 'ANSWER',
@@ -60,14 +70,15 @@ const answerTerminal = (msg: string, summary: string, label = 'hayd') =>
     summary,
     evidenceRefs: ['chunk-1'],
     label,
+    materialFactKeys: [materialFactKey],
   });
 
 function makeScriptedModel() {
   const prompts: string[] = [];
   return {
     prompts,
-    async generateText(input: { message?: string }) {
-      const prompt = String(input.message ?? '');
+    async generateText(input: { instructions?: string; message?: string }) {
+      const prompt = [input.instructions, input.message].filter(Boolean).join('\n\n');
       prompts.push(prompt);
       const isToolTurn = prompt.includes('طلبك:');
 
@@ -115,7 +126,7 @@ function makeScriptedModel() {
           text: answerTerminal(
             'اللمعة الحمراء مع السائل الشفاف تُعتبر من ألوان الدم في زمن إمكان الحيض.',
             'السائل مع اللمعة حيض في زمن الإمكان',
-            'hayd'
+            'hayd', 'discharge_colour'
           ),
           model: 'test',
         };
@@ -128,7 +139,7 @@ function makeScriptedModel() {
           text: answerTerminal(
             'المستحاضة تتوضأ لكل فريضة وتصلي وصومها صحيح.',
             'تجوز الصلاة مع الاستحاضة',
-            'istihada'
+            'istihada', 'reported_state'
           ),
           model: 'test',
         };
@@ -140,6 +151,8 @@ function makeScriptedModel() {
           action: 'TERMINAL',
           status: 'ASK_USER',
           question: 'كم مدة دورتك المعتادة عادةً؟',
+          factKey: 'habit_duration',
+          answerType: 'duration',
         }),
         model: 'test',
       };
@@ -147,7 +160,11 @@ function makeScriptedModel() {
   };
 }
 
-function createTestHarness(store: ReturnType<typeof fakeStore>, model: ReturnType<typeof makeScriptedModel>) {
+function createTestHarness(
+  store: ReturnType<typeof fakeStore>,
+  model: ReturnType<typeof makeScriptedModel>,
+  memory?: { fetchBounded(projectId: string, ids: { subjectId?: string }): Promise<unknown> },
+) {
   const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
   const svc = new ConversationService({
     persistence: store,
@@ -186,6 +203,7 @@ function createTestHarness(store: ReturnType<typeof fakeStore>, model: ReturnTyp
         } as never;
       },
     },
+    ...(memory ? { memory: memory as never } : {}),
     defaultSkillId: skill.id,
   });
   return { svc, skill };
@@ -196,6 +214,7 @@ test('Test A — direct follow-up: "ما أدري" completes the case rather tha
   const model = makeScriptedModel();
   const { svc } = createTestHarness(store, model);
   const s = await svc.create('proj-1', 'user-1', 'contextual');
+  confirmedFact(store, s, 'bleeding_days', 3);
 
   // Turn 1
   const t1 = await svc.handleMessage('proj-1', 'user-1', s.id, { text: 'ينزل علي دم من ثلاثة أيام' });
@@ -215,6 +234,7 @@ test('Test B — pronoun/reference: "طيب إذا استمر؟" resolves refere
   const model = makeScriptedModel();
   const { svc } = createTestHarness(store, model);
   const s = await svc.create('proj-1', 'user-1', 'contextual');
+  confirmedFact(store, s, 'bleeding_days', 3);
 
   await svc.handleMessage('proj-1', 'user-1', s.id, { text: 'ينزل علي دم من ثلاثة أيام' });
   await svc.handleMessage('proj-1', 'user-1', s.id, { text: 'ما أدري' });
@@ -231,6 +251,7 @@ test('Test C — topic change: new question answered, prior istihada ruling NOT 
   const model = makeScriptedModel();
   const { svc } = createTestHarness(store, model);
   const s = await svc.create('proj-1', 'user-1', 'contextual');
+  confirmedFact(store, s, 'reported_state', 'istihada');
 
   // Q1
   const t1 = await svc.handleMessage('proj-1', 'user-1', s.id, { text: 'هل يجوز لي الصلاة وأنا في حالة استحاضة مستمرة؟' });
@@ -238,6 +259,7 @@ test('Test C — topic change: new question answered, prior istihada ruling NOT 
   assert.match(t1.message, /المستحاضة تتوضأ/);
 
   // Q2
+  confirmedFact(store, s, 'discharge_colour', 'red');
   const t2 = await svc.handleMessage('proj-1', 'user-1', s.id, { text: 'لو رأيت سائل شفاف مع لمعة حمراء اليوم هل هذا حيض؟' });
   assert.equal(t2.status, 'completed');
   assert.match(t2.message, /اللمعة الحمراء|السائل الشفاف/);
@@ -247,8 +269,24 @@ test('Test C — topic change: new question answered, prior istihada ruling NOT 
 test('Test D — private continuity: Turn 2 understands Turn 1, zero personal context/memory', async () => {
   const store = fakeStore();
   const model = makeScriptedModel();
-  const { svc } = createTestHarness(store, model);
+  const memoryCalls: string[] = [];
+  const memory = new Proxy({
+    async fetchBounded() {
+      return {
+        user: [{ id: 'private-memory', scope: 'user', memoryType: 'case', memoryKey: 'private_note', payload: { value: 'memory_leak' } }],
+        conversation: [],
+        case: [],
+      };
+    },
+  }, {
+    get(target, property, receiver) {
+      memoryCalls.push(String(property));
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const { svc } = createTestHarness(store, model, memory);
   const s = await svc.create('proj-1', 'user-1', 'private');
+  confirmedFact(store, s, 'bleeding_days', 3);
   assert.equal(s.mode, 'private');
 
   // Turn 1 in private mode
@@ -268,10 +306,102 @@ test('Test D — private continuity: Turn 2 understands Turn 1, zero personal co
   assert.equal(t2.status, 'completed');
   assert.match(t2.message, /حيض/);
 
-  // Verify no personal memory or appContext in final prompt
-  const lastPrompt = model.prompts[model.prompts.length - 1];
-  assert.ok(!lastPrompt.includes('calendar_entry'), 'Calendar must be absent');
-  assert.ok(!lastPrompt.includes('private_leak'), 'personal context must be absent');
+  // Verify no personal memory or appContext reaches ANY model call on either turn.
+  // Looking only at the final prompt would miss an ephemeral leak in an earlier call.
+  assert.ok(model.prompts.length > 0, 'the fixture must exercise the model boundary');
+  const forbiddenPromptContent = [
+    'duration_hours',
+    'current_state',
+    'calendar_entry',
+    'private_leak',
+    'private_note',
+    'memory_leak',
+  ];
+  for (const [promptIndex, prompt] of model.prompts.entries()) {
+    for (const forbidden of forbiddenPromptContent) {
+      assert.equal(
+        prompt.includes(forbidden),
+        false,
+        `private prompt ${promptIndex + 1} must not contain ${forbidden}`,
+      );
+    }
+  }
+  assert.deepEqual(memoryCalls, [], 'private continuity must not touch any personal Memory method');
+});
+
+test('Test D2 — corrected session fact outranks older Memory and is not asked again', async () => {
+  const store = fakeStore();
+  const requirements: DecisionRequirement[] = [
+    {
+      key: 'event_date',
+      description: 'Current event date',
+      material: true,
+      question: { key: 'event_date', wording: 'What is the event date?' },
+      interaction: { type: 'date' },
+    },
+    {
+      key: 'duration_days',
+      description: 'Current duration',
+      material: true,
+      question: { key: 'duration_days', wording: 'How many days?' },
+      interaction: { type: 'duration' },
+    },
+  ];
+  const seenContexts: Array<Record<string, unknown>> = [];
+  const svc = new ConversationService({
+    persistence: store,
+    understanding: {
+      evaluate: async ({ text }) => ({
+        status: 'CLEAR',
+        dialogueAct: 'CORRECTION',
+        language: 'en',
+        issues: [text],
+        references: { resolved: true },
+        corrections: [{ target: 'event_date', new: '2026-11-02' }],
+        candidates: [],
+        facts: [],
+        ambiguity: { material: false },
+        contextUsed: { userCount: 0, conversationCount: 0, caseCount: 0, scopes: [] },
+      }),
+    },
+    memory: {
+      fetchBounded: async () => ({
+        user: [{ id: 'old-date', scope: 'user', memoryType: 'case', memoryKey: 'event_date', payload: { value: '2026-01-01' } }],
+        conversation: [],
+        case: [],
+      }),
+    },
+    skills: {
+      execute: async ({ payload }) => {
+        const context = ((payload as Record<string, unknown>).context ?? {}) as Record<string, unknown>;
+        seenContexts.push({ ...context });
+        const known = Object.entries(context).map(([key, value]) => ({ key, value, source: 'user' as const }));
+        const result = new DecisionReadinessService().evaluate({ requirements, known });
+        return {
+          status: result.status === 'READY_FOR_DECISION' ? 'completed' : 'needs_information',
+          skillId: 'test.current-context',
+          skillVersion: 1,
+          runId: 'run-current-context',
+          readiness: result,
+        } as never;
+      },
+    },
+    defaultSkillId: 'test.current-context',
+    interactionsFor: () => ({ event_date: { type: 'date' }, duration_days: { type: 'duration' } }),
+  });
+
+  const session = await svc.create('proj-1', 'user-1', 'contextual');
+  await svc.handleMessage('proj-1', 'user-1', session.id, {
+    text: '2026-11-01', answers: [{ key: 'event_date', value: '2026-11-01' }],
+  });
+
+  const response = await svc.handleMessage('proj-1', 'user-1', session.id, { text: 'I meant 2026-11-02' });
+
+  assert.equal(store.rows.get(session.id)!.sessionContext.facts.event_date, '2026-11-02');
+  assert.equal(seenContexts.at(-1)?.event_date, '2026-11-02', 'the skill receives the corrected current fact');
+  assert.notEqual(seenContexts.at(-1)?.event_date, '2026-01-01', 'older Memory cannot replace session truth');
+  assert.equal(response.readiness?.missingKeys?.includes('event_date'), false, 'the corrected fact is not asked again');
+  assert.equal(response.interaction?.key, 'duration_days', 'only the remaining material gap is asked');
 });
 
 test('Test E — new conversation isolation: does not inherit prior conversation history', async () => {

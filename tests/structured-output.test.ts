@@ -34,6 +34,22 @@ function fetchCapture(captured: { body?: Record<string, unknown> }, reply: unkno
 const call = (gw: OpenRouterGateway, extra: Record<string, unknown> = {}) =>
   gw.generateText({ projectId: 'p', runId: 'r', capability: 'chat', input: { message: 'x' }, ...extra } as never);
 
+for (const [finishReason, content] of [
+  ['content_filter', ''],
+  ['length', '{"status":"ANSWER"'],
+  ['length', '{"status":"ASK_USER","question":"When?"}'],
+  ['tool_calls', '{"status":"ASK_USER","question":"When?","factKey":"onset"}'],
+  ['provider_specific_incomplete', '{"status":"ANSWER"}'],
+  ['stop', '   '],
+] as const) {
+  test(`gateway rejects unusable completion: ${finishReason} / ${content}`, async () => {
+    const gw = new OpenRouterGateway({ apiKey: 'k', defaultModel: 'm', fetchImpl: fetchCapture({}, {
+      choices: [{ finish_reason: finishReason, message: { content } }],
+    }) });
+    await assert.rejects(call(gw), { kind: 'provider', code: 'PROVIDER_CHAT_INCOMPLETE' });
+  });
+}
+
 // 1. The gateway sends response_format only when the caller asks for it
 test('P04/A: response_format is sent exactly when requested', async () => {
   const captured: { body?: Record<string, unknown> } = {};
@@ -63,7 +79,7 @@ test('P04/C: valid statuses are accepted; an invalid status fails closed', async
         status === 'ANSWER'
           ? { action: 'TERMINAL', status, message: 'جواب', evidenceRefs: ['chunk-1'] }
           : status === 'ASK_USER'
-          ? { action: 'TERMINAL', status, question: 'سؤال؟' }
+          ? { action: 'TERMINAL', status, question: 'سؤال؟', factKey: 'requested_fact', answerType: 'free_text' }
           : { action: 'TERMINAL', status, message: 'لا يكفي' },
       ),
     });
@@ -105,4 +121,33 @@ test('P04/F: embeddings and non-chat paths carry no response_format', async () =
   const gw = new OpenRouterGateway({ apiKey: 'k', defaultModel: 'm', fetchImpl: fetchCapture(captured, { data: [{ embedding: [1, 2] }], model: 'e', usage: {} }) });
   await gw.embedTexts({ projectId: 'p', runId: 'r', capability: 'embeddings', texts: ['x'] } as never);
   assert.equal(captured.body!.response_format, undefined);
+});
+
+test('model trust boundary: instructions are a system message and content stays user data', async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  let attempt = 0;
+  const fetchImpl = (async (_url: string, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
+    attempt += 1;
+    if (attempt === 1) return { ok: false, status: 400, json: async () => ({}) } as Response;
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '{}' } }], usage: {}, model: 'm' }) } as Response;
+  }) as typeof fetch;
+  const gw = new OpenRouterGateway({ apiKey: 'k', defaultModel: 'm', fetchImpl });
+
+  await gw.generateText({
+    projectId: 'p', runId: 'r', capability: 'chat',
+    instructions: 'trusted rules',
+    input: { message: 'untrusted user and retrieved content' },
+    responseFormat: FORMAT,
+  });
+
+  const expectedMessages = [
+    { role: 'system', content: 'trusted rules' },
+    { role: 'user', content: 'untrusted user and retrieved content' },
+  ];
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies[0].response_format, { type: 'json_schema', json_schema: FORMAT });
+  assert.deepEqual(bodies[0].messages, expectedMessages);
+  assert.deepEqual(bodies[1].messages, expectedMessages, 'json_object retry must preserve message roles');
+  assert.deepEqual(bodies[1], { ...bodies[0], response_format: { type: 'json_object' } });
 });

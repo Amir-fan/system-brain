@@ -136,7 +136,7 @@ test('K-1 (control): a CERTAIN current value DOES satisfy and is not asked', asy
   const out = await runSkill({
     input: {
       text: 'حالة',
-      context: { bleeding_cessation: 'توقف تمامًا' },
+      context: { bleeding_cessation: true },
       factMeta: { bleeding_cessation: { certainty: 'CERTAIN', provenance: 'user_answer' } },
     },
     model: scriptedModel([PLANNER, reasoningPlan([requirement('bleeding_cessation', 'هل توقف الدم؟')])]),

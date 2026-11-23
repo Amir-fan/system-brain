@@ -12,7 +12,7 @@ import { call, json } from './transport';
 
 export type ConversationMode = 'contextual' | 'private';
 export type ConversationTurnStatus = 'completed' | 'needs_information' | 'insufficient_context' | 'needs_clarification' | 'failed';
-export type InteractionType = 'single_choice' | 'multiple_choice' | 'yes_no' | 'number' | 'date' | 'duration' | 'free_text';
+export type InteractionType = 'single_choice' | 'multiple_choice' | 'yes_no' | 'number' | 'date' | 'time' | 'duration' | 'free_text';
 export type ConversationStage = 'UNDERSTANDING' | 'CONTEXT_RETRIEVAL' | 'CHECKING_READINESS' | 'EXECUTING_SKILL' | 'PREPARING_RESPONSE';
 
 export interface InteractionSpec {

@@ -48,13 +48,27 @@ export async function handleUnderstandingEvaluate(
     return fail(auth.message, auth.kind === 'not_found' ? 'not_found' : 'authorization', auth.kind === 'not_found' ? 404 : 403);
   }
   const text = typeof body.text === 'string' ? body.text : '';
-  const subjectId = typeof body.subjectId === 'string' && body.subjectId ? (body.subjectId as string) : undefined;
-  const conversationId = typeof body.conversationId === 'string' && body.conversationId ? (body.conversationId as string) : undefined;
-  const caseId = typeof body.caseId === 'string' && body.caseId ? (body.caseId as string) : undefined;
+  const requestedSubjectId = typeof body.subjectId === 'string' && body.subjectId ? body.subjectId : undefined;
+  const requestedConversationId = typeof body.conversationId === 'string' && body.conversationId ? body.conversationId : undefined;
+  const requestedCaseId = typeof body.caseId === 'string' && body.caseId ? body.caseId : undefined;
+  const isService = auth.membership.role === 'service';
+  if (!isService && requestedSubjectId !== undefined && requestedSubjectId !== actor) {
+    return fail('understanding subject is not authorized', 'authorization', 403, 'UNDERSTANDING_SUBJECT_FORBIDDEN');
+  }
+  if (!isService && (requestedConversationId !== undefined || requestedCaseId !== undefined)) {
+    return fail('understanding context subject is not authorized', 'authorization', 403, 'UNDERSTANDING_SUBJECT_FORBIDDEN');
+  }
+  const subjectId = isService ? requestedSubjectId : actor;
+  const conversationId = isService ? requestedConversationId : undefined;
+  const caseId = isService ? requestedCaseId : undefined;
   const requestTimestamp = typeof body.requestTimestamp === 'string' && body.requestTimestamp ? (body.requestTimestamp as string) : undefined;
 
   try {
-    const context = await deps.contextFetcher(projectId, { subjectId, conversationId, caseId });
+    const context = await deps.contextFetcher(projectId, {
+      ...(subjectId ? { subjectId } : {}),
+      ...(conversationId ? { conversationId } : {}),
+      ...(caseId ? { caseId } : {}),
+    });
     const result = await deps.service.evaluate({
       projectId,
       text,

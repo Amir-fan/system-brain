@@ -16,6 +16,7 @@ const APPROVED_ID = 'src-approved-1';
 const UNAPPROVED_ID = 'src-unapproved-9';
 const C7 = 'chunk-7';
 const C8 = 'chunk-8';
+const CONFIRMED_ANSWER = { certainty: 'CERTAIN', provenance: 'user_answer' } as const;
 
 const passage = (chunkId: string, sourceId: string, text: string) => ({
   chunkId, documentId: 'doc-1', sourceId,
@@ -29,12 +30,15 @@ const APPROVED_EVIDENCE = [
 ];
 
 interface Scenario {
+  text?: string;
   /** decision-step reply (the third model call). */
   decision: string | Record<string, unknown>;
   evidence?: ReturnType<typeof passage>[];
   knownFacts?: Record<string, unknown>;
+  factMeta?: Record<string, { certainty: string; provenance?: string }>;
   /** the interpreter reply (the second model call) defaults to no requirements. */
   interpretation?: string | Record<string, unknown>;
+  statementFacts?: Array<Record<string, unknown>>;
 }
 
 const PLANNER = JSON.stringify({ issue: 'حكم إفرازة في آخر أيام الحيض', queries: ['الصفرة والكدرة', 'اتصال الإفراز بالحيض'] });
@@ -66,7 +70,16 @@ async function runDecision(sc: Scenario) {
   const skill = createFiqhHaydSkill({ readiness: new DecisionReadinessService() });
   const out = (await skill.execute({
     projectId: 'p1', actor: 'a1',
-    input: { text: 'نزل علي سائل شفاف في اليوم الاخير من دورتي مع لمعة حمراء خفيفة .. هل هو حيض ؟', context: sc.knownFacts ?? {} },
+    input: {
+      text: sc.text ?? 'نزل علي سائل شفاف في اليوم الاخير من دورتي مع لمعة حمراء خفيفة .. هل هو حيض ؟',
+      context: sc.knownFacts ?? { bleeding_duration_hours: 6 },
+      ...(sc.factMeta
+        ? { factMeta: sc.factMeta }
+        : sc.knownFacts === undefined
+          ? { factMeta: { bleeding_duration_hours: CONFIRMED_ANSWER } }
+          : {}),
+      ...(sc.statementFacts ? { statementFacts: sc.statementFacts } : {}),
+    },
     knowledge, model,
   } as never)) as Record<string, unknown>;
   return { out, prompts: decisions };
@@ -80,14 +93,113 @@ const decided = (over: Record<string, unknown> = {}) => ({
   confidence: 'MEDIUM',
   sourceSupport: 'SUPPORTED',
   evidenceRefs: [C7, C8],
+  materialFactKeys: ['bleeding_duration_hours'],
   observationMappings: [{ observation: 'سائل شفاف مع لمعة حمراء خفيفة', concept: 'ليس من ألوان الدم المعتبرة', evidenceRefs: [C7] }],
   unresolved: [],
   ...over,
 });
 
+describe('personal case readiness at the fiqh decision boundary', () => {
+  const question = 'هل كانت الصفرة متصلة بالحيض؟';
+  const scenario: Scenario = {
+    text: 'رأيت صفرة، فهل هي حيض؟',
+    interpretation: {
+      requirements: [{ key: 'bleeding_contiguity', question: { wording: question }, citations: [C8] }],
+      unresolved: [],
+    },
+    decision: decided({
+      category: 'حيض', directAnswer: 'الصفرة هنا متصلة بالحيض فتأخذ حكمه.',
+      explanation: 'النص يعلق الحكم على الاتصال.', evidenceRefs: [C8], observationMappings: [],
+      materialFactKeys: ['bleeding_contiguity'],
+    }),
+  };
+
+  it('a complete personal case can receive a decision citing the approved supporting passage', async () => {
+    const { out, prompts } = await runDecision({
+      ...scenario, knownFacts: { bleeding_contiguity: true }, factMeta: { bleeding_contiguity: CONFIRMED_ANSWER },
+    });
+    assert.match(prompts[2], /"bleeding_contiguity":true/);
+    assert.equal(out.status, 'READY_FOR_FIQH_DECISION');
+    const answer = out.answer as { text: string; label: string; evidenceIds: string[]; sourceTitle: string };
+    assert.equal(answer.label, 'حيض');
+    assert.match(answer.text, /الصفرة هنا متصلة/);
+    assert.deepEqual(answer.evidenceIds, [C8]);
+    assert.equal(answer.sourceTitle, APPROVED_EVIDENCE[1].sourceTitle);
+  });
+
+  it('removing the one material fact emits one question and prevents the proposed ruling', async () => {
+    const { out, prompts } = await runDecision(scenario);
+    assert.equal(out.status, 'NEEDS_INFORMATION');
+    assert.equal(out.answer, undefined);
+    assert.equal(out.decision, undefined);
+    assert.deepEqual(out.requirementKeys, ['bleeding_contiguity']);
+    assert.deepEqual((out.readiness as { nextQuestion: unknown }).nextQuestion, { key: 'bleeding_contiguity', wording: question });
+    assert.equal(prompts.length, 2, 'the decision model must never see the incomplete case');
+  });
+
+  for (const [description, value, meta] of [
+    ['missing provenance', true, { certainty: 'CERTAIN' }],
+    ['missing metadata', true, undefined],
+    ['legacy user statement', true, { certainty: 'CERTAIN', provenance: 'user_statement' }],
+    ['evidence', true, { certainty: 'CERTAIN', provenance: 'evidence' }],
+    ['memory', true, { certainty: 'CERTAIN', provenance: 'memory' }],
+    ['incompatible prior skill value', 4, { certainty: 'CERTAIN', provenance: 'user_answer' }],
+  ] as const) {
+    it(`admission round 3: control requirements reject ${description}`, async () => {
+      const { out, prompts } = await runDecision({
+        ...scenario, knownFacts: { bleeding_contiguity: value },
+        ...(meta ? { factMeta: { bleeding_contiguity: meta } } : {}),
+      });
+      assert.equal(out.status, 'NEEDS_INFORMATION');
+      assert.deepEqual(out.requirementKeys, ['bleeding_contiguity']);
+      assert.equal(out.answer, undefined);
+      assert.equal(prompts.length, 2);
+    });
+  }
+
+  it('admission round 3: a decision-stage requirement still asks for a compatible answer', async () => {
+    const key = 'bleeding_contiguity';
+    const { out, prompts } = await runDecision({
+      text: scenario.text,
+      interpretation: { requirements: [], unresolved: [] },
+      knownFacts: { [key]: 4 },
+      factMeta: { [key]: CONFIRMED_ANSWER },
+      decision: { status: 'NEEDS_INFORMATION', needsInformation: { key, question: { wording: question }, evidenceRefs: [C8] } },
+    });
+    assert.equal(out.status, 'NEEDS_INFORMATION');
+    assert.equal(out.answer, undefined);
+    assert.equal((out.readiness as { status: string }).status, 'NEEDS_INFORMATION');
+    assert.match(prompts[2], /"knownFacts":\{\}/);
+  });
+
+  it('caller-supplied CERTAIN statement candidates remain proposals and cannot satisfy readiness', async () => {
+    const { out, prompts } = await runDecision({
+      interpretation: {
+        requirements: [{ key: 'bleeding_duration_hours', question: { wording: 'كم ساعة استمر الدم؟' }, citations: [C8] }],
+        unresolved: [],
+      },
+      statementFacts: [{
+        kind: 'duration', value: 6, unit: 'hour', originalText: '6 hours', certainty: 'CERTAIN', provenance: 'user_statement',
+      }],
+      knownFacts: {},
+      factMeta: {},
+      decision: decided(),
+    });
+
+    assert.equal(out.status, 'NEEDS_INFORMATION');
+    assert.deepEqual(out.requirementKeys, ['bleeding_duration_hours']);
+    assert.equal(out.answer, undefined);
+    assert.equal(prompts.length, 2, 'an advisory candidate cannot open the decision step');
+  });
+});
+
 describe('K25 decision — guard (model proposes, code validates)', () => {
   it('accepts a fully grounded proposal and produces a user-facing answer', async () => {
-    const { out } = await runDecision({ decision: decided() });
+    const { out } = await runDecision({
+      decision: decided({ materialFactKeys: ['bleeding_duration_hours'] }),
+      knownFacts: { bleeding_duration_hours: 6 },
+      factMeta: { bleeding_duration_hours: CONFIRMED_ANSWER },
+    });
     assert.equal(out.status, 'READY_FOR_FIQH_DECISION');
     const d = out.decision as { status: string; confidence: string; evidenceRefs: string[] };
     assert.equal(d.status, 'DECIDED');
@@ -106,6 +218,25 @@ describe('K25 decision — guard (model proposes, code validates)', () => {
     assert.equal(t.workload, 'knowledge_answer');
     assert.equal(t.model, 'openrouter/test/model');
     assert.equal(((t.notes as string[]) ?? []).some((n) => n.startsWith('decision_') || n.startsWith('mapping_')), false); // no rejection codes
+  });
+
+  it('final hardening: a personal decision without admitted material dependencies fails closed', async () => {
+    const { out } = await runDecision({ decision: decided(), knownFacts: {}, factMeta: {} });
+    assert.equal(out.status, 'SOURCE_GAP');
+    assert.equal((out.answer as { label?: string } | undefined)?.label, undefined);
+    assert.notEqual((out.trace as { decisionStatus?: string }).decisionStatus, 'DECIDED');
+  });
+
+  it('final hardening: a presentation preference cannot authorize a control-skill decision', async () => {
+    const key = 'preferred_language';
+    const { out } = await runDecision({
+      decision: decided({ materialFactKeys: [key] }),
+      knownFacts: { [key]: 'Arabic' },
+      factMeta: { [key]: CONFIRMED_ANSWER },
+    });
+    assert.equal(out.status, 'SOURCE_GAP');
+    assert.equal((out.answer as { label?: string } | undefined)?.label, undefined);
+    assert.ok(((out.trace as { notes?: string[] }).notes ?? []).includes('decision_material_facts_unconfirmed'));
   });
 
   it('A. rejects an evidenceRef that was never retrieved (hallucinated citation)', async () => {
@@ -146,6 +277,22 @@ describe('K25 decision — guard (model proposes, code validates)', () => {
     const account = await runDecision({ decision: decided({ observationMappings: [] }) });
     assert.equal(account.out.status, 'SOURCE_GAP');
     assert.ok(((account.out.trace as { notes: string[] }).notes ?? []).includes('unaccounted_unsupported_observation'));
+  });
+
+  it('a nonmaterial exception must explicitly identify the unresolved observation it clears', async () => {
+    const observation = 'سائل لم يصفه المصدر';
+    const interpretation = { requirements: [], unresolved: [observation] };
+    for (const [item, material, expected] of [
+      ['تفصيل آخر', false, 'SOURCE_GAP'],
+      [observation, undefined, 'SOURCE_GAP'],
+      [observation, false, 'READY_FOR_FIQH_DECISION'],
+    ] as const) {
+      const { out } = await runDecision({
+        interpretation,
+        decision: decided({ observationMappings: [], unresolved: [{ item, material }] }),
+      });
+      assert.equal(out.status, expected);
+    }
   });
 
   it('E. fails safely on unusable / invalid model output (no ruling)', async () => {
@@ -217,6 +364,7 @@ describe('K25 decision — anti-hardcoding (the facts drive the outcome)', () =>
       confidence: 'MEDIUM',
       sourceSupport: 'SUPPORTED',
       evidenceRefs: [C8],
+      materialFactKeys: [contiguousKey],
       observationMappings: [{ observation: 'سائل شفاف مع لمعة حمراء خفيفة', concept: 'إفرازة ملونة', evidenceRefs: [C8] }],
       unresolved: [],
     });
@@ -225,8 +373,9 @@ describe('K25 decision — anti-hardcoding (the facts drive the outcome)', () =>
     // The stub is deliberately dumb: the SKILL passes the real facts to the reasoning
     // layer, and the guard validates whatever comes back. Here we prove the fact is
     // actually delivered to the reasoning layer (no hardcoded case replay).
-    const withFact = await runDecision({ decision: reasoningStub('bleeding_contiguity'), knownFacts: { bleeding_contiguity: true } });
-    const withoutFact = await runDecision({ decision: reasoningStub('bleeding_contiguity'), knownFacts: { bleeding_contiguity: false } });
+    const factMeta = { bleeding_contiguity: CONFIRMED_ANSWER };
+    const withFact = await runDecision({ decision: reasoningStub('bleeding_contiguity'), knownFacts: { bleeding_contiguity: true }, factMeta });
+    const withoutFact = await runDecision({ decision: reasoningStub('bleeding_contiguity'), knownFacts: { bleeding_contiguity: false }, factMeta });
     assert.equal(withFact.out.status, 'READY_FOR_FIQH_DECISION');
     assert.equal(withoutFact.out.status, 'READY_FOR_FIQH_DECISION');
     const p1 = withFact.prompts[2];
@@ -237,8 +386,9 @@ describe('K25 decision — anti-hardcoding (the facts drive the outcome)', () =>
   });
 
   it('a correction replaces the fact and the case is decided again on the new facts', async () => {
-    const first = await runDecision({ decision: decided({ category: 'حيض', directAnswer: 'نعم هو حيض.' }), knownFacts: { bleeding_contiguity: true } });
-    const corrected = await runDecision({ decision: decided({ category: 'طهر', directAnswer: 'لا، هذا ليس حيضًا.' }), knownFacts: { bleeding_contiguity: false } });
+    const factMeta = { bleeding_contiguity: CONFIRMED_ANSWER };
+    const first = await runDecision({ decision: decided({ category: 'حيض', directAnswer: 'نعم هو حيض.', materialFactKeys: ['bleeding_contiguity'] }), knownFacts: { bleeding_contiguity: true }, factMeta });
+    const corrected = await runDecision({ decision: decided({ category: 'طهر', directAnswer: 'لا، هذا ليس حيضًا.', materialFactKeys: ['bleeding_contiguity'] }), knownFacts: { bleeding_contiguity: false }, factMeta });
     assert.equal((first.out.decision as { category: string }).category, 'حيض');
     assert.equal((corrected.out.decision as { category: string }).category, 'طهر');
     assert.match(String((corrected.out.answer as { text: string }).text), /ليس حيضًا/);
@@ -265,13 +415,20 @@ describe('K25 — session-grounded follow-ups (no model call, never stale)', () 
   const STORED = {
     skillId: 'naqaa.fiqh-hayd',
     status: 'DECIDED',
+    caseSignature: 'verified-case-signature',
     decision: 'ليس حيضًا',
     explanation: 'هذا الدم ليس حيضًا؛ لأن مدته أقل من يوم وليلة.',
     sourceTitle: 'الحيض الالوكة',
     evidenceRefs: [C7, C8],
+    materialFactKeys: ['bleeding_duration_hours'],
   };
 
-  async function runFollowUp(text: string, stored: unknown) {
+  async function runFollowUp(
+    text: string,
+    stored: unknown,
+    context: Record<string, unknown> = { bleeding_duration_hours: 6 },
+    factMeta: Record<string, { certainty: string; provenance?: string }> = { bleeding_duration_hours: CONFIRMED_ANSWER },
+  ) {
     const prompts: string[] = [];
     const model = { async generateText({ message }: { message?: string }) { prompts.push(message ?? ''); return { text: '{}' }; } };
     const knowledge = {
@@ -282,7 +439,7 @@ describe('K25 — session-grounded follow-ups (no model call, never stale)', () 
     const skill = createFiqhHaydSkill({ readiness: new DecisionReadinessService() });
     const out = (await skill.execute({
       projectId: 'p1', actor: 'a1',
-      input: { text, context: {}, lastGroundedResult: stored },
+      input: { text, context, factMeta, lastGroundedResult: stored },
       knowledge, model,
     } as never)) as Record<string, unknown>;
     return { out, prompts };
@@ -297,6 +454,8 @@ describe('K25 — session-grounded follow-ups (no model call, never stale)', () 
     assert.equal(a.sourceTitle, 'الحيض الالوكة');
     assert.deepEqual(a.evidenceIds, [C7, C8]);
     assert.equal((out.trace as Record<string, unknown>).status, 'FOLLOWUP_SOURCE');
+    assert.deepEqual((out.trace as Record<string, unknown>).materialFactKeys, ['bleeding_duration_hours']);
+    assert.equal((out.trace as Record<string, unknown>).reusedGroundedResult, true);
   });
 
   it('answers «ليش؟» with the SAME grounded explanation (no re-questioning)', async () => {
@@ -318,8 +477,32 @@ describe('K25 — session-grounded follow-ups (no model call, never stale)', () 
     assert.ok(prompts.length > 0, 'another skill\'s result is never reused here');
   });
 
+  it('admission round 2: the skill cannot reuse an unsigned result through a trusted direct call', async () => {
+    const { prompts } = await runFollowUp('شنو المصدر؟', { ...STORED, caseSignature: undefined });
+    assert.ok(prompts.length > 0);
+  });
+
+  for (const [name, stored, context, factMeta] of [
+    ['legacy missing proof', { ...STORED, materialFactKeys: undefined }, { bleeding_duration_hours: 6 }, { bleeding_duration_hours: CONFIRMED_ANSWER }],
+    ['empty proof', { ...STORED, materialFactKeys: [] }, { bleeding_duration_hours: 6 }, { bleeding_duration_hours: CONFIRMED_ANSWER }],
+    ['presentation-only proof', { ...STORED, materialFactKeys: ['output_style'] }, { output_style: 'concise' }, { output_style: CONFIRMED_ANSWER }],
+    ['absent dependency', { ...STORED, materialFactKeys: ['bleeding_duration_hours'] }, {}, {}],
+    ['uncertain dependency', { ...STORED, materialFactKeys: ['bleeding_duration_hours'] }, { bleeding_duration_hours: 6 }, { bleeding_duration_hours: { certainty: 'UNCERTAIN', provenance: 'user_answer' } }],
+    ['wrong provenance', { ...STORED, materialFactKeys: ['bleeding_duration_hours'] }, { bleeding_duration_hours: 6 }, { bleeding_duration_hours: { certainty: 'CERTAIN', provenance: 'memory' } }],
+    ['canonical-contract mismatch', { ...STORED, materialFactKeys: ['bleeding_duration_hours'] }, { bleeding_duration_hours: 'six' }, { bleeding_duration_hours: CONFIRMED_ANSWER }],
+  ] as const) {
+    it(`final fiqh fix round 1: follow-up rejects ${name}`, async () => {
+      const { out, prompts } = await runFollowUp('ليش؟', stored, context, factMeta);
+      assert.ok(prompts.length > 0, 'unsafe stored prose must not take the zero-model replay path');
+      assert.notEqual((out.answer as { text?: string } | undefined)?.text, STORED.explanation);
+      assert.notEqual((out.answer as { label?: string } | undefined)?.label, STORED.decision);
+    });
+  }
+
   it('the decision input carries the questions that produced the stored facts', async () => {
-    const { out, prompts } = await runDecision({ decision: decided(), knownFacts: { bleeding_duration_hours: 6 } });
+    const { out, prompts } = await runDecision({
+      decision: decided(), knownFacts: { bleeding_duration_hours: 6 }, factMeta: { bleeding_duration_hours: CONFIRMED_ANSWER },
+    });
     assert.equal(out.status, 'READY_FOR_FIQH_DECISION');
     assert.equal(prompts.length, 3);
   });
@@ -339,9 +522,10 @@ describe('K25 — session-grounded follow-ups (no model call, never stale)', () 
       projectId: 'p1', actor: 'a1',
       input: {
         text: 'نزل دم ٦ ساعات فقط',
-        context: { total_bleeding_duration_24h: true },
+        context: { bleeding_cessation: true },
+        factMeta: { bleeding_cessation: CONFIRMED_ANSWER },
         recentTurns: [
-          { role: 'assistant', text: 'هل نزل دم آخر بحيث يصل المجموع إلى ٢٤ ساعة؟' },
+          { role: 'assistant', text: 'هل توقف الدم؟' },
           { role: 'user', text: 'نعم' },
         ],
       },
@@ -350,7 +534,7 @@ describe('K25 — session-grounded follow-ups (no model call, never stale)', () 
     } as never);
     const decisionPrompt = prompts[2];
     assert.match(decisionPrompt, /answeredQuestions/);
-    assert.match(decisionPrompt, /هل نزل دم آخر بحيث يصل المجموع إلى ٢٤ ساعة/);
-    assert.match(decisionPrompt, /total_bleeding_duration_24h/);
+    assert.match(decisionPrompt, /هل توقف الدم/);
+    assert.match(decisionPrompt, /"knownFacts":\{"bleeding_cessation":true\}/);
   });
 });

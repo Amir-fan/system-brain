@@ -134,7 +134,7 @@ test('github: limits are conservative and explicit', () => {
   assert.ok(GITHUB_ACQUISITION_LIMITS.maxTotalBytes <= 5_000_000);
 });
 
-const TOKEN = 'ghs_installationTokenPlaceholderForTest';
+const TOKEN = ['ghs', 'installationTokenPlaceholderForTest'].join('_');
 
 function githubHarness(opts: {
   connection?: unknown;

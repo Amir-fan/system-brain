@@ -93,11 +93,13 @@ function InteractionComposer({
 }) {
   const [input, setInput] = useState('');
   const [showOther, setShowOther] = useState(false);
+  const [selectedOptions, setSelectedOptions] = useState<string[]>([]);
 
   const sub = (value: unknown, text = '') => {
     onSend({ key: interaction.key, value, text: text || interaction.question });
     setShowOther(false);
     setInput('');
+    setSelectedOptions([]);
   };
 
   const submitText = () => {
@@ -154,13 +156,40 @@ function InteractionComposer({
     );
   }
 
+  if (interaction.type === 'multiple_choice') {
+    return (
+      <Control interaction={interaction} showQuestion={showQuestion}>
+        <div className="flex flex-wrap items-center gap-3">
+          {interaction.options?.map((option) => (
+            <label key={option} className="flex items-center gap-1.5 text-sm">
+              <input
+                type="checkbox"
+                value={option}
+                checked={selectedOptions.includes(option)}
+                disabled={submitting}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked;
+                  setSelectedOptions((selected) => checked ? [...selected, option] : selected.filter((value) => value !== option));
+                }}
+              />
+              {option}
+            </label>
+          ))}
+          <Button variant="primary" disabled={Boolean(submitting) || selectedOptions.length === 0} onClick={() => sub(selectedOptions, selectedOptions.join('، '))}>
+            إرسال
+          </Button>
+        </div>
+      </Control>
+    );
+  }
+
   const isNumeric = interaction.type === 'number' || interaction.type === 'duration';
   return (
     <Control interaction={interaction} showQuestion={showQuestion}>
       <div className="flex items-center gap-2">
         <input
           value={input}
-          type={interaction.type === 'date' ? 'date' : isNumeric ? 'number' : 'text'}
+          type={interaction.type === 'date' || interaction.type === 'time' ? interaction.type : isNumeric ? 'number' : 'text'}
           placeholder={interaction.type === 'free_text' ? 'اكتب …' : isNumeric ? 'أدخل قيمة' : 'أدخل التاريخ'}
           onKeyDown={(e) => e.key === 'Enter' && submitText()}
           onChange={(e) => setInput(e.target.value)}

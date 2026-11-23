@@ -31,6 +31,33 @@ test('A simple question -> QUESTION, CLEAR, one issue', async () => {
   assert.equal(r.issues.length, 1);
 });
 
+for (const [text, expected] of [
+  ['كَمْ يوماً أحتاج', 'QUESTION'],
+  ['ما معنى الطهر', 'QUESTION'],
+  ['السلام عليكم، كم يوم أحتاج بعد 6 أيام', 'QUESTION'],
+  ['أحتاج أنتظر ٦ أيام؟ 🙏', 'QUESTION'],
+  ['‘What does purity mean?’', 'QUESTION'],
+  ['ما أدري بالضبط', 'STATEMENT'],
+  ['ما نزل دم', 'STATEMENT'],
+  ['ما نزل دم لمدة ٦ أيام', 'STATEMENT'],
+  ['كمال حضر', 'STATEMENT'],
+  ['من ٦ أيام', 'STATEMENT'],
+] as const) {
+  test(`pending-answer Arabic dialogue act: ${text}`, async () => {
+    const r = await svc.evaluate({ projectId: 'p', text });
+    assert.equal(r.dialogueAct, expected);
+  });
+}
+
+test('a question-shaped correction produces no replacement for a known fact', async () => {
+  const r = await svc.evaluate({
+    projectId: 'p', text: 'لا، قصدي 6؟',
+    context: ctx([ref({ memoryKey: 'count', payload: { value: 4 } })]),
+  });
+  assert.deepEqual(r.corrections, []);
+  assert.equal(r.dialogueAct, 'QUESTION');
+});
+
 test('B multi-issue -> two issues, no answer', async () => {
   const r = await svc.evaluate({ projectId: 'p', text: 'What time is my appointment, and what documents do I need?' });
   assert.equal(r.issues.length, 2);
@@ -63,6 +90,239 @@ test('C2 Arabic correction phrasings carry a value (قصدي/أعني/مقصود
     assert.equal(r.corrections[0].new, expected, text);
   }
 });
+
+test('C3 correction resolves a unique typed fact from conversation context', async () => {
+  const inputCtx: BoundedUnderstandingContext = {
+    user: [],
+    conversation: [ref({
+      id: 'session:last_bleeding_start',
+      scope: 'conversation',
+      memoryType: 'session',
+      memoryKey: 'last_bleeding_start',
+      payload: { value: '2026-11-01' },
+    })],
+    case: [],
+  };
+
+  const r = await svc.evaluate({ projectId: 'p', text: 'لا، قصدي 2026-11-02', context: inputCtx });
+
+  assert.deepEqual(r.corrections, [{ target: 'last_bleeding_start', old: '2026-11-01', new: '2026-11-02' }]);
+});
+
+test('C4 correction does not guess between multiple typed facts', async () => {
+  const inputCtx: BoundedUnderstandingContext = {
+    user: [],
+    conversation: [
+      ref({ id: 'start', scope: 'conversation', memoryType: 'session', memoryKey: 'start_date', payload: { value: '2026-11-01' } }),
+      ref({ id: 'end', scope: 'conversation', memoryType: 'session', memoryKey: 'end_date', payload: { value: '2026-11-03' } }),
+    ],
+    case: [],
+  };
+
+  const r = await svc.evaluate({ projectId: 'p', text: 'لا، قصدي 2026-11-02', context: inputCtx });
+
+  assert.deepEqual(r.corrections, [{ new: '2026-11-02', targetAmbiguous: true }]);
+});
+
+test('admission round 2: equivalent boolean spellings keep correction targets ambiguous', async () => {
+  const inputCtx = ctx([
+    ref({ memoryKey: 'first', payload: { value: true } }),
+    ref({ memoryKey: 'second', payload: { value: false } }),
+  ]);
+  for (const text of ['I meant yes', 'I meant correct', 'I meant yeah', 'I meant no', 'لا، قصدي كلا', 'لا، قصدي أي نعم', 'لا، قصدي إي نعم']) {
+    const result = await svc.evaluate({ projectId: 'p', text, context: inputCtx });
+    assert.equal(result.corrections[0]?.targetAmbiguous, true, text);
+  }
+});
+
+test('a time in an ordinary question does not produce a correction', async () => {
+  const r = await svc.evaluate({ projectId: 'p', text: 'Can I reschedule for 10:00?', context: ctx([ref()]) });
+
+  assert.equal(r.dialogueAct, 'QUESTION');
+  assert.deepEqual(r.corrections, []);
+  assert.equal(r.facts.find((fact) => fact.key === 'time')?.value, '10:00');
+});
+
+test('a correction with two replacement times cannot resolve a target', async () => {
+  for (const text of ['I meant 10:00 or 11:00', 'I meant at 10 or 11:00']) {
+    const r = await svc.evaluate({ projectId: 'p', text, context: ctx([ref()]) });
+    assert.equal(r.dialogueAct, 'CORRECTION');
+    assert.deepEqual(r.corrections, [], text);
+  }
+});
+
+test('ordinary minute-level clocks distinguish AM/PM tokens from word prefixes without emitting corrections', async () => {
+  for (const [text, expected] of [
+    ['Can I reschedule for 10:30 p.m.?', '22:30'],
+    ['Is 12:30 ample time?', '12:30'],
+  ]) {
+    const r = await svc.evaluate({ projectId: 'p', text, context: ctx([ref()]) });
+    assert.deepEqual(r.corrections, []);
+    assert.equal(r.facts.find((fact) => fact.key === 'time')?.value, expected, text);
+  }
+});
+
+test('Task 6: Arabic 12-hour clocks normalize to canonical 24-hour values', async () => {
+  for (const [text, expected] of [
+    ['الساعة 9 مساء', '21:00'],
+    ['الساعة 12 صباحاً', '00:00'],
+    ['الساعة 12 مساء', '12:00'],
+  ]) {
+    const result = await svc.evaluate({ projectId: 'p', text });
+    assert.equal(result.facts.find((fact) => fact.key === 'time')?.value, expected, text);
+  }
+});
+
+test('Task 6 fix round 1: minute clocks share bounded Arabic and meridiem normalization', async () => {
+  for (const [text, expected] of [
+    ['الساعة 9:30 مساء', '21:30'],
+    ['الساعة ٩:٣٠ مساء', '21:30'],
+    ['الساعة 12:30 صباحاً', '00:30'],
+    ['الساعة 12 صباحاً', '00:00'],
+    ['الساعة 12 مساء', '12:00'],
+  ]) {
+    const result = await svc.evaluate({ projectId: 'p', text });
+    assert.equal(result.facts.find((fact) => fact.key === 'time')?.value, expected, text);
+  }
+});
+
+test('Task 6 fix round 2: standalone Arabic meridiem is sufficient but a bare number is not', async () => {
+  for (const [text, expected] of [
+    ['12 صباحاً', '00:00'],
+    ['12 مساء', '12:00'],
+    ['١٢ صباحاً', '00:00'],
+    ['١٢ مساء', '12:00'],
+  ]) {
+    const result = await svc.evaluate({ projectId: 'p', text });
+    assert.equal(result.facts.find((fact) => fact.key === 'time')?.value, expected, text);
+  }
+
+  const bare = await svc.evaluate({ projectId: 'p', text: 'لدي 12 تفاحة' });
+  assert.equal(bare.facts.some((fact) => fact.key === 'time'), false);
+});
+
+test('Task 6 fix round 2: time discovery requires token boundaries and complete consumption', async () => {
+  for (const text of [
+    'I selected that 9 pm option.',
+    'At 9:999 I arrived.',
+    'At 9:00:30 I arrived.',
+    'At 9::00 I arrived.',
+  ]) {
+    const result = await svc.evaluate({ projectId: 'p', text });
+    assert.equal(result.facts.some((fact) => fact.key === 'time'), false, text);
+  }
+
+  const valid = await svc.evaluate({ projectId: 'p', text: 'At 9:30 I arrived.' });
+  assert.equal(valid.facts.find((fact) => fact.key === 'time')?.value, '09:30');
+});
+
+test('Task 6 fix round 2: a separator keeps undotted meridiem in the preceding statement clause', async () => {
+  const result = await svc.evaluate({ projectId: 'p', text: 'At 12:30 am I woke up, can I go?' });
+  assert.equal(result.dialogueAct, 'QUESTION');
+  assert.equal(result.facts.find((fact) => fact.key === 'time')?.value, '00:30');
+  assert.deepEqual(result.corrections, []);
+});
+
+test('Task 6 fix round 1: invalid clock minutes emit no advisory time', async () => {
+  const result = await svc.evaluate({ projectId: 'p', text: 'At 12:99 pm I arrived.' });
+  assert.equal(result.facts.some((fact) => fact.key === 'time'), false);
+});
+
+test('Task 6 fix round 1: dotted meridiem stays local to its statement clause', async () => {
+  const result = await svc.evaluate({ projectId: 'p', text: 'At 12:30 a.m. I woke up. Can I go?' });
+  assert.equal(result.dialogueAct, 'QUESTION');
+  assert.equal(result.facts.find((fact) => fact.key === 'time')?.value, '00:30');
+  assert.deepEqual(result.corrections, []);
+});
+
+test('Task 6: an English question-clause verb am is not consumed as a meridiem', async () => {
+  const result = await svc.evaluate({ projectId: 'p', text: 'At 12:30 am I free?' });
+
+  assert.equal(result.dialogueAct, 'QUESTION');
+  assert.equal(result.facts.find((fact) => fact.key === 'time')?.value, '12:30');
+  assert.deepEqual(result.corrections, []);
+
+  const statement = await svc.evaluate({ projectId: 'p', text: 'At 12:30 am I woke up.' });
+  assert.equal(statement.facts.find((fact) => fact.key === 'time')?.value, '00:30', 'a normal AM statement keeps its meridiem');
+});
+
+test('an English negative prefix still allows a date correction to resolve', async () => {
+  const r = await svc.evaluate({
+    projectId: 'p',
+    text: 'No, I meant 2026-11-02.',
+    context: ctx([ref({ memoryKey: 'appointment_date', payload: { value: '2026-11-01' } })]),
+  });
+
+  assert.equal(r.dialogueAct, 'CORRECTION');
+  assert.deepEqual(r.corrections, [{ target: 'appointment_date', old: '2026-11-01', new: '2026-11-02' }]);
+});
+
+for (const text of [
+  'I meant: not 10:00',
+  'Sorry, I meant maybe 10:00',
+  'I meant 10:00 maybe',
+  'آسفة، قصدي: ربما 10:00',
+  'I meant: not 10:30 AM',
+  'Sorry, I meant maybe 10:30 a.m.',
+]) {
+  test(`a non-definite replacement clause has no time correction: ${text}`, async () => {
+    const r = await svc.evaluate({ projectId: 'p', text, context: ctx([ref()]) });
+
+    assert.equal(r.dialogueAct, 'CORRECTION');
+    assert.deepEqual(r.corrections, []);
+  });
+}
+
+test('an embedded correction marker after an uncertain preface has no replacement', async () => {
+  const r = await svc.evaluate({
+    projectId: 'p',
+    text: "I'm not sure I meant 2026-11-02",
+    context: ctx([ref({ memoryKey: 'appointment_date', payload: { value: '2026-11-01' } })]),
+  });
+
+  assert.deepEqual(r.corrections, []);
+});
+
+for (const text of [
+  'I meant, 10:00',
+  'No, I meant: 10:00',
+  'Sorry, I meant 10:00',
+  'آسفة، قصدي: 10:00',
+  'I meant at 10:00',
+  'I meant at 10 pm',
+]) {
+  test(`an explicit punctuated or apology correction resolves the time: ${text}`, async () => {
+    const r = await svc.evaluate({ projectId: 'p', text, context: ctx([ref()]) });
+
+    assert.equal(r.dialogueAct, 'CORRECTION');
+    assert.deepEqual(r.corrections, [{ target: 'preferred_time', old: '09:00', new: text.endsWith('pm') ? '22:00' : '10:00' }]);
+  });
+}
+
+for (const [text, expected] of [
+  ['I meant, 10:30 AM', '10:30'],
+  ['No, I meant: at 10:30 a.m.', '10:30'],
+  ['Sorry, I meant 10:30 AM', '10:30'],
+  ['I meant 10:30 PM', '22:30'],
+  ['I meant at 12:30 a.m.', '00:30'],
+  ['I meant at 12:30 p.m.', '12:30'],
+]) {
+  test(`a definite minute-level AM/PM correction resolves the normalized time: ${text}`, async () => {
+    const inputCtx = ctx([ref()]);
+    const r = await svc.evaluate({ projectId: 'p', text, context: inputCtx });
+
+    assert.equal(r.dialogueAct, 'CORRECTION');
+    assert.deepEqual(r.corrections, [{ target: 'preferred_time', old: '09:00', new: expected }]);
+    assert.deepEqual(inputCtx, ctx([ref()]), 'interpretation does not mutate the supplied facts');
+  });
+}
+
+for (const text of ['I meant 10:30 AM or 11:30 AM', "Sorry, I'm not sure I meant 10:30 AM"]) {
+  test(`an alternative or uncertain minute-level AM/PM correction stays inert: ${text}`, async () => {
+    const r = await svc.evaluate({ projectId: 'p', text, context: ctx([ref()]) });
+    assert.deepEqual(r.corrections, []);
+  });
+}
 
 test('D confirmation -> CONFIRMATION, CLEAR', async () => {
   const r = await svc.evaluate({ projectId: 'p', text: 'Yes, that is what I meant.' });

@@ -51,7 +51,7 @@ function model(responses: string[]) {
   return {
     captured,
     async generateText(input: { message?: string } & Record<string, unknown>) {
-      captured.messages.push(String(input.message ?? ''));
+      captured.messages.push([input.instructions, input.message].filter(Boolean).join('\n\n'));
       captured.perCall.push(input);
       return { text: responses[Math.min(captured.messages.length - 1, responses.length - 1)] ?? '{}', model: 'scripted-model' };
     },
@@ -64,12 +64,13 @@ async function run(opts: {
   recentTurns?: Array<{ role: string; text: string }>;
   knowledgeOpts?: { unapprovedHit?: boolean };
   context?: Record<string, unknown>;
+  factMeta?: Record<string, { certainty: string; provenance?: string }>;
 }) {
   const k = knowledge(opts.knowledgeOpts ?? {});
   const m = model(opts.responses);
   const ctx = {
     projectId: 'p', actor: 'a',
-    input: { text: opts.text, recentTurns: opts.recentTurns ?? [], ...(opts.context ? { context: opts.context } : {}) },
+    input: { text: opts.text, recentTurns: opts.recentTurns ?? [], ...(opts.context ? { context: opts.context } : {}), ...(opts.factMeta ? { factMeta: opts.factMeta } : {}) },
     knowledge: k, model: m,
   } as unknown as SkillExecutionContext;
   const out = (await skill.execute(ctx)) as Record<string, any>;
@@ -77,10 +78,10 @@ async function run(opts: {
 }
 
 const tool = (query: string) => JSON.stringify({ action: 'USE_TOOL', tool: 'search_knowledge', query });
-const askUser = (question: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question });
+const askUser = (question: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question, factKey: 'requested_fact', answerType: 'free_text' });
 const answer = (text: string, refs: string[]) => JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: text, evidenceRefs: refs });
 const insufficient = (text: string) => JSON.stringify({ action: 'TERMINAL', status: 'INSUFFICIENT_EVIDENCE', message: text });
-const askTool = (q: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q });
+const askTool = (q: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q, factKey: 'requested_fact', answerType: 'free_text' });
 
 // Style — the user-facing simplicity preference exists (no wording snapshots)
 test('Minimal/style: the answer-simplicity preference is instructed', async () => {
@@ -94,6 +95,8 @@ test('Minimal/style: the answer-simplicity preference is instructed', async () =
   // …and none of the intelligence instructions were displaced.
   assert.ok(prompt.includes('لا تطلب منها معلومة سبق أن ذكرتها'), 'no-re-ask preserved');
   assert.ok(prompt.includes('قبل إعطاء حكم فقهي، استخدم أداة البحث'), 'knowledge-before-ruling preserved');
+  assert.ok(String(m.captured.perCall[0].instructions ?? '').includes('أنت العقل الفقهي المتخصص'), 'trusted rules use the instruction channel');
+  assert.equal(String(m.captured.perCall[0].message ?? '').includes('أنت العقل الفقهي المتخصص'), false, 'trusted rules are absent from user content');
 });
 
 // A — registers independently, with its own identity and provenance marker
@@ -268,6 +271,17 @@ test('Minimal: the model may declare the evidence insufficient', async () => {
   assert.equal(typeof out.answer.text, 'string');
 });
 
+test('admission round 6: Minimal returns a safe educational evidence gap without echoing unmarked model prose', async () => {
+  const { out } = await run({
+    text: 'سؤال عام: ما معنى الطهر؟',
+    responses: [tool('معنى الطهر'), insufficient('أنت في الحيض الآن.')],
+  });
+  assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
+  assert.equal(out.answer.text, 'الدليل المتاح غير كافٍ للإجابة.');
+  assert.equal(out.answer.label, undefined);
+  assert.equal(out.answer.evidenceIds, undefined);
+});
+
 // R — workload-scoped reasoning + output budget: the Skill sends a per-call reasoning hint
 // and a small output budget so the gateway does not park the model on hidden reasoning.
 test('Minimal/R: every model call carries a workload-scoped reasoning hint and a bounded output', async () => {
@@ -368,7 +382,7 @@ test('4B/B: chronology is represented semantically as a timeline, not prose arro
 });
 
 test('4B/C: missing material fact — no ruling, one concise warm question', async () => {
-  const ask = JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: 'فهمت إن الدم رجع بعد فترة طهر — تقريبًا جم يوم استمر الطهر؟' });
+  const ask = JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', factKey: 'purity_duration', answerType: 'duration', question: 'فهمت إن الدم رجع بعد فترة طهر — تقريبًا جم يوم استمر الطهر؟' });
   const { out } = await run({ text: 'رجع علي الدم بعد الطهر', responses: [tool('طهر بين دمين'), ask] });
   assert.equal(out.readiness.status, 'NEEDS_INFORMATION');
   assert.equal(out.answer?.text, undefined, 'no ruling prose when asking');
@@ -500,23 +514,47 @@ test('STAGE2/C: with no known facts (private mode construction) the prompt carri
 });
 
 // ── Stage 4C.6: structural ruling classification (answer.label → decisionLabel) ──
-const answerLabeled = (text: string, refs: string[], label: unknown) =>
-  JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: text, evidenceRefs: refs, ...(label !== undefined ? { label } : {}) });
+const answerLabeled = (text: string, refs: string[], label: unknown, materialFactKeys?: string[]) =>
+  JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: text, evidenceRefs: refs, materialFactKeys, ...(label !== undefined ? { label } : {}) });
 
 test('4C.6/A: ANSWER hayd → answer.label === "hayd" (parses + rides the answer object)', async () => {
-  const { out } = await run({ text: 'دم 12 يوم؟', responses: [tool('أكثر الحيض'), answerLabeled('الـ12 يوم كلها حيض.', [CHUNK_A], 'hayd')] });
+  const { out } = await run({ text: 'دم 12 يوم؟', context: { duration_days: 12 }, factMeta: { duration_days: { certainty: 'CERTAIN', provenance: 'user_answer' } }, responses: [tool('أكثر الحيض'), answerLabeled('الـ12 يوم كلها حيض.', [CHUNK_A], 'hayd', ['duration_days'])] });
   assert.equal(out.trace.status, 'ANSWER');
   assert.equal(out.answer.label, 'hayd');
 });
 
 test('4C.6/B: ANSWER istihada → answer.label === "istihada"', async () => {
-  const { out } = await run({ text: 'دم 20 يوم؟', responses: [tool('الاستحاضة'), answerLabeled('ما زاد على 15 يوم استحاضة.', [CHUNK_A], 'istihada')] });
+  const { out } = await run({ text: 'دم 20 يوم؟', context: { duration_days: 20 }, factMeta: { duration_days: { certainty: 'CERTAIN', provenance: 'user_answer' } }, responses: [tool('الاستحاضة'), answerLabeled('ما زاد على 15 يوم استحاضة.', [CHUNK_A], 'istihada', ['duration_days'])] });
   assert.equal(out.answer.label, 'istihada');
 });
 
 test('4C.6/C: ANSWER nifas → answer.label === "nifas"', async () => {
-  const { out } = await run({ text: 'ولادة ودم؟', responses: [tool('النفاس'), answerLabeled('دم النفاس.', [CHUNK_A], 'nifas')] });
+  const { out } = await run({ text: 'ولادة ودم؟', context: { postpartum: true }, factMeta: { postpartum: { certainty: 'CERTAIN', provenance: 'user_answer' } }, responses: [tool('النفاس'), answerLabeled('دم النفاس.', [CHUNK_A], 'nifas', ['postpartum'])] });
   assert.equal(out.answer.label, 'nifas');
+});
+
+test('final hardening: presentation preferences cannot be the sole authority for a personal label', async () => {
+  for (const key of ['preferred_language', 'preferredLocale', 'output_language', 'response_locale']) {
+    const { out } = await run({
+      text: 'ما حكمي؟',
+      context: { [key]: 'Arabic' },
+      factMeta: { [key]: { certainty: 'CERTAIN', provenance: 'user_answer' } },
+      responses: [tool('حكم الحيض'), answerLabeled('هذا حيض.', [CHUNK_A], 'hayd', [key])],
+    });
+    assert.notEqual(out.answer?.label, 'hayd', key);
+    assert.notEqual(out.trace.status, 'ANSWER', key);
+  }
+});
+
+test('final hardening: exact matching keeps a clinical key containing a presentation word valid', async () => {
+  const key = 'bleeding_locale_observation';
+  const { out } = await run({
+    text: 'ما حكمي؟',
+    context: { [key]: 'continuous' },
+    factMeta: { [key]: { certainty: 'CERTAIN', provenance: 'user_answer' } },
+    responses: [tool('حكم الحيض'), answerLabeled('هذا حيض.', [CHUNK_A], 'hayd', [key])],
+  });
+  assert.equal(out.answer?.label, 'hayd');
 });
 
 test('4C.6/D: prose NEVER derives the label — a hayd-prose answer without label carries none', async () => {
@@ -525,13 +563,46 @@ test('4C.6/D: prose NEVER derives the label — a hayd-prose answer without labe
   assert.equal(out.answer.label, undefined, 'no label invented from the حيض prose');
 });
 
-test('4C.6/E: an invalid label value is dropped, never coerced into a canonical one', async () => {
-  const { out } = await run({ text: 'دم 12 يوم؟', responses: [tool('أكثر الحيض'), answerLabeled('جواب.', [CHUNK_A], 'menopause')] });
-  assert.equal(out.answer.label, undefined, 'unknown label does not become hayd/istihada/nifas');
+test('admission round 5: an explicit malformed personal label fails closed instead of becoming educational text', async () => {
+  const { out } = await run({
+    text: 'دم 12 يوم؟',
+    context: { duration_days: 12 },
+    factMeta: { duration_days: { certainty: 'CERTAIN', provenance: 'user_answer' } },
+    responses: [tool('أكثر الحيض'), answerLabeled('جواب شخصي.', [CHUNK_A], 'HAYD', ['duration_days'])],
+  });
+  assert.notEqual(out.trace.status, 'ANSWER');
+  assert.notEqual(out.answer?.text, 'جواب شخصي.');
+});
+
+for (const status of ['ASK_USER', 'INSUFFICIENT_EVIDENCE'] as const) {
+  for (const metadata of [{ label: 'hayd' }, { materialFactKeys: ['onset'] }, { label: 'hayd', materialFactKeys: ['onset'] }]) {
+    test(`admission round 6: ${Object.keys(metadata).join(' and ')} on ${status} fails closed to a safe gap`, async () => {
+      const terminal = JSON.stringify({
+        action: 'TERMINAL', status,
+        message: 'هذا حيض شخصيًا.', question: 'سؤال؟', factKey: 'onset', answerType: 'date',
+        ...metadata,
+      });
+      const { out } = await run({ text: 'ما الحكم؟', responses: [terminal] });
+      assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
+      assert.ok(out.trace.notes.includes('unreadable_model_output'));
+      assert.notEqual(out.answer?.text, 'هذا حيض شخصيًا.');
+      assert.equal(out.answer?.label, undefined);
+      assert.equal(out.readiness, undefined);
+    });
+  }
+}
+
+test('admission round 6: Minimal does not execute a tool response carrying personal metadata', async () => {
+  const { out, k } = await run({
+    text: 'ما الحكم؟',
+    responses: [JSON.stringify({ action: 'USE_TOOL', tool: 'search_knowledge', query: 'أكثر الحيض', label: 'hayd' })],
+  });
+  assert.ok(out.trace.notes.includes('unreadable_model_output'));
+  assert.equal(k.calls.searches, 0);
 });
 
 test('4C.6/F: ASK_USER / Material Fact Confirmation unchanged (no label involvement)', async () => {
-  const askYesNo = JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: 'بداية الدم كانت أمس. صحيح؟', yesNo: true, factKey: 'last_bleeding_start' });
+  const askYesNo = JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: 'بداية الدم كانت أمس. صحيح؟', yesNo: true, factKey: 'last_bleeding_start', answerType: 'yes_no' });
   const { out } = await run({ text: 'نزل دم', responses: [tool('شرط'), askYesNo], context: { last_bleeding_start: 'أمس' } });
   assert.equal(out.readiness.status, 'NEEDS_INFORMATION');
   assert.equal(out.answer, undefined);
@@ -545,9 +616,10 @@ test('4C.6/G: structured semantics still ride the answer alongside the label', a
   const full = JSON.stringify({
     action: 'TERMINAL', status: 'ANSWER', message: 'الـ12 يوم كلها حيض.', evidenceRefs: [CHUNK_A],
     label: 'hayd', summary: 'الـ12 يوم كلها حيض.', explanation: 'لم يتجاوز 15 يومًا.', practical: 'اغتسلي وصلي.',
+    materialFactKeys: ['duration_days', 'habit_days'],
     understanding: 'عادتج 6 أيام → دم 12 يوم', visual: { type: 'timeline', items: [{ label: 'دم', duration: '12 يوم' }] },
   });
-  const { out } = await run({ text: 'عادتي 6 ورأيت دماً 12', responses: [tool('أكثر الحيض'), full] });
+  const { out } = await run({ text: 'عادتي 6 ورأيت دماً 12', context: { duration_days: 12, habit_days: 6 }, factMeta: { duration_days: { certainty: 'CERTAIN', provenance: 'user_answer' }, habit_days: { certainty: 'CERTAIN', provenance: 'user_answer' } }, responses: [tool('أكثر الحيض'), full] });
   assert.equal(out.answer.label, 'hayd');
   assert.equal(out.answer.structured.summary, 'الـ12 يوم كلها حيض.');
   assert.equal(out.answer.structured.visual.type, 'timeline');
@@ -556,8 +628,8 @@ test('4C.6/G: structured semantics still ride the answer alongside the label', a
 
 test('4C.6/H: response_mode required still works (summary enforcement path intact)', async () => {
   const requiredSkill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService(), responseMode: 'required' });
-  const k = knowledge(); const m = model([tool('أكثر الحيض'), answerLabeled('بلا ملخص.', [CHUNK_A], 'hayd')]);
-  const ctx = { projectId: 'p', actor: 'a', input: { text: 'دم؟' }, knowledge: k, model: m } as unknown as SkillExecutionContext;
+  const k = knowledge(); const m = model([tool('أكثر الحيض'), answerLabeled('بلا ملخص.', [CHUNK_A], 'hayd', ['duration_days'])]);
+  const ctx = { projectId: 'p', actor: 'a', input: { text: 'دم؟', context: { duration_days: 12 }, factMeta: { duration_days: { certainty: 'CERTAIN', provenance: 'user_answer' } } }, knowledge: k, model: m } as unknown as SkillExecutionContext;
   const out = (await requiredSkill.execute(ctx)) as Record<string, any>;
   // required mode: ANSWER without summary fails closed (existing contract) — label or not.
   assert.ok(out.trace.notes.includes('required_summary_missing') || out.trace.status === 'ANSWER', 'required-mode enforcement path reached');

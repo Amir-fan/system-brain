@@ -111,13 +111,14 @@ export function createMemoryStorage(db: SupabaseDatabase): MemoryStoragePort {
     },
 
     async archive(input: ArchiveInput): Promise<MemoryRecord | null> {
-      const { data } = await db
+      let query = db
         .from('memory_records')
         .update({ status: ARCHIVED, updated_at: new Date().toISOString() })
         .eq('project_id', input.projectId)
-        .eq('id', input.memoryId)
-        .select('*')
-        .maybeSingle();
+        .eq('id', input.memoryId);
+      if (input.scope) query = query.eq('scope', input.scope);
+      if (input.subjectId) query = query.eq('subject_id', input.subjectId);
+      const { data } = await query.select('*').maybeSingle();
       return data ? mapRow(data) : null;
     },
 

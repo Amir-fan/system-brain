@@ -73,6 +73,18 @@ function resolveChatTimeoutMs(): number {
 }
 
 /**
+ * OpenRouter chat completions support a system message followed by user content.
+ * Keep trusted capability rules out of the same message as untrusted text.
+ * Source: https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request
+ */
+function chatMessages(instructions: string | undefined, content: unknown): Array<{ role: 'system' | 'user'; content: unknown }> {
+  return [
+    ...(instructions ? [{ role: 'system' as const, content: instructions }] : []),
+    { role: 'user' as const, content },
+  ];
+}
+
+/**
  * Normalize a provider failure — whether it surfaces while opening the request OR while
  * reading the response body (a stall after headers used to escape unclassified and reach
  * callers as a bare DOMException, losing the lowercase `provider` kind). Never leaks
@@ -193,6 +205,10 @@ export class OpenRouterGateway implements ModelGateway {
       typeof input.maxOutputTokens === 'number' && Number.isFinite(input.maxOutputTokens) && input.maxOutputTokens > 0
         ? Math.trunc(input.maxOutputTokens)
         : undefined;
+    const instructions = typeof input.instructions === 'string' && input.instructions.trim().length > 0
+      ? input.instructions
+      : undefined;
+    const messages = chatMessages(instructions, content);
 
     let res: Response;
     try {
@@ -200,7 +216,7 @@ export class OpenRouterGateway implements ModelGateway {
         method: 'POST',
         body: JSON.stringify({
           model,
-          messages: [{ role: 'user', content }],
+          messages,
           ...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
           // K29 operator settings: absent unless configured, so the default body is unchanged.
           ...(this.providerSort ? { provider: { sort: this.providerSort } } : {}),
@@ -227,7 +243,7 @@ export class OpenRouterGateway implements ModelGateway {
     if (!res.ok && res.status === 400 && input.responseFormat) {
       const retryBody = JSON.parse(JSON.stringify({
         model,
-        messages: [{ role: 'user', content }],
+        messages,
         ...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
         ...(this.providerSort ? { provider: { sort: this.providerSort } } : {}),
         ...(this.resolveReasoningForCall(input.reasoning, this.reasoningEffort) ? { reasoning: { effort: this.resolveReasoningForCall(input.reasoning, this.reasoningEffort)! } } : {}),
@@ -245,7 +261,8 @@ export class OpenRouterGateway implements ModelGateway {
     }
 
     let body: {
-      choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+      error?: unknown;
+      choices?: Array<{ error?: unknown; message?: { content?: string }; finish_reason?: string }>;
       usage?: {
         prompt_tokens?: number;
         completion_tokens?: number;
@@ -262,11 +279,20 @@ export class OpenRouterGateway implements ModelGateway {
       // A stall/abort AFTER the headers arrived must be classified exactly like one before.
       throw classifyChatFailure(e, this.chatTimeoutMs);
     }
-    const text = body.choices?.[0]?.message?.content ?? '';
+    const choice = body?.choices?.[0];
+    const text = choice?.message?.content;
+    if (body?.error || choice?.error || choice?.finish_reason === 'error' || typeof text !== 'string') {
+      throw providerError('chat completion failed', 'PROVIDER_CHAT_FAILED');
+    }
+    // A partial/filtered generation is not a completed text response, even if a
+    // fragment happens to parse as JSON. Keep it out of domain insufficiency paths.
+    if ((choice?.finish_reason !== undefined && choice.finish_reason !== 'stop') || !text.trim()) {
+      throw providerError('chat completion incomplete', 'PROVIDER_CHAT_INCOMPLETE');
+    }
     // Observability only: which backend served the call, why it stopped, and how much of the
     // completion was hidden reasoning. Reported raw when the provider sends it, otherwise absent.
     const reasoningTokens = body.usage?.completion_tokens_details?.reasoning_tokens;
-    const finishReason = body.choices?.[0]?.finish_reason;
+    const finishReason = choice?.finish_reason;
     return {
       text,
       provider: 'openrouter',

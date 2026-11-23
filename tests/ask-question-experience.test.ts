@@ -29,8 +29,8 @@ function scripted(script: (prompt: string) => string) {
   const prompts: string[] = [];
   return {
     prompts,
-    async generateText(input: { message?: string }) {
-      const prompt = String(input.message ?? '');
+    async generateText(input: { instructions?: string; message?: string }) {
+      const prompt = [input.instructions, input.message].filter(Boolean).join('\n\n');
       prompts.push(prompt);
       return { text: script(prompt), model: 'scripted' };
     },
@@ -38,12 +38,12 @@ function scripted(script: (prompt: string) => string) {
 }
 
 const tool = (q: string) => JSON.stringify({ action: 'USE_TOOL', tool: 'search_knowledge', query: q });
-const answer = (t: string) => JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: t, evidenceRefs: ['chunk-a'], label: 'hayd', summary: t });
-const askYesNo = (q: string, factKey?: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q, yesNo: true, ...(factKey ? { factKey } : {}) });
-const askOptions = (q: string, options: string[]) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q, options });
-const askFree = (q: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q });
+const answer = (t: string) => JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: t, evidenceRefs: ['chunk-a'], label: 'hayd', summary: t, materialFactKeys: ['duration_hours'] });
+const askYesNo = (q: string, factKey = 'duration_hours') => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q, yesNo: true, factKey, answerType: 'yes_no' });
+const askOptions = (q: string, options: string[]) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q, options, factKey: 'requested_fact', answerType: 'single_choice' });
+const askFree = (q: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q, factKey: 'requested_fact', answerType: 'free_text' });
 
-async function run(script: (prompt: string) => string, context?: Record<string, unknown>) {
+async function run(script: (prompt: string) => string, context?: Record<string, unknown>, factMeta?: Record<string, { certainty: string; provenance?: string }>) {
   const model = scripted(script);
   const skill = createFiqhHaydMinimalSkill({ readiness: new DecisionReadinessService() });
   const k = {
@@ -53,7 +53,7 @@ async function run(script: (prompt: string) => string, context?: Record<string, 
   };
   const ctx = {
     projectId: P, actor: 'a',
-    input: { text: 'مسح دم', ...(context ? { context } : {}) },
+    input: { text: 'مسح دم', ...(context ? { context } : {}), ...(factMeta ? { factMeta } : {}) },
     knowledge: k, model,
   } as unknown as SkillExecutionContext;
   const out = (await skill.execute(ctx)) as Record<string, any>;
@@ -104,7 +104,7 @@ test('4C.7/G: after «غير متأكدة» the instruction demands re-evaluatio
   assert.ok(prompt.includes('أعيدي التقييم وقرري بنفسك'), 're-evaluate and decide, not loop');
   assert.ok(prompt.includes('لا تكرري نفس السؤال بصياغات مختلفة بلا فائدة'), 'no useless re-asking loop');
   // and a later turn CAN rule: the ANSWER path is untouched (label + structured ride along)
-  const { out } = await run((p) => (p.includes('طلبك:') ? answer('هذا الدم يُعد حيضاً.') : tool('أكثر الحيض')));
+  const { out } = await run((p) => (p.includes('طلبك:') ? answer('هذا الدم يُعد حيضاً.') : tool('أكثر الحيض')), { duration_hours: 24 }, { duration_hours: { certainty: 'CERTAIN', provenance: 'user_answer' } });
   assert.equal(out.trace.status, 'ANSWER');
   assert.equal(out.answer.label, 'hayd');
 });

@@ -60,11 +60,42 @@ export async function handleSkillExecute(
   if (!auth.ok) {
     return fail(auth.message, auth.kind === 'not_found' ? 'not_found' : 'authorization', auth.kind === 'not_found' ? 404 : 403);
   }
-  const subjectId = typeof body.subjectId === 'string' && body.subjectId ? (body.subjectId as string) : undefined;
-  const conversationId = typeof body.conversationId === 'string' && body.conversationId ? (body.conversationId as string) : undefined;
-  const caseId = typeof body.caseId === 'string' && body.caseId ? (body.caseId as string) : undefined;
+  const requestedSubjectId = typeof body.subjectId === 'string' && body.subjectId ? (body.subjectId as string) : undefined;
+  const requestedConversationId = typeof body.conversationId === 'string' && body.conversationId ? (body.conversationId as string) : undefined;
+  const requestedCaseId = typeof body.caseId === 'string' && body.caseId ? (body.caseId as string) : undefined;
+  const isService = auth.membership.role === 'service';
+  if (!isService && requestedSubjectId !== undefined && requestedSubjectId !== actor) {
+    return fail('skill subject is not authorized', 'authorization', 403, 'SKILL_SUBJECT_FORBIDDEN');
+  }
+  if (!isService && (requestedConversationId !== undefined || requestedCaseId !== undefined)) {
+    return fail('skill context subject is not authorized', 'authorization', 403, 'SKILL_SUBJECT_FORBIDDEN');
+  }
+  const subjectId = isService ? requestedSubjectId : actor;
+  const conversationId = isService ? requestedConversationId : undefined;
+  const caseId = isService ? requestedCaseId : undefined;
   const requestTimestamp = typeof body.requestTimestamp === 'string' && body.requestTimestamp ? (body.requestTimestamp as string) : undefined;
-  const payload = 'payload' in body ? body.payload : undefined;
+  let payload = 'payload' in body ? body.payload : undefined;
+  if (payload && typeof payload === 'object' && !Array.isArray(payload) && 'context' in payload
+    && (!payload.context || typeof payload.context !== 'object' || Array.isArray(payload.context))) {
+    return fail('skill context is invalid', 'validation', 400, 'SKILL_CONTEXT_INVALID');
+  }
+  // Conversation owns historical decisions. Public raw execution cannot attest
+  // that a caller-supplied ruling was previously grounded by KIP.
+  if (!isService && payload && typeof payload === 'object' && 'lastGroundedResult' in payload) {
+    return fail('skill historical state is not authorized', 'authorization', 403, 'SKILL_HISTORY_FORBIDDEN');
+  }
+  if (!isService && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    if ('factMeta' in payload || 'skillContext' in payload) {
+      return fail('skill fact and turn state are not authorized', 'authorization', 403, 'SKILL_CONTEXT_FORBIDDEN');
+    }
+    if ('context' in payload && payload.context && typeof payload.context === 'object' && !Array.isArray(payload.context)) {
+      // Member-supplied context can guide direct execution but carries no authority.
+      const factMeta = Object.fromEntries(Object.keys(payload.context).map((key) => [key, {
+        certainty: 'UNCERTAIN', provenance: 'user_statement',
+      }]));
+      payload = { ...payload, factMeta };
+    }
+  }
 
   try {
     const result: SkillExecutionResult = await deps.runtime.execute({

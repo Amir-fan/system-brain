@@ -20,7 +20,8 @@
  * This is NOT the Fiqh decision engine and NOT a question-planning engine.
  */
 
-import { normalizeDigits, parseNumberLoose } from '../understanding/numbers.ts';
+import { normalizeDigits, parseCorrectionClock, parseNumberLoose } from '../understanding/numbers.ts';
+import { normalizeBooleanAnswer } from '../understanding/understanding.ts';
 
 export type ReadinessStatus = 'READY_FOR_DECISION' | 'NEEDS_INFORMATION' | 'INSUFFICIENT_CONTEXT';
 
@@ -28,9 +29,17 @@ export type ReadinessStatus = 'READY_FOR_DECISION' | 'NEEDS_INFORMATION' | 'INSU
  * The ONE canonical backend set of answer-shaped controls. Both the readiness contract and
  * the conversation layer use it; the frontend keeps its own API mirror.
  */
-export type InteractionType = 'single_choice' | 'multiple_choice' | 'yes_no' | 'number' | 'date' | 'duration' | 'free_text';
+export type InteractionType = 'single_choice' | 'multiple_choice' | 'yes_no' | 'number' | 'date' | 'time' | 'duration' | 'free_text';
 
-const INTERACTION_TYPES: readonly string[] = ['single_choice', 'multiple_choice', 'yes_no', 'number', 'date', 'duration', 'free_text'];
+export const UNCERTAINTY_OPTION = 'غير متأكدة';
+const UNKNOWN_ANSWER = /^(?:UNKNOWN|I don['’]t know|not sure|unsure|ما أدري|ما ادري|ما أعرف|ما اعرف|لا أعرف|لا اعرف|مو متأكد|مو متأكدة|مب متأكد|غير متأكد|غير متأكدة|ما أعلم|لا علم)[\s\p{P}\p{S}\p{M}\u200D]*$/iu;
+
+export function isUncertaintyValue(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  return UNKNOWN_ANSWER.test(value.trim());
+}
+
+const INTERACTION_TYPES: readonly string[] = ['single_choice', 'multiple_choice', 'yes_no', 'number', 'date', 'time', 'duration', 'free_text'];
 
 export function isInteractionType(value: unknown): value is InteractionType {
   return typeof value === 'string' && INTERACTION_TYPES.includes(value);
@@ -118,10 +127,22 @@ export const READINESS_ERROR_MESSAGES = {
   INSUFFICIENT_CONTEXT: 'لا يمكن إكمال السياق المطلوب حالياً.',
 } as const;
 
-/** A known value counts as satisfying a requirement only if it is present (not null/undefined). */
+/** Presence for prompt/readiness facts: a scalar or a nonempty collection of scalars. */
+export function hasContextValue(value: unknown): boolean {
+  const presentScalar = (candidate: unknown): boolean => {
+    if (typeof candidate === 'string') {
+      const normalized = candidate.trim();
+      return normalized !== '' && normalized !== '[]' && !isUncertaintyValue(normalized);
+    }
+    return typeof candidate === 'boolean' || (typeof candidate === 'number' && Number.isFinite(candidate));
+  };
+  return Array.isArray(value) ? value.length > 0 && value.every(presentScalar) : presentScalar(value);
+}
+
+/** A known value satisfies a requirement only when present and certain. */
 export function hasKnownValue(item: KnownContextItem | undefined): boolean {
   if (!item) return false;
-  if (item.value === null || item.value === undefined || item.value === '') return false;
+  if (!hasContextValue(item.value)) return false;
   // "I don't know" and hedged values are NOT knowledge: they must never close a need.
   const certainty = item.certainty ?? 'CERTAIN';
   return certainty === 'CERTAIN';
@@ -171,10 +192,7 @@ export function validateAnswerCompatibility(
       // proven either way (it may well express a yes/no), so it stays UNKNOWN — except
       // the canonical chip labels, which ARE the yes/no vocabulary (Stage 4C.7 chips).
       if (typeof candidate === 'string') {
-        const c = candidate.trim();
-        if (/^(نعم|أجل|اجل|صحيح|yes|y)$/i.test(c)) return 'ACCEPTED';
-        if (/^(لا|no|n|ليس)$/i.test(c)) return 'ACCEPTED';
-        return 'UNKNOWN';
+        return normalizeBooleanAnswer(candidate) === undefined ? 'UNKNOWN' : 'ACCEPTED';
       }
       return 'REJECTED';
 
@@ -193,6 +211,9 @@ export function validateAnswerCompatibility(
       if (typeof candidate !== 'string') return 'UNKNOWN';
       return /^\d{4}-\d{1,2}-\d{1,2}$/.test(normalizeDigits(candidate).trim()) ? 'ACCEPTED' : 'UNKNOWN';
     }
+
+    case 'time':
+      return typeof candidate === 'string' && parseCorrectionClock(candidate) !== undefined ? 'ACCEPTED' : 'UNKNOWN';
 
     case 'single_choice': {
       if (typeof candidate !== 'string') return 'REJECTED';

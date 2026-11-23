@@ -25,6 +25,11 @@ export interface ModelGatewayInput {
   projectId: string;
   runId: string;
   capability: string;
+  /**
+   * Trusted capability instructions, kept separate from untrusted user/retrieved
+   * content. Provider adapters map this to their highest supported instruction role.
+   */
+  instructions?: string;
   input: unknown;
   /**
    * Optional bounded OUTPUT budget. Provider-neutral by design: the caller states

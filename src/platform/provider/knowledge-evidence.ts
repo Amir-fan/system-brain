@@ -43,7 +43,7 @@ export function createKnowledgeEvidence(deps: KnowledgeEvidenceDeps): SkillKnowl
   let titles: Map<string, string> | null = null;
   const titleOf = async (sourceId: string): Promise<string> => {
     if (!titles) {
-      const list = await deps.sources.listByProject(projectId).catch(() => []);
+      const list = await deps.sources.listByProject(projectId);
       titles = new Map(list.map((s) => [s.id, s.title]));
     }
     return titles.get(sourceId) ?? '';
@@ -80,7 +80,7 @@ export function createKnowledgeEvidence(deps: KnowledgeEvidenceDeps): SkillKnowl
       const passages: SkillKnowledgePassage[] = [];
       for (const h of outcome.results) {
         // Chunk index is not part of the retrieval hit; read it from the chunk row.
-        const row = await deps.chunks.getChunk(projectId, h.chunkId).catch(() => null);
+        const row = await deps.chunks.getChunk(projectId, h.chunkId);
         passages.push(
           await toPassage(
             {
@@ -102,7 +102,7 @@ export function createKnowledgeEvidence(deps: KnowledgeEvidenceDeps): SkillKnowl
     async loadByIds(chunkIds) {
       const out: SkillKnowledgePassage[] = [];
       for (const id of chunkIds.slice(0, MAX_SKILL_CONTEXT_EVIDENCE)) {
-        const row = await deps.chunks.getChunk(projectId, id).catch(() => null);
+        const row = await deps.chunks.getChunk(projectId, id);
         if (!row) continue;
         out.push(
           await toPassage(
@@ -122,7 +122,7 @@ export function createKnowledgeEvidence(deps: KnowledgeEvidenceDeps): SkillKnowl
     },
 
     async resolveSources(sourceTitles) {
-      const list = await deps.sources.listByProject(projectId).catch(() => []);
+      const list = await deps.sources.listByProject(projectId);
       const wanted = new Set(sourceTitles.map((t) => t.trim()));
       return list.filter((s) => wanted.has((s.title ?? '').trim())).map((s) => ({ id: s.id, title: s.title }));
     },
@@ -130,15 +130,15 @@ export function createKnowledgeEvidence(deps: KnowledgeEvidenceDeps): SkillKnowl
     async adjacent(chunkId, window = 1) {
       const w = Math.max(0, Math.min(MAX_ADJACENT_WINDOW, Math.trunc(window)));
       if (w === 0) return [];
-      const anchor = await deps.chunks.getChunk(projectId, chunkId).catch(() => null);
+      const anchor = await deps.chunks.getChunk(projectId, chunkId);
       if (!anchor) return [];
-      const siblings = await deps.chunks.listChunkSummaries(projectId, anchor.documentId).catch(() => []);
+      const siblings = await deps.chunks.listChunkSummaries(projectId, anchor.documentId);
       const ids = siblings
         .filter((c) => c.id !== anchor.id && Math.abs(c.chunkIndex - anchor.index) <= w)
         .sort((a, b) => a.chunkIndex - b.chunkIndex);
       const out: SkillKnowledgePassage[] = [];
       for (const s of ids) {
-        const row = await deps.chunks.getChunk(projectId, s.id).catch(() => null);
+        const row = await deps.chunks.getChunk(projectId, s.id);
         if (!row) continue;
         out.push(
           await toPassage(

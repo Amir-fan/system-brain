@@ -133,6 +133,12 @@ test('G1: a model-declared YES/NO cannot redefine a known need whose answer is N
   assert.equal(requirementFor(out, 'bleeding_duration_hours')?.interaction?.type, 'number');
 });
 
+test('Task 6: Naqaa duration contracts are unit-specific and expose no generic alias', () => {
+  assert.deepEqual(canonicalInteractionFor('bleeding_duration_hours'), { type: 'number' });
+  assert.deepEqual(canonicalInteractionFor('bleeding_duration_days'), { type: 'number' });
+  assert.equal(canonicalInteractionFor('duration_days'), undefined);
+});
+
 test('G3: a bounded categorical keeps its CANONICAL allowed values, not the model\'s', async () => {
   const canonical = canonicalInteractionFor('discharge_colour');
   assert.equal(canonical?.type, 'single_choice');
@@ -358,6 +364,11 @@ test('INVARIANT: a pending key with NO trustworthy contract cannot authorize a f
   const t3 = await c.handleMessage('p', 'a', s.id, { text: 'إجابة', answers: [{ key: 'postpartum_state', value: true }] });
   assert.notEqual(metaOf(store, s.id, 'postpartum_state')?.certainty, 'CERTAIN');
   assert.equal(t3.status, 'needs_information');
+
+  // A free-text display default for an undeclared question is not a contract either.
+  const t4 = await c.handleMessage('p', 'a', s.id, { text: 'إجابة', answers: [{ key: 'postpartum_state', value: 'نعم' }] });
+  assert.equal(factOf(store, s.id, 'postpartum_state'), undefined);
+  assert.equal(t4.status, 'needs_information');
 });
 
 test('an EXPLICIT free-text contract is permissive (declared text is not the same as missing)', async () => {
@@ -383,7 +394,9 @@ test('an EXPLICIT free-text contract is permissive (declared text is not the sam
   const c = svc(store, skill);
   const s = await c.create('p', 'a', 'private');
   await c.handleMessage('p', 'a', s.id, { text: 'ابدأ' });
-  const t2 = await c.handleMessage('p', 'a', s.id, { text: 'وصف حر مفصل' });
+  const t2 = await c.handleMessage('p', 'a', s.id, {
+    text: 'وصف حر مفصل', answers: [{ key: 'free_note', value: 'وصف حر مفصل' }],
+  });
   assert.equal(metaOf(store, s.id, 'free_note')?.certainty, 'CERTAIN');
   assert.equal(t2.status, 'completed');
 });
@@ -438,6 +451,30 @@ test('CORRECTIONS still work when compatible (the existing semantics are preserv
   await c.handleMessage('p', 'a', s.id, { text: 'لا، قصدي لا' });
   assert.equal(factOf(store, s.id, 'postpartum_state'), false, 'a compatible correction supersedes');
   assert.ok(metaOf(store, s.id, 'postpartum_state')?.superseded, 'the old value is recorded as superseded');
+});
+
+test('a typed correction cannot bypass a declared choice contract', async () => {
+  const store = fakeStore();
+  const c = new ConversationService({
+    persistence: store,
+    understanding: understanding([{ target: 'appointment_date', new: '2026-11-02' }], 2),
+    skills: contractSkill([]),
+    defaultSkillId: SKILL_ID,
+    interactionsFor: () => ({
+      appointment_date: { type: 'single_choice', options: ['2026-11-01', '2026-11-03'] },
+    }),
+  });
+  const s = await c.create('p', 'a', 'private');
+  await c.handleMessage('p', 'a', s.id, {
+    text: 'Select November 1',
+    answers: [{ key: 'appointment_date', value: '2026-11-01' }],
+  });
+  assert.equal(factOf(store, s.id, 'appointment_date'), '2026-11-01');
+
+  const correction = await c.handleMessage('p', 'a', s.id, { text: 'I meant 2026-11-02' });
+  assert.equal(factOf(store, s.id, 'appointment_date'), '2026-11-01');
+  assert.equal(metaOf(store, s.id, 'appointment_date')?.superseded, undefined);
+  assert.equal(correction.caseState?.invalidationReason, undefined);
 });
 
 // ---------------------------------------------------------------- §20 ------

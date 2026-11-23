@@ -30,6 +30,8 @@ export interface EvaluationListItem extends EvaluationRecord {
 }
 
 export interface EvaluationStorage {
+  conversationAccessible(projectId: string, conversationId: string, actorSubject?: string): Promise<boolean>;
+  runAccessible(projectId: string, runId: string, actorSubject?: string): Promise<boolean>;
   save(record: EvaluationRecord): Promise<EvaluationRecord>;
   listRecent(projectId: string, testerSubject: string, limit?: number): Promise<EvaluationListItem[]>;
 }
@@ -50,6 +52,30 @@ function mapRow(r: Record<string, unknown>): EvaluationRecord {
 
 export function createEvaluationStorage(db: SupabaseDatabase): EvaluationStorage {
   return {
+    async conversationAccessible(projectId, conversationId, actorSubject) {
+      let query = db
+        .from('conversations')
+        .select('id')
+        .eq('project_id', projectId)
+        .eq('id', conversationId);
+      if (actorSubject !== undefined) query = query.eq('actor_subject', actorSubject);
+      const { data, error } = await query.maybeSingle();
+      if (error) throw new Error('evaluation.access.failed');
+      return Boolean(data);
+    },
+
+    async runAccessible(projectId, runId, actorSubject) {
+      let query = db
+        .from('runs')
+        .select('id')
+        .eq('project_id', projectId)
+        .eq('id', runId);
+      if (actorSubject !== undefined) query = query.eq('actor_subject', actorSubject);
+      const { data, error } = await query.maybeSingle();
+      if (error) throw new Error('evaluation.access.failed');
+      return Boolean(data);
+    },
+
     async save(record) {
       const { data } = await db
         .from('evaluation_records')

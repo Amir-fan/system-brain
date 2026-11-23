@@ -4,10 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "lint": "node scripts/lint.mjs",
     "test": "node --import tsx --test \"tests/**/*.test.ts\"",
     "test:dev": "node --import tsx --env-file=.env.local --test \"tests/**/*.test.ts\"",
     "dev:api": "node --env-file=.env.local --import tsx src/boot.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "verify:local": "node scripts/verify-local.mjs"
   },
   "devDependencies": {
     "@types/jszip": "^3.4.0",

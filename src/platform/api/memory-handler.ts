@@ -14,6 +14,7 @@
 import { authorizeProject } from '../../core/authorization/project-boundary.ts';
 import type { ProjectBoundaryReaders } from '../../core/authorization/project-boundary.ts';
 import type { Actor } from '../../core/authorization/actor.ts';
+import type { Role } from '../../core/authorization/actor.ts';
 import { MemoryFailure, isMemoryScope, MEMORY_SCOPES } from '../../core/memory/memory.ts';
 import type { MemoryScope } from '../../core/memory/memory.ts';
 import type { MemoryService } from '../../core/memory/memory.service.ts';
@@ -36,6 +37,7 @@ const fail = (message: string, category: string, status = 400, code?: string): M
 
 interface AuthResult {
   projectId: string;
+  role: Role;
 }
 async function authorize(deps: MemoryApiDeps, projectId: string, actor: Actor, op: 'read' | 'write'): Promise<AuthResult | MemoryApiResult> {
   const auth = await authorizeProject(deps.boundary, projectId, actor, op);
@@ -46,7 +48,7 @@ async function authorize(deps: MemoryApiDeps, projectId: string, actor: Actor, o
       auth.kind === 'not_found' ? 404 : 403,
     );
   }
-  return { projectId };
+  return { projectId, role: auth.membership.role };
 }
 
 function memoryError(error: unknown): MemoryApiResult {
@@ -61,6 +63,37 @@ const rec = (v: unknown): Record<string, unknown> | undefined =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 const scopeOf = (v: unknown): MemoryScope | undefined => (isMemoryScope(v) ? v : undefined);
 
+interface SubjectAccess {
+  scope?: MemoryScope;
+  subjectId?: string;
+}
+
+/**
+ * Public end-user memory is always bound to the authenticated actor. Conversation
+ * and case subjects are resource identifiers, not identities, so they require the
+ * trusted service path until an ownership resolver exists for those resources.
+ */
+function authorizeSubject(
+  auth: AuthResult,
+  actor: Actor,
+  requestedScope: MemoryScope | undefined,
+  requestedSubjectId: string | undefined,
+): SubjectAccess | MemoryApiResult {
+  if (auth.role === 'service') {
+    return {
+      ...(requestedScope ? { scope: requestedScope } : {}),
+      ...(requestedSubjectId ? { subjectId: requestedSubjectId } : {}),
+    };
+  }
+  if (requestedScope !== undefined && requestedScope !== 'user') {
+    return fail('memory subject is not authorized', 'authorization', 403, 'MEMORY_SUBJECT_FORBIDDEN');
+  }
+  if (requestedSubjectId !== undefined && requestedSubjectId !== actor) {
+    return fail('memory subject is not authorized', 'authorization', 403, 'MEMORY_SUBJECT_FORBIDDEN');
+  }
+  return { scope: 'user', subjectId: actor };
+}
+
 export async function handleMemoryRemember(
   deps: MemoryApiDeps,
   projectId: string,
@@ -73,11 +106,13 @@ export async function handleMemoryRemember(
   if (!scope) return fail('scope must be one of: ' + MEMORY_SCOPES.join(', '), 'memory', 400);
   const payload = rec(body.payload);
   if (!payload) return fail('payload must be a JSON object', 'memory', 400);
+  const subject = authorizeSubject(a, actor, scope, str(body.subjectId));
+  if ('status' in subject) return subject;
   try {
     const record = await deps.service.remember({
       projectId: a.projectId,
-      scope,
-      subjectId: str(body.subjectId) ?? '',
+      scope: subject.scope ?? scope,
+      subjectId: subject.subjectId ?? '',
       memoryType: str(body.type) ?? '',
       memoryKey: str(body.key) ?? '',
       payload,
@@ -102,11 +137,13 @@ export async function handleMemorySupersede(
   if (!scope) return fail('scope must be one of: ' + MEMORY_SCOPES.join(', '), 'memory', 400);
   const payload = rec(body.payload);
   if (!payload) return fail('payload must be a JSON object', 'memory', 400);
+  const subject = authorizeSubject(a, actor, scope, str(body.subjectId));
+  if ('status' in subject) return subject;
   try {
     const record = await deps.service.supersede({
       projectId: a.projectId,
-      scope,
-      subjectId: str(body.subjectId) ?? '',
+      scope: subject.scope ?? scope,
+      subjectId: subject.subjectId ?? '',
       memoryType: str(body.type) ?? '',
       memoryKey: str(body.key) ?? '',
       payload,
@@ -127,11 +164,15 @@ export async function handleMemoryRecall(
 ): Promise<MemoryApiResult> {
   const a = await authorize(deps, projectId, actor, 'read');
   if (!('projectId' in a)) return a;
+  const rawScope = query.get('scope');
+  if (rawScope !== null && !scopeOf(rawScope)) return fail('invalid memory scope', 'memory', 400, 'MEMORY_SCOPE_INVALID');
+  const subject = authorizeSubject(a, actor, scopeOf(rawScope ?? undefined), str(query.get('subjectId')));
+  if ('status' in subject) return subject;
   try {
     const records = await deps.service.recall({
       projectId: a.projectId,
-      ...(scopeOf(query.get('scope') ?? undefined) ? { scope: scopeOf(query.get('scope') ?? undefined) } : {}),
-      ...(str(query.get('subjectId')) ? { subjectId: query.get('subjectId') as string } : {}),
+      ...(subject.scope ? { scope: subject.scope } : {}),
+      ...(subject.subjectId ? { subjectId: subject.subjectId } : {}),
       ...(str(query.get('type')) ? { memoryType: query.get('type') as string } : {}),
       ...(str(query.get('key')) ? { memoryKey: query.get('key') as string } : {}),
     });
@@ -149,11 +190,15 @@ export async function handleMemoryHistory(
 ): Promise<MemoryApiResult> {
   const a = await authorize(deps, projectId, actor, 'read');
   if (!('projectId' in a)) return a;
+  const rawScope = query.get('scope');
+  if (rawScope !== null && !scopeOf(rawScope)) return fail('invalid memory scope', 'memory', 400, 'MEMORY_SCOPE_INVALID');
+  const subject = authorizeSubject(a, actor, scopeOf(rawScope ?? undefined), str(query.get('subjectId')));
+  if ('status' in subject) return subject;
   try {
     const records = await deps.service.history({
       projectId: a.projectId,
-      ...(scopeOf(query.get('scope') ?? undefined) ? { scope: scopeOf(query.get('scope') ?? undefined) } : {}),
-      ...(str(query.get('subjectId')) ? { subjectId: query.get('subjectId') as string } : {}),
+      ...(subject.scope ? { scope: subject.scope } : {}),
+      ...(subject.subjectId ? { subjectId: subject.subjectId } : {}),
       ...(str(query.get('type')) ? { memoryType: query.get('type') as string } : {}),
       ...(str(query.get('key')) ? { memoryKey: query.get('key') as string } : {}),
     });
@@ -174,7 +219,11 @@ export async function handleMemoryArchive(
   const memoryId = str(body.id);
   if (!memoryId) return fail('memory id is required', 'memory', 400);
   try {
-    const archived = await deps.service.archive({ projectId: a.projectId, memoryId });
+    const archived = await deps.service.archive({
+      projectId: a.projectId,
+      memoryId,
+      ...(a.role === 'service' ? {} : { scope: 'user' as const, subjectId: actor }),
+    });
     if (!archived) return fail('memory not found', 'memory', 404);
     return ok(archived);
   } catch (e) {
@@ -191,12 +240,16 @@ export async function handleMemoryRetrieve(
   const a = await authorize(deps, projectId, actor, 'read');
   if (!('projectId' in a)) return a;
   const rawLimit = typeof body.limit === 'number' && Number.isFinite(body.limit) ? Math.trunc(body.limit) : undefined;
+  const requestedScope = scopeOf(body.scope);
+  if (body.scope !== undefined && !requestedScope) return fail('invalid memory scope', 'memory', 400, 'MEMORY_SCOPE_INVALID');
+  const subject = authorizeSubject(a, actor, requestedScope, str(body.subjectId));
+  if ('status' in subject) return subject;
   try {
     const records = await deps.service.retrieveRelevant({
       projectId: a.projectId,
       ...(str(body.context) ? { context: body.context as string } : {}),
-      ...(scopeOf(body.scope) ? { scope: scopeOf(body.scope) as never } : {}),
-      ...(str(body.subjectId) ? { subjectId: body.subjectId as string } : {}),
+      ...(subject.scope ? { scope: subject.scope } : {}),
+      ...(subject.subjectId ? { subjectId: subject.subjectId } : {}),
       ...(str(body.type) ? { memoryType: body.type as string } : {}),
       ...(rawLimit !== undefined ? { limit: rawLimit } : {}),
     });

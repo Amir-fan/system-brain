@@ -2,9 +2,14 @@ import test, { before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
+import { createHttpApi } from '../src/platform/api/http-server.ts';
 import { createKipApi } from '../src/platform/api/index.ts';
+import { StaticTokenAuthenticator } from '../src/platform/api/static-authenticator.ts';
 import { RuntimeService } from '../src/core/runtime/runtime.service.ts';
 import { MapCapabilityRegistry } from '../src/core/capability/capability-registry.ts';
+import { MemoryService } from '../src/core/memory/memory.service.ts';
+import { MapSkillRegistry } from '../src/core/skill/skill-registry.ts';
+import { SkillsRuntime, type SkillExecutionInput } from '../src/core/skill/skill-runtime.ts';
 import type { RuntimePersistence, RunRecord } from '../src/core/runtime/runtime.ports.ts';
 import type { TokenActorMap } from '../src/platform/api/auth.ts';
 import type { Actor, ProjectMembership, Role } from '../src/core/authorization/actor.ts';
@@ -172,6 +177,56 @@ test('api: cross-project attempt denied', async () => {
   assert.equal((res.json as any).error.category, 'authorization');
   // nothing written to proj-b
   assert.equal(persistence.runs.filter((r) => r.projectId === P_B).length, 0);
+});
+
+test('api: memory and skill routes deny an authenticated actor outside the target project', async (t) => {
+  const recallActive = t.mock.fn(async () => []);
+  const unexpectedStorageCall = async () => { throw new Error('unexpected memory storage call'); };
+  const memoryService = new MemoryService({
+    remember: unexpectedStorageCall,
+    recallActive,
+    history: unexpectedStorageCall,
+    supersede: unexpectedStorageCall,
+    archive: unexpectedStorageCall,
+    retrieveRelevant: unexpectedStorageCall,
+  });
+  const skillRegistry = new MapSkillRegistry();
+  const skillsRuntime = new SkillsRuntime({ persistence, registry: skillRegistry });
+  const execute = t.mock.method(skillsRuntime, 'execute', async ({ skillId }: SkillExecutionInput) => ({
+    status: 'completed' as const, skillId, skillVersion: 1,
+  }));
+  const authorizationServer = createHttpApi({
+    runtime: new RuntimeService(persistence, registry),
+    authenticator: new StaticTokenAuthenticator(tokens),
+    memory: { service: memoryService, boundary: persistence },
+    skills: { runtime: skillsRuntime, registry: skillRegistry, boundary: persistence },
+  });
+  t.after(() => new Promise<void>((resolve) => authorizationServer.close(() => resolve())));
+  await new Promise<void>((resolve) => authorizationServer.listen(0, '127.0.0.1', resolve));
+  const { port } = authorizationServer.address() as AddressInfo;
+  const projectBase = `http://127.0.0.1:${port}/v1/projects`;
+  const headers = { 'authorization': `Bearer ${TOKEN_A}`, 'content-type': 'application/json' };
+  const routes = [
+    { path: `memory/recall?subjectId=${ACTOR_A}`, init: { headers }, callCount: () => recallActive.mock.callCount() },
+    {
+      path: 'skills/test.echo/execute',
+      init: { method: 'POST', headers, body: JSON.stringify({ subjectId: ACTOR_A, payload: {} }) },
+      callCount: () => execute.mock.callCount(),
+    },
+  ];
+  for (const { path, init, callCount } of routes) {
+    const allowed = await fetch(`${projectBase}/${P}/${path}`, init);
+    assert.equal(allowed.status, 200, path);
+    await allowed.json();
+    assert.equal(callCount(), 1, path);
+
+    const denied = await fetch(`${projectBase}/${P_B}/${path}`, init);
+    assert.equal(denied.status, 403, path);
+    assert.deepEqual(await denied.json(), {
+      ok: false, status: 403, error: { category: 'authorization', message: 'actor is not a member' },
+    });
+    assert.equal(callCount(), 1, path);
+  }
 });
 
 test('api: no raw input/output/secret in runs', async () => {

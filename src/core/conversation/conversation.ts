@@ -42,14 +42,16 @@ export interface CaseFactMeta {
   provenance: FactProvenance;
   certainty: FactCertainty;
   at: string;
+  /** Contract that admitted this value, scoped to the skill that declared it. */
+  admission?: { skillId: string; interaction: RequirementInteraction };
   /** Verbatim user fragment when the value came from a statement. */
   original?: string;
   /** At most a couple of superseded values (traceability without history). */
   superseded?: Array<{ value: string; at: string }>;
   /**
    * Set ONLY on facts that were written from the generic `appContext` bridge. It makes a fact
-   * eligible for app-snapshot refresh/removal and nothing else: a stronger write (user answer,
-   * user statement, skill-bound fact) replaces the whole meta object, so the marker disappears
+   * eligible for app-snapshot refresh/removal and nothing else: a user answer replaces
+   * the whole meta object, so the marker disappears
    * and the fact is protected from then on. Domain-neutral; no reasoning reads it.
    */
   origin?: 'app';
@@ -61,12 +63,19 @@ export interface SessionContext {
   /** B1.0: the expected-answer contract OF the pending question (persisted so the user's
    * next plain-text answer binds against it — e.g. a yes/no confirmation binds CERTAIN). */
   pendingInteraction?: RequirementInteraction;
+  /** Legacy hints without this marker and UI display defaults cannot authorize a reply. */
+  pendingInteractionTrust?: { skillId: string; declared: true };
   turnCount: number;
   recentTurns: SessionTurn[];
   /** Latest grounded terminal result (bounded; cleared by a material correction). */
   lastGroundedResult?: LastGroundedResult;
   /** Provenance/certainty/currency per fact key (bounded). */
   factMeta?: Record<string, CaseFactMeta>;
+  /**
+   * Facts challenged by an explicit correction whose original contract cannot be proven.
+   * Kept outside fact metadata so ordinary fact-cap eviction cannot restore decision authority.
+   */
+  reconfirmation?: { keys: string[]; overflow?: true };
   /** B3a: bounded reusable turn context (replaced each turn; never authoritative). */
   skillContext?: SkillTurnContext;
 }
@@ -83,6 +92,9 @@ export interface ConversationSession {
 }
 
 export const MAX_RECENT_TURNS = 8;
+export const MAX_SESSION_FACTS = 40;
+/** Independent safety bound for non-evictable correction/reconfirmation state. */
+export const MAX_RECONFIRMATION_KEYS = 64;
 
 export function emptySessionContext(): SessionContext {
   return { facts: {}, turnCount: 0, recentTurns: [] };
@@ -156,6 +168,8 @@ export interface LastGroundedResult {
   explanation?: string;
   sourceTitle?: string;
   evidenceRefs: string[];
+  /** Exact confirmed facts that authorized this personal terminal result. */
+  materialFactKeys?: string[];
   /** Guarded case-state digest this result was derived from (staleness guard). */
   caseSignature?: string;
 }
@@ -186,12 +200,17 @@ export interface ConversationResponse {
   };
 }
 
-export type ConversationErrorCode = 'CONVERSATION_NOT_FOUND' | 'CONVERSATION_FORBIDDEN' | 'CONVERSATION_INPUT_INVALID';
+export type ConversationErrorCode =
+  | 'CONVERSATION_NOT_FOUND'
+  | 'CONVERSATION_FORBIDDEN'
+  | 'CONVERSATION_INPUT_INVALID'
+  | 'CONVERSATION_WRITE_CONFLICT';
 
 export const CONVERSATION_ERROR_MESSAGES: Record<ConversationErrorCode, string> = {
   CONVERSATION_NOT_FOUND: 'المحادثة غير موجودة.',
   CONVERSATION_FORBIDDEN: 'لا يمكن الوصول إلى هذه المحادثة.',
   CONVERSATION_INPUT_INVALID: 'مدخلات المحادثة غير صالحة.',
+  CONVERSATION_WRITE_CONFLICT: 'تغيّرت المحادثة أثناء معالجة الطلب. أعيدي المحاولة.',
 };
 
 export class ConversationFailure extends Error {

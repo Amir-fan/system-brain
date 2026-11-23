@@ -17,6 +17,8 @@
  * available evidence. Learning = improvement over time (not built).
  */
 
+import { normalizeDigits, normalizeIsoDate } from './numbers.ts';
+
 export type UnderstandingStatus = 'CLEAR' | 'NEEDS_CLARIFICATION';
 
 export type DialogueAct =
@@ -61,6 +63,8 @@ export interface UnderstandingInput {
 export interface UnderstandingCorrection {
   /** The memory key the correction targets (when resolvable from context). */
   target?: string;
+  /** Multiple compatible facts prevent the correction from targeting any one of them. */
+  targetAmbiguous?: true;
   /** Previous value (from active memory) when available. */
   old?: string;
   /** The new value extracted from the input. */
@@ -103,6 +107,59 @@ export interface ContextUsage {
 export type FactCertainty = 'CERTAIN' | 'UNCERTAIN' | 'UNKNOWN';
 /** Where a current case value came from. EVIDENCE is contract-compatibility only. */
 export type FactProvenance = 'user_statement' | 'user_answer' | 'memory' | 'evidence';
+
+type CorrectionValueKind = 'boolean' | 'date' | 'number' | 'time';
+
+const TRUE_ANSWER = /^(?:true|yes|y|yeah|correct|نعم|أجل|اجل|صحيح|أي نعم|اي نعم|إي نعم)$/iu;
+const FALSE_ANSWER = /^(?:false|no|n|لا|كلا|ليس)$/iu;
+
+/** The same whole-answer vocabulary is used for interpretation and admission. */
+export function normalizeBooleanAnswer(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim().replace(/\s+/gu, ' ');
+  if (TRUE_ANSWER.test(text)) return true;
+  if (FALSE_ANSWER.test(text)) return false;
+  return undefined;
+}
+
+/**
+ * Corrections without a pending requirement may replace only a uniquely matching,
+ * already-known scalar type. Free-form strings deliberately have no inferred type:
+ * accepting them would let an ambiguous correction overwrite an arbitrary fact.
+ */
+export function normalizeCorrectionValue(value: unknown): boolean | number | string | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+
+  const normalized = normalizeDigits(value).trim();
+  const boolean = normalizeBooleanAnswer(normalized);
+  if (boolean !== undefined) return boolean;
+
+  const date = normalizeIsoDate(normalized);
+  if (date) return date;
+
+  if (/^(?:[01]?\d|2[0-3]):[0-5]\d$/.test(normalized)) return normalized.padStart(5, '0');
+  if (/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(normalized)) {
+    const number = Number(normalized);
+    return Number.isFinite(number) ? number : undefined;
+  }
+  return undefined;
+}
+
+function correctionValueKind(value: unknown): CorrectionValueKind | undefined {
+  const normalized = normalizeCorrectionValue(value);
+  if (typeof normalized === 'boolean') return 'boolean';
+  if (typeof normalized === 'number') return 'number';
+  if (typeof normalized === 'string') return normalized.includes(':') ? 'time' : 'date';
+  return undefined;
+}
+
+export function correctionValuesCompatible(current: unknown, replacement: unknown): boolean {
+  const currentKind = correctionValueKind(current);
+  return currentKind !== undefined && currentKind === correctionValueKind(replacement);
+}
 
 /**
  * A bounded, GENERIC candidate fact extracted from the user's own words. It records WHAT

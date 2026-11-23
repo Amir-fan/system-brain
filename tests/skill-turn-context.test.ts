@@ -262,6 +262,7 @@ function createB3aFakeSkill(
           confidence: 'HIGH',
           sourceSupport: 'SUPPORTED',
           acceptedEvidenceRefs: EVIDENCE_REFS,
+          materialFactKeys: Object.keys(known).filter((key) => input.factMeta?.[key]?.certainty === 'CERTAIN'),
           ...(notes.length > 0 ? { notes } : {}),
         },
       };
@@ -511,18 +512,16 @@ test('G. real material change: a non-pending fact change forces the full path', 
 // H. CORRECTION — correction → full path
 // ===========================================================================
 
-test('H. correction: a structured correction forces the full path', async () => {
-  const { service, store } = createSystem({ understandingCorrections: [{ target: 'bleeding_cessation', new: 'false' }] });
+test('H. an admitted explicit correction forces the full path', async () => {
+  const { service, store } = createSystem({ understandingCorrections: [{ new: 'false' }] });
   const { session } = await startConversation(service, 'نزل علي دم');
 
-  // Turn 2: the understanding returns a correction, which sets correctionsPresent=true.
-  // The canReuse gate rejects the fast path when correctionsPresent.
+  // Turn 2 supplies a complete explicit replacement for the pending yes/no contract.
   const r2 = await service.handleMessage('p', 'a', session.id, {
-    text: 'لا، ما توقف',
-    answers: [{ key: 'bleeding_cessation', value: false }],
+    text: 'لا، قصدي لا',
   });
 
-  // The full path ran (correctionsPresent blocked the fast path).
+  assert.equal(store.rows.get(session.id)!.sessionContext.facts.bleeding_cessation, false);
   assert.equal(r2.trace?.plannerCalled, true);
   assert.equal(r2.trace?.retrievalCalled, true);
   assert.equal(r2.trace?.interpreterCalled, true);

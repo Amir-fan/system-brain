@@ -17,12 +17,13 @@ import type { UnderstandingService } from '../understanding/understanding.servic
 import type { BoundedUnderstandingContext, UnderstandingInput, UnderstandingResult } from '../understanding/understanding.ts';
 import type { MemoryReference } from '../understanding/understanding.ts';
 import type { SkillDefinition, SkillExecutionResult, SkillExecutionContext, SkillModelCapability, SkillKnowledgeCapability, SkillTraceSummary, SkillAnswer, SkillTurnContext, SkillTraceTimings, SkillKnowledgeCallTiming, SkillExecutionTrace, SkillExecutionStage, ExecutionStageName, ExecutionOutcome } from './skill.ts';
-import { MAX_SKILL_CONTEXT_REQUIREMENTS, MAX_SKILL_CONTEXT_EVIDENCE, MAX_SKILL_CONTEXT_SOURCES } from './skill.ts';
+import { MAX_SKILL_CONTEXT_REQUIREMENTS, MAX_SKILL_CONTEXT_EVIDENCE, MAX_SKILL_CONTEXT_SOURCES, MAX_SKILL_KEY_LENGTH } from './skill.ts';
 import { SkillFailure } from './skill.ts';
 import { isProviderError } from '../model-gateway/gateway-errors.ts';
 import type { ErrorCategory } from '../run/run.ts';
 import type { SkillRegistry } from './skill-registry.ts';
 import type { ModelGateway, ModelGatewayInput } from '../model-gateway/model-gateway.ts';
+import { isConfirmedMaterialFact } from '../readiness/material-fact-admission.ts';
 import {
   isInteractionType,
   type DecisionRequirement,
@@ -440,14 +441,21 @@ export class SkillsRuntime {
       if (!this.deps.readiness) throw new SkillFailure('SKILL_INVALID_OUTPUT', 'readiness required but not wired');
       const payloadObj = input.payload && typeof input.payload === 'object' && !Array.isArray(input.payload) ? (input.payload as Record<string, unknown>) : {};
       const userContext = payloadObj.context && typeof payloadObj.context === 'object' && !Array.isArray(payloadObj.context) ? (payloadObj.context as Record<string, unknown>) : {};
-      // B1.1/K-6: Memory is CONTEXT, not a user assertion — the platform's existing convention is
-      // that a memory-derived value carries no certainty, so it must NOT close a material need.
-      // Only a value supplied for THIS case (user context) may satisfy a static requirement.
+      const factMeta = payloadObj.factMeta && typeof payloadObj.factMeta === 'object' && !Array.isArray(payloadObj.factMeta)
+        ? (payloadObj.factMeta as Record<string, unknown>)
+        : {};
+      // Only a user answer with explicit server-owned metadata can close a material need.
+      const requirements = skill.readiness.requirements;
+      const currentContracts = new Map(requirements.map(({ key, interaction }) => [key, interaction]));
       const known: KnownContextItem[] = [
         ...memory.map((m) => ({ key: m.memoryKey, value: (m.payload as Record<string, unknown>).value, source: 'memory' as const, certainty: 'UNCERTAIN' as const })),
-        ...Object.entries(userContext).map(([key, value]) => ({ key, value, source: 'user' as const })),
+        ...Object.entries(userContext).map(([key, value]): KnownContextItem => {
+          const interaction = currentContracts.get(key);
+          const certainty = isConfirmedMaterialFact(value, factMeta[key], interaction) ? 'CERTAIN' : 'UNCERTAIN';
+          return { key, value, source: 'user', certainty };
+        }),
       ];
-      const readiness: ReadinessResult = this.deps.readiness.evaluate({ requirements: skill.readiness.requirements, known });
+      const readiness: ReadinessResult = this.deps.readiness.evaluate({ requirements, known });
       ctx.readiness = readiness;
       if (readiness.status !== 'READY_FOR_DECISION') {
         return { status: 'needs_information', skillId: skill.id, skillVersion: skill.version, runId, readiness };
@@ -458,7 +466,7 @@ export class SkillsRuntime {
     if (skill.requirements.model) {
       if (!this.deps.modelGateway) throw new SkillFailure('SKILL_INVALID_OUTPUT', 'model required but not wired');
       const capability: SkillModelCapability = {
-        generateText: async ({ workload, parts, message, maxOutputTokens, responseFormat, reasoning }) => {
+        generateText: async ({ workload, instructions, parts, message, maxOutputTokens, responseFormat, reasoning }) => {
           const callIndex = t.model_calls.length + 1;
           const callStart = Date.now();
           try {
@@ -467,6 +475,7 @@ export class SkillsRuntime {
               runId,
               capability: skill.id,
               model: { profile: workload } as ModelGatewayInput['model'],
+              ...(instructions ? { instructions } : {}),
               input: parts && parts.length > 0 ? { parts } : { message: message ?? '' },
               ...(typeof maxOutputTokens === 'number' ? { maxOutputTokens } : {}),
               // Forward the Skill's structured-output contract + reasoning hint verbatim.
@@ -645,6 +654,14 @@ const strList = (v: unknown, max: number, maxLen: number): string[] | undefined 
   return out.length ? out : undefined;
 };
 
+const exactMaterialFactKeys = (value: unknown): string[] | undefined => {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 24) return undefined;
+  if (!value.every((key): key is string => typeof key === 'string'
+    && key.length <= MAX_SKILL_KEY_LENGTH
+    && /^[a-zA-Z][a-zA-Z0-9_]*$/.test(key))) return undefined;
+  return new Set(value).size === value.length ? value : undefined;
+};
+
 /**
  * A skill may return `{ readiness?, trace? }` inside its output. This narrows and
  * bounds both so nothing but auditable references can reach the conversation/trace:
@@ -736,7 +753,7 @@ function liftCaseFacts(v: unknown): Record<string, unknown> | undefined {
   if (!v || typeof v !== 'object') return undefined;
   const out: Record<string, unknown> = {};
   for (const [k, val] of Object.entries(v as Record<string, unknown>).slice(0, 12)) {
-    if (!/^[a-z0-9_]{1,64}$/.test(k)) continue;
+    if (k.length > MAX_SKILL_KEY_LENGTH || !/^[a-z0-9_]+$/.test(k)) continue;
     if (isPrimitiveValue(val)) out[k] = typeof val === 'string' ? val.slice(0, 200) : val;
   }
   return Object.keys(out).length > 0 ? out : undefined;
@@ -756,13 +773,13 @@ function liftFromOutput(output: unknown): { readiness?: ReadinessResult; trace?:
             .filter((m) => m && typeof m === 'object' && typeof m.key === 'string')
             .slice(0, 12)
             .map((m) => ({
-              key: String(m.key).slice(0, 64),
-              description: str(m.description, 300) ?? String(m.key).slice(0, 64),
+              key: String(m.key).slice(0, MAX_SKILL_KEY_LENGTH),
+              description: str(m.description, 300) ?? String(m.key).slice(0, MAX_SKILL_KEY_LENGTH),
               ...(m.question && typeof m.question === 'object'
                 ? (() => {
                     const q = m.question as Record<string, unknown>;
                     const wording = str(q.wording, 300);
-                    return wording ? { question: { key: String(m.key).slice(0, 64), wording } } : {};
+                    return wording ? { question: { key: String(m.key).slice(0, MAX_SKILL_KEY_LENGTH), wording } } : {};
                   })()
                 : {}),
               ...(() => {
@@ -773,13 +790,13 @@ function liftFromOutput(output: unknown): { readiness?: ReadinessResult; trace?:
         : [];
       out.readiness = {
         status: status as ReadinessResult['status'],
-        satisfied: strList(rr.satisfied, 12, 64) ?? [],
+        satisfied: strList(rr.satisfied, 12, MAX_SKILL_KEY_LENGTH) ?? [],
         missing,
         ...(rr.nextQuestion && typeof rr.nextQuestion === 'object'
           ? (() => {
               const q = rr.nextQuestion as Record<string, unknown>;
               const wording = str(q.wording, 300);
-              const key = str(q.key, 64);
+              const key = str(q.key, MAX_SKILL_KEY_LENGTH);
               return wording && key ? { nextQuestion: { key, wording } } : {};
             })()
           : {}),
@@ -808,7 +825,7 @@ function liftFromOutput(output: unknown): { readiness?: ReadinessResult; trace?:
       ...(str(tt.status, 60) ? { status: str(tt.status, 60)! } : {}),
       ...(strList(tt.approvedSourceIds, 10, 64) ? { approvedSourceIds: strList(tt.approvedSourceIds, 10, 64)! } : {}),
       ...(evidence && evidence.length ? { evidence } : {}),
-      ...(strList(tt.requirementKeys, 12, 64) ? { requirementKeys: strList(tt.requirementKeys, 12, 64)! } : {}),
+      ...(strList(tt.requirementKeys, 12, MAX_SKILL_KEY_LENGTH) ? { requirementKeys: strList(tt.requirementKeys, 12, MAX_SKILL_KEY_LENGTH)! } : {}),
       ...(strList(tt.notes, 6, 200) ? { notes: strList(tt.notes, 6, 200)! } : {}),
       ...(str(tt.decisionStatus, 60) ? { decisionStatus: str(tt.decisionStatus, 60)! } : {}),
       ...(str(tt.decisionLabel, 120) ? { decisionLabel: str(tt.decisionLabel, 120)! } : {}),
@@ -816,6 +833,8 @@ function liftFromOutput(output: unknown): { readiness?: ReadinessResult; trace?:
       ...(str(tt.sourceSupport, 32) ? { sourceSupport: str(tt.sourceSupport, 32)! } : {}),
       ...(strList(tt.retrievedEvidenceIds, 12, 64) ? { retrievedEvidenceIds: strList(tt.retrievedEvidenceIds, 12, 64)! } : {}),
       ...(strList(tt.acceptedEvidenceRefs, 8, 64) ? { acceptedEvidenceRefs: strList(tt.acceptedEvidenceRefs, 8, 64)! } : {}),
+      ...(exactMaterialFactKeys(tt.materialFactKeys) ? { materialFactKeys: exactMaterialFactKeys(tt.materialFactKeys)! } : {}),
+      ...(typeof tt.reusedGroundedResult === 'boolean' ? { reusedGroundedResult: tt.reusedGroundedResult } : {}),
       ...(strList(tt.gapKeys, 8, 200) ? { gapKeys: strList(tt.gapKeys, 8, 200)! } : {}),
       ...(str(tt.workload, 64) ? { workload: str(tt.workload, 64)! } : {}),
       ...(str(tt.model, 96) ? { model: str(tt.model, 96)! } : {}),

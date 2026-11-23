@@ -10,7 +10,12 @@
  */
 
 import type { SupabaseDatabase } from '../supabase/supabase.persistence.ts';
-import { emptySessionContext, type ConversationSession, type SessionContext } from '../../core/conversation/conversation.ts';
+import {
+  ConversationFailure,
+  emptySessionContext,
+  type ConversationSession,
+  type SessionContext,
+} from '../../core/conversation/conversation.ts';
 import type { ConversationStoragePort } from '../../core/conversation/conversation.service.ts';
 
 const mapRow = (r: Record<string, unknown>): ConversationSession => ({
@@ -54,16 +59,18 @@ export function createConversationStorage(db: SupabaseDatabase): ConversationSto
       return data ? mapRow(data) : null;
     },
 
-    async save(session) {
-      const { data } = await db
+    async save(session, expectedUpdatedAt) {
+      const { data, error } = await db
         .from('conversations')
         .update({ session_context: session.sessionContext, updated_at: session.updatedAt })
         .eq('project_id', session.projectId)
         .eq('actor_subject', session.actorSubject)
         .eq('id', session.id)
+        .eq('updated_at', expectedUpdatedAt)
         .select('*')
         .maybeSingle();
-      if (!data) throw new Error('conversation.save.failed');
+      if (error) throw new Error('conversation.save.failed');
+      if (!data) throw new ConversationFailure('CONVERSATION_WRITE_CONFLICT');
       return mapRow(data);
     },
   };

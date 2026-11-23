@@ -34,13 +34,13 @@
  *                                              ├─► NEED_INFO
  *                                              └─► INSUFFICIENT_EVIDENCE
  *
- * Grounding rule (fail-closed): a ruling is returned ONLY with at least one citation of an
- * actually-retrieved approved chunk. Nothing is fabricated when the evidence is thin.
+ * A ruling requires confirmed user answers for all named material facts and a retrieved approved citation.
  */
 
-import type { SkillDefinition, SkillExecutionContext, SkillKnowledgePassage } from '../../core/skill/skill.ts';
+import { MAX_SKILL_KEY_LENGTH, type SkillDefinition, type SkillExecutionContext, type SkillKnowledgePassage } from '../../core/skill/skill.ts';
 import type { DecisionRequirement, KnownContextItem, ReadinessResult } from '../../core/readiness/readiness.ts';
-import { APPROVED_SOURCE_TITLES } from './fiqh-hayd-contracts.ts';
+import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admission.ts';
+import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MIND_SKILL_ID = 'naqaa.fiqh-hayd-mind';
 export const MIND_SKILL_VERSION = 3; // v0.1-P0.1 (compact Understand→Retrieve→Decide handoff)
@@ -61,7 +61,10 @@ const MAX_TOP_K = 3;
 const MAX_EVIDENCE = 6;
 const MAX_CASE_CHARS = 2400;
 const MAX_QUESTION_CHARS = 300;
+const MAX_MATERIAL_FACT_KEYS = 24;
 const DEFAULT_QUESTION_KEY = 'mind_followup';
+const FACT_KEY_PATTERN = new RegExp(FIQH_FACT_KEY_PATTERN);
+const QUESTION_KEY_DESCRIPTION = `اسم ثابت للحقيقة المطلوبة عند NEED_INFO، يبدأ بحرف إنجليزي ويحتوي فقط على حروف إنجليزية أو أرقام أو شرطة سفلية، حتى ${MAX_SKILL_KEY_LENGTH} حرفًا. حافظ على الاسم وحالة حروفه كما هما.`;
 
 type MindStatus = 'NEED_INFO' | 'NEED_EVIDENCE' | 'ANSWER' | 'INSUFFICIENT_EVIDENCE';
 
@@ -73,11 +76,12 @@ interface MindDecision {
   searchQueries?: string[];
   /** Compact handoff to the evidence stage: the understood issue (no chain-of-thought). */
   understanding?: string;
-  /** Compact handoff: material facts the user stated and Call #1 accepted. */
+  /** Unverified model notes retained only for bounded diagnostics; never handed off as facts. */
   knownFacts?: string[];
   /** Compact handoff: what the approved evidence must establish for a ruling. */
   evidenceNeeded?: string[];
   evidenceRefs?: string[];
+  materialFactKeys?: string[];
   reason?: string;
 }
 
@@ -94,8 +98,8 @@ const MIND_INSTRUCTION = [
   'لا تسأل سؤالًا إذا كان جوابه لن يغيّر شيئًا: لا في الحكم، ولا في المطلوب من المستخدمة، ولا في فهم الحالة، ولا في السؤال التالي.',
   'قبل أي سؤال، فكّر داخليًا (ولا تُظهر هذا التفكير للمستخدم): ما المعلومة الناقصة بالضبط؟ ولماذا أحتاجها؟ وما الذي سيتغيّر إن عرفتها؟ فإن لم يتغيّر شيء جوهري: لا تسأل.',
   'قواعد:',
-  '1) اقرأ وصف الحالة كاملًا قبل أي سؤال، واستعمل الحقائق المعروفة وقيمها الموثوقة (CERTAIN) دون المشكوك فيها.',
-  '2) لا تسأل عن معلومة ذكرها المستخدم صراحة ولا عن معلومة موجودة في الحقائق المعروفة؛ مثال: إن وصف لون السائل أو صفته فلا تسأل عن لونه مرة أخرى.',
+  '1) اقرأ وصف الحالة كاملًا قبل أي سؤال. الحقائق المؤكدة هي فقط ما وسمه الخادم CERTAIN و user_answer.',
+  '2) لا تسأل عن معلومة ذكرها المستخدم صراحة إلا إذا كان الحكم يتوقف على تأكيدها، ولا تعاود سؤالها عن معلومة مؤكدة.',
   '3) لا تسأل لمجرد أن حقلًا ناقص. اسأل فقط إذا كان غياب هذه المعلومة قد يغيّر الحكم أو يمنعه.',
   '4) سؤال واحد فقط في كل دور، بعربية بسيطة بلا مصطلحات فقهية (مستوى يفهمه من عمره ١٢ سنة).',
   '5) سؤال واحد = معلومة واحدة: لا تجمع معلومتين مستقلتين في سؤال واحد (مثل سؤال عن علامة الطهر وسؤال عن الصلاة معًا)، لأن جواب «نعم» يصبح ملتبسًا؛ اسأل عن المعلومة المؤثرة وحدها.',
@@ -104,51 +108,51 @@ const MIND_INSTRUCTION = [
   '8) لا تستشهد بمقطع لم يُعرض عليك؛ الاستشهاد بمعرّف غير معروض يُعدّ غير صالح ويُرفض.',
   '9) بعد كل جواب جديد من المستخدم: أعد النظر في الحالة كلها من أولها، فقد يتغيّر ما تحتاجه.',
   '10) كل معلومة تطلبها من المستخدمة يجب أن يكون لها أثر لاحق: في الحكم، أو في الفعل المطلوب، أو في الشرح، أو في السؤال التالي؛ فإن لم يكن لها أثر فلا تسألها.',
-  '11) في الجواب: لا تُعِد فتح ما ذكره المستخدم وقُبل بصيغة الشرط؛ قل «بما أن ...» ولا تقل «إذا كان ...» في المعلومة الثابتة.',
+  '11) في الجواب: لا تُعِد فتح ما ذكره المستخدم وأكده الخادم بصيغة الشرط؛ قل «بما أن ...» ولا تقل «إذا كان ...» في المعلومة الثابتة.',
   '12) رتّب جوابك لمن لا يقرأ كتب الفقه، بهذا الترتيب: (١) حالتك الآن، (٢) ماذا تفعلين الآن، (٣) السبب باختصار، (٤) تنبيه واحد فقط إن كان ثمة ما قد يغيّر الحكم، (٥) الدليل/المصدر. ابدأ بالحالة والفعل، ولا تبدأ بسلسلة شروط.',
   '13) اكتب بلغة يومية وجمل قصيرة، واشرح ما يلزم من مصطلحات فقهية ببساطة، دون إخلال بدقة الحكم ودون إضعاف الدليل.',
   '14) لا تسرد كل الاحتمالات المستقبلية؛ أجب عن مسألة المستخدمة الحالية، واقتصر على تنبيه واحد عند الحاجة.',
   'أجب بـ JSON فقط بالشكل:',
-  '{"status":"NEED_INFO|NEED_EVIDENCE|ANSWER|INSUFFICIENT_EVIDENCE",',
-  ' "message":"نص العرض للمستخدم عند ANSWER أو INSUFFICIENT_EVIDENCE",',
+  '{"status":"NEED_INFO|NEED_EVIDENCE",',
   ' "question":"السؤال الواحد عند NEED_INFO",',
+  ` "key":"${QUESTION_KEY_DESCRIPTION}",`,
   ' "searchQueries":["عبارات عربية فصحى للبحث في النصوص المعتمدة عند NEED_EVIDENCE، حتى ٣"],',
-  ' "evidenceRefs":["معرّفات المقاطع المعروضة التي استندت إليها عند ANSWER"],',
   ' "understanding":"سطر واحد يلخّص فهمك للحالة (يُلخَّص للمرحلة التالية، لا يُعرض للمستخدم)",',
-  ' "knownFacts":["الحقائق المثبتة من كلام المستخدمة التي اعتمدت عليها (حتى ٦، كل واحدة قصيرة)"],',
+  ' "materialFactKeys":["الأسماء الدقيقة للحقائق المؤكدة من سياق الخادم التي سيتوقف عليها الحكم"],',
   ' "evidenceNeeded":["ما يجب أن تُثبته النصوص المعتمدة للحكم في هذه الحالة (حتى ٣، كل واحدة قصيرة)"],',
   ' "reason":"سطر واحد لسبب قرارك (يُسجَّل داخليًا فقط)"}',
   'قواعد المرحلة:',
   '- في مرحلة «فهم أولي» لا يوجد ANSWER: إما NEED_INFO (سؤال واحد) أو NEED_EVIDENCE مع عبارات البحث.',
-  '- في مرحلة «فهم أولي»: عند NEED_EVIDENCE املأ أيضًا understanding و knownFacts و evidenceNeeded مع searchQueries؛ فهذه خلاصةٌ مختصرة تُبنى عليها المرحلة التالية ولا تُعرض للمستخدمة.',
-  '- في مرحلة «نصوص معتمدة معروضة»: ANSWER (مع evidenceRefs من المعروض فقط) أو NEED_INFO أو INSUFFICIENT_EVIDENCE.',
-  '- في ANSWER يكون «message» مرتبًا حسب ترتيب الجواب (الحالة، ثم الفعل، ثم السبب، ثم تنبيه واحد عند الحاجة، ثم الدليل)، ومبنيًا على ما ثبت من كلام المستخدمة.',
+  `- في مرحلة «فهم أولي»: عند NEED_EVIDENCE املأ أيضًا understanding و evidenceNeeded وmaterialFactKeys من 1 إلى ${MAX_MATERIAL_FACT_KEYS} اسمًا مطابقًا من «حقائق مؤكدة من سياق الخادم». إذا لم توجد حقيقة مادية مؤكدة تكفي لبدء الحكم فاختر NEED_INFO بدل التخمين.`,
 ].join('\n');
 
 /**
  * The ANSWER-stage instruction (P0.1). Call #2 no longer re-derives the case: it receives the
  * compact handoff from Call #1 + the retrieved approved evidence + this small contract. It
- * keeps FULL authority over the outcome (the handoff is an understood case, NOT a ruling).
+ * proposes an outcome that is checked against the confirmed facts and retrieved citations.
  */
 const MIND_ANSWER_INSTRUCTION = [
   'أنت «عقل نقاء»: الذكاء المتخصص في فقه الحيض والنفاس على مذهب الشافعي، وهو المعتمد في المشروع.',
-  'وصلتك خلاصةُ فهمِ الحالة من مرحلة سابقة، ومعها النصوص المعتمدة. الخلاصة تمثيلٌ للحالة وليست حكمًا جاهزًا؛ احكم من النصوص المعروضة، ولك أن تخالف الخلاصة إن خالفتها النصوص.',
+  'وصلتك خلاصةُ فهمِ الحالة من مرحلة سابقة، ومعها النصوص المعتمدة. خلاصة الفهم والمقترحات غير متحققة؛ الحقائق المؤكدة هي فقط ما يرد تحت «حقائق مؤكدة من سياق الخادم».',
   'اختر حالة واحدة:',
-  '- ANSWER: إذا كفت النصوص المعروضة للحكم، فأجب بالحكم مع evidenceRefs من المعروض فقط.',
+  '- ANSWER: إذا كفت الحقائق المؤكدة والنصوص المعروضة للحكم، فأجب بالحكم مع evidenceRefs من المعروض فقط وmaterialFactKeys لكل حقيقة يتوقف عليها الحكم.',
   '- NEED_INFO: إذا توقف الحكم على معلومة واحدة من المستخدمة، فاسأل سؤالًا واحدًا عن معلومة واحدة.',
-  '- INSUFFICIENT_EVIDENCE: إذا لم تكفِ النصوص المعروضة، فاذكر ذلك بلا حكم.',
+  '- INSUFFICIENT_EVIDENCE: إذا لم تكفِ النصوص المعروضة، أرسل الحالة وحدها.',
   'قواعد الحكم:',
   '1) لا تُفتِ من معرفتك العامة ولا من الخلاصة وحدها؛ الحكم من النصوص المعروضة فقط.',
   '2) لا تستشهد بمقطع لم يُعرض عليك؛ الاستشهاد بمعرّف غير معروض يُرفض.',
-  '3) لا تفترض معلومة غائبة؛ إن توقف الحكم على معلومة ناقصة فاطلبها بـ NEED_INFO.',
-  '4) لا تُعِد فتح ما ثبت من كلام المستخدمة بصيغة الشرط؛ قل «بما أن ...» ولا تقل «إذا كان ...».',
+  '3) لا تعتمد على المقترحات غير المتحققة أو تفترض معلومة غائبة؛ إن توقف الحكم على معلومة ناقصة فاطلبها بـ NEED_INFO.',
+  '4) لا تُعِد فتح الحقائق المؤكدة من سياق الخادم بصيغة الشرط؛ قل «بما أن ...» ولا تقل «إذا كان ...».',
   '5) رتّب الجواب: (١) حالتك الآن، (٢) ماذا تفعلين الآن، (٣) السبب باختصار، (٤) تنبيه واحد فقط إن كان ثمة ما قد يغيّر الحكم، (٥) الدليل/المصدر. ابدأ بالحالة والفعل، ولا تبدأ بسلسلة شروط.',
   '6) لغة يومية وجمل قصيرة، بلا إخلال بدقة الحكم ولا إضعاف الدليل.',
   '7) في «الدليل» اذكر اسم المصدر المعتمد (المكتوب بين القوسين قبل النص)، ولا تكتب معرّفات المقاطع في كلام المستخدمة؛ المعرّفات مكانها حقل evidenceRefs فقط.',
+  `8) مع ANSWER وحده، أرسل في materialFactKeys من 1 إلى ${MAX_MATERIAL_FACT_KEYS} اسمًا من «حقائق مؤكدة من سياق الخادم» واكتب كل اسم مطابقًا لما عُرض. أدرج كل حقيقة يتوقف عليها الحكم. إذا غابت أي حقيقة لازمة فاختر NEED_INFO أو INSUFFICIENT_EVIDENCE.`,
   'أجب بـ JSON فقط بالشكل:',
   '{"status":"ANSWER|NEED_INFO|INSUFFICIENT_EVIDENCE",',
-  ' "message":"نص الجواب للمستخدمة عند ANSWER أو INSUFFICIENT_EVIDENCE",',
+  ' "message":"نص الجواب للمستخدمة عند ANSWER",',
   ' "question":"السؤال الواحد عند NEED_INFO",',
+  ` "key":"${QUESTION_KEY_DESCRIPTION}",`,
+  ' "materialFactKeys":["الأسماء الدقيقة لكل الحقائق المؤكدة التي يتوقف عليها ANSWER"],',
   ' "evidenceRefs":["معرّفات المقاطع المعروضة التي استندت إليها عند ANSWER"]}',
 ].join('\n');
 
@@ -156,6 +160,19 @@ const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 const bounded = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
 /** Keep the MOST RECENT text when a bounded block overflows (the newest turn matters most). */
 const boundedTail = (s: string, n: number): string => (s.length > n ? `…${s.slice(-n)}` : s);
+
+function isMindFactKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= MAX_SKILL_KEY_LENGTH && FACT_KEY_PATTERN.test(value)
+    && value !== DEFAULT_QUESTION_KEY && value !== 'prototype' && !Object.hasOwn(Object.prototype, value);
+}
+
+function sameFactKeySet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const expected = new Set(left);
+  const actual = new Set(right);
+  return expected.size === left.length && actual.size === right.length
+    && expected.size === actual.size && [...actual].every((key) => expected.has(key));
+}
 
 function parseDecision(text: string): MindDecision | null {
   const cleaned = text.replace(/^```(?:json)?|```$/g, '').trim();
@@ -172,6 +189,14 @@ function parseDecision(text: string): MindDecision | null {
   const o = raw as Record<string, unknown>;
   const status = str(o.status).toUpperCase().replace(/[\s-]/g, '_') as MindStatus;
   if (!['NEED_INFO', 'NEED_EVIDENCE', 'ANSWER', 'INSUFFICIENT_EVIDENCE'].includes(status)) return null;
+  const key = status === 'NEED_INFO' && isMindFactKey(o.key) ? o.key : undefined;
+  if (status === 'NEED_INFO' && Object.hasOwn(o, 'key') && key === undefined) return null;
+  if (status !== 'ANSWER' && status !== 'NEED_EVIDENCE' && Object.hasOwn(o, 'materialFactKeys')) return null;
+  const materialFactKeys = Array.isArray(o.materialFactKeys) && o.materialFactKeys.length > 0
+    && o.materialFactKeys.length <= MAX_MATERIAL_FACT_KEYS && o.materialFactKeys.every(isMindFactKey)
+    && new Set(o.materialFactKeys).size === o.materialFactKeys.length
+    ? o.materialFactKeys
+    : undefined;
   const list = (v: unknown): string[] | undefined =>
     Array.isArray(v) ? v.map((x) => str(x)).filter(Boolean) : undefined;
   const shortList = (v: unknown, max: number, each: number): string[] | undefined => {
@@ -184,18 +209,13 @@ function parseDecision(text: string): MindDecision | null {
     ...(shortList(o.evidenceNeeded, 3, 200) ? { evidenceNeeded: shortList(o.evidenceNeeded, 3, 200)! } : {}),
     ...(str(o.message) ? { message: bounded(str(o.message), 1200) } : {}),
     ...(str(o.question) ? { question: bounded(str(o.question), MAX_QUESTION_CHARS) } : {}),
-    ...(str(o.key) ? { key: str(o.key) } : {}),
+    ...(key ? { key } : {}),
+    ...(materialFactKeys ? { materialFactKeys } : {}),
     ...(list(o.searchQueries) ? { searchQueries: list(o.searchQueries)!.slice(0, MAX_QUERIES) } : {}),
     ...(list(o.evidenceRefs) ? { evidenceRefs: list(o.evidenceRefs)! } : {}),
     ...(str(o.understanding) ? { understanding: bounded(str(o.understanding), 300) } : {}),
     ...(str(o.reason) ? { reason: bounded(str(o.reason), 200) } : {}),
   };
-}
-
-/** Bounded snake_case identity for the ONE question (never a domain vocabulary). */
-function questionKey(declared: string | undefined): string {
-  const k = (declared ?? '').toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^_+|_+$/g, '').slice(0, 32);
-  return k || DEFAULT_QUESTION_KEY;
 }
 
 interface MindDeps {
@@ -228,8 +248,8 @@ export function createFiqhHaydMindSkill(deps: MindDeps): SkillDefinition {
         recentTurns?: Array<{ role?: string; text?: string }>;
       };
       const text = str(input.text);
-      const facts = input.context ?? {};
-      const factMeta = input.factMeta ?? {};
+      const facts = input.context && typeof input.context === 'object' && !Array.isArray(input.context) ? input.context : {};
+      const factMeta = input.factMeta && typeof input.factMeta === 'object' && !Array.isArray(input.factMeta) ? input.factMeta : {};
       const turns = Array.isArray(input.recentTurns) ? input.recentTurns : [];
       let modelCalls = 0;
       let knowledgeSearches = 0;
@@ -258,7 +278,9 @@ export function createFiqhHaydMindSkill(deps: MindDeps): SkillDefinition {
       //    + known facts WITH their certainty (so the model can tell known from uncertain).
       const knownLines = Object.entries(facts)
         .filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '')
-        .map(([k, v]) => `- ${k} = ${bounded(String(v), 120)} (${factMeta[k]?.certainty ?? 'CERTAIN'}, ${factMeta[k]?.provenance ?? 'user'})`);
+        .map(([k, v]) => `- ${k} = ${bounded(String(v), 120)} (${factMeta[k]?.certainty ?? 'UNCERTAIN'}, ${factMeta[k]?.provenance ?? 'user_statement'})`);
+      const confirmedFacts = new Map(Object.entries(facts).filter(([key, value]) =>
+        isMindFactKey(key) && Object.hasOwn(factMeta, key) && isConfirmedMaterialFact(value, factMeta[key])));
       // The Mind's OWN questions travel with the user's answers: a short answer («اي») is
       // meaningless without the question it answers, and re-asking an already-answered
       // question is exactly the failure this iteration removes.
@@ -273,17 +295,20 @@ export function createFiqhHaydMindSkill(deps: MindDeps): SkillDefinition {
       const caseBlock = [
         'سياق الحوار كما جرى (الأحدث آخرًا؛ «المستخدمة» كلامها و«أنت سألت» أسئلتك السابقة):',
         boundedTail(narrative, MAX_CASE_CHARS),
-        knownLines.length > 0 ? `حقائق معروفة:\n${knownLines.join('\n')}` : 'حقائق معروفة: (لا شيء)',
+        knownLines.length > 0 ? `سياق حقائق مقدم مع درجة الثقة (لا يمنح الحكم بذاته):\n${knownLines.join('\n')}` : 'سياق حقائق مقدم: (لا شيء)',
       ].join('\n\n');
 
       const ask = (d: MindDecision, extra: Record<string, unknown> = {}) => {
-        const key = questionKey(d.key);
+        const key = d.key ?? DEFAULT_QUESTION_KEY;
         const wording = bounded(str(d.question), MAX_QUESTION_CHARS);
         // Compatibility adapter (smallest possible): the ONE model-chosen question is relayed
         // as ONE material requirement through the EXISTING readiness evaluator, so Core renders
         // it and keeps its "exactly one question" rule. Core never chooses the fiqh question.
         const readiness = deps.readiness.evaluate({
-          requirements: [{ key, description: wording, material: true, question: { key, wording } }],
+          requirements: [{
+            key, description: wording, material: true, question: { key, wording },
+            ...(d.key ? { interaction: { type: 'free_text' as const } } : {}),
+          }],
           known: [],
         });
         return {
@@ -303,14 +328,24 @@ export function createFiqhHaydMindSkill(deps: MindDeps): SkillDefinition {
       // 3. Decision #1 — understanding only: ask, or say what evidence is needed.
       const first = await ctx.model!.generateText({
         workload: WORKLOAD,
-        message: `${MIND_INSTRUCTION}\n\nالمرحلة: فهم أولي (لم تُعرض نصوص بعد).\n\n${caseBlock}`,
+        instructions: MIND_INSTRUCTION,
+        message: `المرحلة: فهم أولي (لم تُعرض نصوص بعد).\n\n${caseBlock}`,
         maxOutputTokens: MIND_MAX_OUTPUT_TOKENS,
       });
       modelCalls += 1;
       const d1 = parseDecision(first.text);
       if (!d1) return gap('unreadable_model_output', 'أحتاج إعادة صياغة أوضح حتى أتمكن من المتابعة.');
       if (d1.status === 'NEED_INFO' && d1.question) return ask(d1, { model: str(first.model) });
-      const queries = (d1.searchQueries ?? []).filter(Boolean).slice(0, MAX_QUERIES);
+      if (d1.status !== 'NEED_EVIDENCE') {
+        return gap('first_stage_terminal_status', FIQH_EVIDENCE_GAP_MESSAGE, { model: str(first.model) });
+      }
+      const queries = d1.status === 'NEED_EVIDENCE' ? d1.searchQueries ?? [] : [];
+      const firstMaterialKeys = d1.status === 'NEED_EVIDENCE' ? d1.materialFactKeys ?? [] : [];
+      const firstMaterialFactsValid = firstMaterialKeys.length > 0
+        && firstMaterialKeys.every((key) => isFiqhDecisionMaterialFactKey(key) && confirmedFacts.has(key));
+      if (d1.status === 'NEED_EVIDENCE' && !firstMaterialFactsValid) {
+        return gap('first_stage_material_facts_unconfirmed', FIQH_EVIDENCE_GAP_MESSAGE, { model: str(first.model) });
+      }
       if (queries.length === 0) {
         // No question and no evidence request: ask for the smallest thing that unblocks reasoning.
         return ask({ status: 'NEED_INFO', question: 'هل يمكنك توضيح الحالة قليلًا: ما الذي نزل، ومتى بدأ، وهل ما زال مستمرًا؟' }, { model: str(first.model) });
@@ -348,35 +383,36 @@ export function createFiqhHaydMindSkill(deps: MindDeps): SkillDefinition {
       const evidenceBlock = evidence
         .map((p) => `[${p.chunkId}] (${p.sourceTitle}) ${bounded(p.text, 1400)}`)
         .join('\n\n');
-      // P0.1 handoff: Call #1's compact conclusions (issue / accepted facts / what the
+      // P0.1 handoff: Call #1's compact conclusions (issue / proposed facts / what the
       // evidence must establish) — NOT the conversation, NOT the full case block, and
       // never its hidden reasoning. Call #2 keeps authority to answer, ask, or decline.
-      const knownFacts = (d1.knownFacts ?? []).filter(Boolean).slice(0, 6);
       const evidenceNeeded = (d1.evidenceNeeded ?? []).filter(Boolean).slice(0, 3);
+      const selectedFacts = firstMaterialKeys.map((key) => [key, confirmedFacts.get(key)] as const);
       const handoffBlock = [
         'خلاصة فهم الحالة من المرحلة السابقة (تمثيل للحالة وليست حكمًا):',
-        `- الفهم: ${str(d1.understanding) || '(غير متوفر)'}`,
-        knownFacts.length > 0 ? `- حقائق مثبتة من كلام المستخدمة:\n${knownFacts.map((f) => `  • ${f}`).join('\n')}` : '- حقائق مثبتة: (لا شيء)',
+        `- الفهم الأولي غير المتحقق: ${str(d1.understanding) || '(غير متوفر)'}`,
+        `- حقائق مؤكدة من سياق الخادم (المادية المختارة في المرحلة الأولى):\n${selectedFacts.map(([key, value]) => `  • ${key} = ${bounded(String(value), 120)}`).join('\n')}`,
         evidenceNeeded.length > 0 ? `- المطلوب إثباته من النصوص:\n${evidenceNeeded.map((e) => `  • ${e}`).join('\n')}` : '',
       ]
         .filter(Boolean)
         .join('\n');
       const second = await ctx.model!.generateText({
         workload: WORKLOAD,
-        message: `${MIND_ANSWER_INSTRUCTION}\n\n${handoffBlock}\n\nالنصوص المعتمدة:\n${evidenceBlock}`,
+        instructions: MIND_ANSWER_INSTRUCTION,
+        message: `${handoffBlock}\n\nالنصوص المعتمدة:\n${evidenceBlock}`,
         maxOutputTokens: MIND_MAX_OUTPUT_TOKENS,
       });
       modelCalls += 1;
       const d2 = parseDecision(second.text);
       const counters = [`model_calls=${modelCalls}`, `knowledge_queries=${knowledgeSearches}`];
-      const handoffCounters = [`handoff_facts=${knownFacts.length}`, `handoff_needed=${evidenceNeeded.length}`];
+      const handoffCounters = [`handoff_facts=${selectedFacts.length}`, 'handoff_proposals=0', `handoff_needed=${evidenceNeeded.length}`];
       const searched = { ...traceBase, ...(str(second.model) ? { model: str(second.model) } : {}), notes: [...handoffCounters, ...counters] };
       if (!d2) return gap('unreadable_model_output', 'تعذّر ترتيب الجواب من النصوص المعتمدة.', searched);
       if (d2.status === 'NEED_INFO' && d2.question) {
         return ask(d2, { ...traceBase, model: str(second.model), notes: [...handoffCounters, ...counters] });
       }
       if (d2.status !== 'ANSWER') {
-        return gap('mind_reported_insufficient_evidence', bounded(d2.message ?? 'النصوص المعتمدة لا تكفي لحسم هذه الحالة.', 1200), searched);
+        return gap('mind_reported_insufficient_evidence', FIQH_EVIDENCE_GAP_MESSAGE, searched);
       }
       // 6. Citation validation (fail-closed): only actually-retrieved approved chunks count.
       const accepted = (d2.evidenceRefs ?? []).filter((id) => validIds.has(id)).slice(0, 6);
@@ -385,6 +421,11 @@ export function createFiqhHaydMindSkill(deps: MindDeps): SkillDefinition {
           ...searched,
           notes: [...counters, 'citation_rejected'],
         });
+      }
+      if (!d2.materialFactKeys
+        || !sameFactKeySet(firstMaterialKeys, d2.materialFactKeys)
+        || !d2.materialFactKeys.every((key) => isFiqhDecisionMaterialFactKey(key) && confirmedFacts.has(key))) {
+        return gap('personal_facts_unconfirmed', FIQH_EVIDENCE_GAP_MESSAGE, searched);
       }
       return {
         status: 'completed',
@@ -399,6 +440,7 @@ export function createFiqhHaydMindSkill(deps: MindDeps): SkillDefinition {
           acceptedEvidenceRefs: accepted,
           sourceSupport: 'SUPPORTED',
           decisionStatus: 'ANSWER',
+          materialFactKeys: d2.materialFactKeys,
           ...(d2.understanding ? { issue: d2.understanding } : {}),
           notes: [...handoffCounters, ...counters],
         },

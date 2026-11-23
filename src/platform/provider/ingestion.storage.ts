@@ -350,22 +350,24 @@ export function createIngestionPersistence(db: SupabaseDatabase): IngestionPersi
       await db.from('document_chunks').delete().eq('ingestion_job_id', ingestionJobId);
     },
     async listChunkSummaries(projectId, documentId) {
-      const { data } = await db
+      const { data, error } = await db
         .from('document_chunks')
         .select(CHUNK_SUMMARY_COLUMNS)
         .eq('project_id', projectId)
         .eq('document_id', documentId)
         .order('chunk_index', { ascending: true })
         .limit(2000);
+      if (error) throw new Error('chunk summary read failed', { cause: error });
       return (data ?? []).map(mapChunkSummary);
     },
     async getChunk(projectId, chunkId) {
-      const { data } = await db
+      const { data, error } = await db
         .from('document_chunks')
         .select(CHUNK_FULL_COLUMNS)
         .eq('project_id', projectId)
         .eq('id', chunkId)
         .maybeSingle();
+      if (error) throw new Error('chunk read failed', { cause: error });
       return data ? mapChunk(data) : null;
     },
   };
