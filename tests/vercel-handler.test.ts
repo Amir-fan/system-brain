@@ -119,11 +119,19 @@ test('Vercel adapter restores the canonical path and preserves caller query valu
   await withServer(handler, async (baseUrl) => {
     const first = await fetch(`${baseUrl}/api/index?__kip_path=/v1/projects&limit=2`);
     const second = await fetch(`${baseUrl}/api/index?__kip_path=/v1/projects/demo/runs`);
+    const rewritten = await fetch(
+      `${baseUrl}/v1/projects?__kip_path=/v1/projects/other/runs&limit=3`,
+    );
     assert.equal(first.status, 204);
     assert.equal(second.status, 204);
+    assert.equal(rewritten.status, 204);
   });
 
-  assert.deepEqual(seenUrls, ['/v1/projects?limit=2', '/v1/projects/demo/runs']);
+  assert.deepEqual(seenUrls, [
+    '/v1/projects?limit=2',
+    '/v1/projects/demo/runs',
+    '/v1/projects?limit=3',
+  ]);
   assert.equal(loads, 1, 'composition should be reused by warm function invocations');
 });
 

@@ -17,6 +17,11 @@ export type HttpApiHandlerLoader = () => Promise<HttpApiHandler>;
 function canonicalRequestUrl(requestUrl: string | undefined): string | null {
   const url = new URL(requestUrl ?? '/', 'http://kip.internal');
   const routedPaths = url.searchParams.getAll(ROUTE_PARAMETER);
+  if (KIP_PATH.test(url.pathname)) {
+    url.searchParams.delete(ROUTE_PARAMETER);
+    const query = url.searchParams.toString();
+    return `${url.pathname}${query ? `?${query}` : ''}`;
+  }
   if (routedPaths.length !== 1 || !KIP_PATH.test(routedPaths[0])) return null;
 
   url.searchParams.delete(ROUTE_PARAMETER);
