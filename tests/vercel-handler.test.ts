@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 import type { HttpApiHandler } from '../src/platform/api/http-server.ts';
 import { createVercelHandler } from '../src/platform/vercel/vercel-handler.ts';
+import { createWebHandler } from '../src/platform/vercel/web-handler.ts';
 
 test('Vercel configuration routes the complete API surface to the bounded function', async () => {
   const configuration = JSON.parse(await readFile('vercel.json', 'utf8')) as {
@@ -20,6 +21,33 @@ test('Vercel configuration routes the complete API surface to the bounded functi
   assert.deepEqual(configuration.rewrites, [{
     source: '/v1/:path*',
     destination: '/api/index?__kip_path=/v1/:path*',
+  }]);
+});
+
+test('Web adapter returns the canonical Node handler response expected by current Vercel functions', async () => {
+  const seen: Array<{ method: string | undefined; url: string | undefined; body: string }> = [];
+  const webHandler = createWebHandler(async (request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    for await (const chunk of request) body += chunk;
+    seen.push({ method: request.method, url: request.url, body });
+    response.writeHead(201, { 'content-type': 'application/json', 'x-kip-test': 'passed' });
+    response.end(JSON.stringify({ ok: true }));
+  });
+
+  const response = await webHandler(new Request('https://kip.example/api/index?value=1', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ input: 'safe' }),
+  }));
+
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get('x-kip-test'), 'passed');
+  assert.deepEqual(await response.json(), { ok: true });
+  assert.deepEqual(seen, [{
+    method: 'POST',
+    url: '/api/index?value=1',
+    body: JSON.stringify({ input: 'safe' }),
   }]);
 });
 
