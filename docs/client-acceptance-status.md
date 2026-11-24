@@ -41,7 +41,7 @@ This section is updated only from commands executed after all code and documenta
 | `npm run lint` | Exit 0; `lint:passed:300` | PASS |
 | `npm run typecheck` | Exit 0; `tsc -p tsconfig.json` | PASS |
 | `npm test` | 1,023 total; 996 passed; 0 failed; 27 credential-gated skipped | PASS |
-| `npm --prefix frontend run build` | Exit 0; 1,629 modules; JS 299.02 kB (90.06 kB gzip); CSS 20.38 kB (5.05 kB gzip) | PASS |
+| `npm --prefix frontend run build` | Exit 0; 1,629 modules; configured JS 514.04 kB (145.31 kB gzip); CSS 20.38 kB (5.05 kB gzip) | PASS |
 | `git diff --check` | Exit 0; no whitespace errors | PASS |
 | `npm run verify:local` | Exit 0 after credential scrubbing; repeated lint, typecheck, root tests, and frontend build | PASS |
 | Root `npm audit --audit-level=high` | Exit 0; 0 vulnerabilities | PASS |
