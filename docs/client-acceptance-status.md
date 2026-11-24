@@ -46,8 +46,9 @@ This section is updated only from commands executed after all code and documenta
 | `npm run verify:local` | Exit 0 after credential scrubbing; repeated lint, typecheck, root tests, and frontend build | PASS |
 | Root `npm audit --audit-level=high` | Exit 0; 0 vulnerabilities | PASS |
 | Frontend `npm audit` | Exit 0 after targeted Vite, React Router, and transitive PostCSS fixes; 0 vulnerabilities | PASS |
-| Live Supabase/API suite | 21 total; 20 passed; 0 failed; 1 OpenRouter-only skip | PASS |
+| Live Supabase/API/OpenRouter suite | 24 passed; 0 failed; 0 skipped | PASS |
 | Deployed two-user/two-project suite | 1 passed; 0 failed; fixtures removed | PASS |
+| Admin model-assignment live suite | 2 passed; 0 failed; temporary admin token only | PASS |
 
 No local `.env` variant, key file, build output, temporary user, or temporary project is part of the deliverable.
 
@@ -71,23 +72,25 @@ node --env-file=.env.local --import tsx --test tests/live/deployed-auth.live.tes
 
 The service-backed live matrix passed, including cross-project denial, content-free run records, and a real compare-and-swap race. The deployed test created two temporary confirmed Auth users and two projects, verified each user listed only her own project, verified project-ID switching returned 403, and removed all fixtures.
 
-### OpenRouter live gate — NOT RUN
+### OpenRouter live gate — PASS
 
-Prerequisite: `OPENROUTER_API_KEY` for these test files. The API integration case also requires `SUPABASE_URL` and `SUPABASE_SECRET_KEY`. A Vault-only runtime credential does not make this test command eligible and must not be reported as a provider-test PASS. Run:
-
-```powershell
-node --import tsx --env-file=.env.local --test tests/live/model-gateway.live.test.ts tests/live/api.live.test.ts
-```
-
-Verify structured output/message roles and ensure failures expose neither the key nor submitted health content.
-
-### Admin model-assignment gate — NOT RUN
-
-Prerequisites: `KIP_PLATFORM_ADMIN_TOKEN`, `SUPABASE_URL`, and `SUPABASE_SECRET_KEY`. A configured provider improves model-catalog validation coverage but is not required for the admin authorization/CRUD contract. Run:
+The ignored local environment supplied `OPENROUTER_API_KEY`, `SUPABASE_URL`, and `SUPABASE_SECRET_KEY`. The key value was not logged or committed. Command:
 
 ```powershell
-node --import tsx --env-file=.env.local --test tests/model-assignment-api.test.ts
+node --env-file=.env.local --import tsx --test tests/live/model-gateway.live.test.ts tests/live/api.live.test.ts
 ```
+
+Result: 14 passed, 0 failed, 0 skipped. The matrix validated the real key, model discovery, a minimal AI request, provider/model/usage persistence, controlled invalid-key handling, and content-free run records.
+
+### Admin model-assignment gate — PASS
+
+A generated process-only `KIP_PLATFORM_ADMIN_TOKEN` was used with the configured Supabase project; it was not written to disk. Command:
+
+```powershell
+node --env-file=.env.local --import tsx --test tests/model-assignment-api.test.ts
+```
+
+Result: 2 passed, 0 failed, 0 skipped. Temporary assignment data was removed by test cleanup.
 
 ### External Naqaa/staging journey — NOT RUN
 
