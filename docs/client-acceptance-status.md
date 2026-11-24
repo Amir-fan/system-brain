@@ -48,6 +48,7 @@ This section is updated only from commands executed after all code and documenta
 | Frontend `npm audit` | Exit 0 after targeted Vite, React Router, and transitive PostCSS fixes; 0 vulnerabilities | PASS |
 | Live Supabase/API/OpenRouter suite | 24 passed; 0 failed; 0 skipped | PASS |
 | Deployed two-user/two-project suite | 1 passed; 0 failed; fixtures removed | PASS |
+| Deployed configured AI smoke | `knowledge_answer` returned HTTP 200; deliberately unassigned `source_analysis` failed closed | PASS |
 | Admin model-assignment live suite | 2 passed; 0 failed; temporary admin token only | PASS |
 
 No local `.env` variant, key file, build output, temporary user, or temporary project is part of the deliverable.
@@ -80,7 +81,7 @@ The ignored local environment supplied `OPENROUTER_API_KEY`, `SUPABASE_URL`, and
 node --env-file=.env.local --import tsx --test tests/live/model-gateway.live.test.ts tests/live/api.live.test.ts
 ```
 
-Result: 14 passed, 0 failed, 0 skipped. The matrix validated the real key, model discovery, a minimal AI request, provider/model/usage persistence, controlled invalid-key handling, and content-free run records.
+Result: 14 passed, 0 failed, 0 skipped. The matrix validated the real key, model discovery, a minimal AI request, provider/model/usage persistence, controlled invalid-key handling, and content-free run records. The deployed `knowledge_answer` assignment also returned HTTP 200; an unassigned `source_analysis` request returned a controlled runtime failure rather than silently selecting another model.
 
 ### Admin model-assignment gate — PASS
 
