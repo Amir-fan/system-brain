@@ -1,5 +1,6 @@
 import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import {
   liveSupabase,
   createLiveProject,
@@ -14,6 +15,8 @@ import { createSupabaseRuntimePersistence } from '../../src/platform/supabase/su
 import type { SupabaseDatabase } from '../../src/platform/supabase/supabase.persistence.ts';
 import { RuntimeService } from '../../src/core/runtime/runtime.service.ts';
 import { MapCapabilityRegistry } from '../../src/core/capability/capability-registry.ts';
+import { ConversationFailure, type ConversationSession } from '../../src/core/conversation/conversation.ts';
+import { createConversationStorage } from '../../src/platform/provider/conversation.storage.ts';
 
 import type { CapabilityHandler } from '../../src/core/capability/capability.ts';
 
@@ -153,6 +156,47 @@ test('live: run privacy — runs table has no content-storage columns', { skip: 
     assert.ok(!keys.includes(forbidden), `unexpected content column: ${forbidden}`);
   }
   assert.ok(!JSON.stringify(runs).includes('do-not-store'));
+});
+
+test('live: concurrent conversation saves allow one winner and reject the stale writer', { skip: !hasServerKey }, async () => {
+  const storage = createConversationStorage(db);
+  const conversationId = randomUUID();
+  const created = await storage.create({
+    id: conversationId,
+    projectId: projectA,
+    actorSubject: ACTOR_A,
+    mode: 'contextual',
+    status: 'active',
+    sessionContext: { facts: {}, turnCount: 0, recentTurns: [] },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  const next = (turnCount: number): ConversationSession => ({
+    ...created,
+    sessionContext: { facts: {}, turnCount, recentTurns: [] },
+    updatedAt: new Date(Date.parse(created.updatedAt) + turnCount).toISOString(),
+  });
+
+  const results = await Promise.allSettled([
+    storage.save(next(1), created.updatedAt),
+    storage.save(next(2), created.updatedAt),
+  ]);
+  const fulfilled = results.filter((result) => result.status === 'fulfilled');
+  const rejected = results.filter((result) => result.status === 'rejected');
+
+  assert.equal(fulfilled.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.ok(
+    rejected[0].status === 'rejected'
+      && rejected[0].reason instanceof ConversationFailure
+      && rejected[0].reason.code === 'CONVERSATION_WRITE_CONFLICT',
+  );
+
+  const persisted = await storage.get(projectA, ACTOR_A, conversationId);
+  assert.ok(persisted);
+  assert.ok(persisted.sessionContext.turnCount === 1 || persisted.sessionContext.turnCount === 2);
+  await db.from('conversations').delete().eq('id', conversationId);
 });
 
 async function readRuns(projectId: string): Promise<Array<Record<string, unknown>>> {
