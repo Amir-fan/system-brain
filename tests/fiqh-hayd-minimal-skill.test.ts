@@ -302,6 +302,12 @@ test('Minimal: evidence that is prematurely declined is retried once as a safe a
   assert.equal(out.readiness.missing[0].question.wording, 'هل الدم مستمر بلا انقطاع طوال هذه الأيام؟');
 });
 
+test('Minimal: the structured model contract permits only a cited answer or one clarification question', async () => {
+  const { mCapture } = await runWith(reqSkill(), { text: 'سؤال', responses: [askUser('ما مدة الدم؟')] });
+  const format = mCapture.perCall[0].responseFormat as { schema?: { properties?: { status?: { enum?: unknown } } } };
+  assert.deepEqual(format.schema?.properties?.status?.enum, ['ANSWER', 'ASK_USER']);
+});
+
 test('admission round 6: Minimal returns a safe educational evidence gap without echoing unmarked model prose', async () => {
   const { out } = await run({
     text: 'سؤال عام: ما معنى الطهر؟',

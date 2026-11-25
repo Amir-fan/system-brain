@@ -23,7 +23,7 @@ import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admi
 import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MINIMAL_SKILL_ID = 'naqaa.fiqh-hayd-minimal';
-export const MINIMAL_SKILL_VERSION = 5; // v4 → v5: recover once when retrieved evidence is prematurely declined
+export const MINIMAL_SKILL_VERSION = 6; // v5 → v6: require an answer or one clarification from the model
 /** Provenance marker — emitted on EVERY terminal path. */
 export const MINIMAL_TRACE_MARKER = 'minimal_mind_v0';
 
@@ -79,7 +79,7 @@ const MINIMAL_RESPONSE_SCHEMA = {
     action: { type: 'string', enum: ['USE_TOOL', 'TERMINAL'] },
     tool: { type: 'string', enum: ['search_knowledge'] },
     query: { type: 'string' },
-    status: { type: 'string', enum: ['ANSWER', 'ASK_USER', 'INSUFFICIENT_EVIDENCE'] },
+    status: { type: 'string', enum: ['ANSWER', 'ASK_USER'] },
     message: { type: 'string' },
     question: { type: 'string' },
     /** Material Fact Confirmation: true when the ASK_USER question is a yes/no confirmation. */
@@ -210,14 +210,13 @@ const MINIMAL_INSTRUCTION = [
   '  - إذا احتجتِ دليلًا جديدًا: {"action":"USE_TOOL","tool":"search_knowledge","query":"نص البحث"}',
   '  - لإجابة نهائية مع الدليل: {"action":"TERMINAL","status":"ANSWER","message":"نص الجواب","evidenceRefs":["معرّف المقطع"],"summary":"...","explanation":"...","practical":"...","label":"hayd","materialFactKeys":["اسم الحقيقة المؤكدة"]}',
   '  - للسؤال التعليمي العام: استخدمي أداة البحث واشرحي ما ورد في الدليل دون تطبيقه على المستخدمة. أرسلي ANSWER مع evidenceRefs ودون label.',
-  '  - للحكم الشخصي: عند اكتمال الحقائق المادية ودعم الدليل، أرسلي ANSWER مع label يطابق الحكم: "hayd" أو "istihada" أو "nifas". إذا تعذر التصنيف فاسألي عن الحقيقة المؤثرة أو اختاري INSUFFICIENT_EVIDENCE.',
+  '  - للحكم الشخصي: عند اكتمال الحقائق المادية ودعم الدليل، أرسلي ANSWER مع label يطابق الحكم: "hayd" أو "istihada" أو "nifas". إذا تعذر التصنيف فاسألي عن حقيقة مؤثرة واحدة.',
   '  - مع كل label أرسلي materialFactKeys: قائمة غير فارغة بأسماء كل الحقائق المادية التي يعتمد عليها الحكم من المعلومات المعروفة. يجب أن تكون قيمها موجودة وموسومة CERTAIN؛ لا تختلقي أسماء أو يقينًا. إن لم تتوفر حقيقة مؤكدة فاختاري ASK_USER أو INSUFFICIENT_EVIDENCE. الشرح التعليمي دون label لا يحتاج هذه القائمة.',
   '  - لطلب معلومة واحدة مؤثرة: {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","factKey":"onset","answerType":"date"}',
   '  - لطلب معلومة واحدة مؤثرة مع خيارات: {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","factKey":"onset","answerType":"single_choice","options":["خيار 1","خيار 2"]}',
   '  - factKey إلزامي مع كل ASK_USER: اسم ثابت ودقيق للحقيقة المطلوبة، بحروف إنجليزية وأرقام وشرطة سفلية، يبدأ بحرف ولا يتجاوز 60 حرفًا. اختاري الاسم بحسب الحقيقة نفسها لا اسمًا عامًا للسؤال، واحتفظي به في materialFactKeys بعد الإجابة. للحقيقة الموجودة استخدمي اسمها نفسه.',
   '  - answerType إلزامي مع كل ASK_USER ويحدد نوع الجواب المتوقع: number لعدد، duration لمدة رقمية، date لتاريخ، time لوقت على الساعة، yes_no لنعم/لا، single_choice أو multiple_choice لخيارات محددة في options، وfree_text فقط لوصف مفتوح. استخدمي النوع المحدد للعدد أو التاريخ أو الوقت واذكري نوع الخيارات.',
   '  - لطلب تأكيد حقيقة مادية (سؤال جوابه نعم/لا): {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","yesNo":true,"factKey":"onset","answerType":"yes_no"}. نعم ولا و«غير متأكدة» تظهر تلقائيًا.',
-  '  - إذا لم يكفِ الدليل المتاح: {"action":"TERMINAL","status":"INSUFFICIENT_EVIDENCE"}',
   '  - لا تكتب أي نص خارج الـ JSON، ولا تستخدم أكواد JSON Schema أو Markdown fences.',
   `- يبقى لك ${MAX_TOOL_CALLS} عمليات بحث بحد أقصى في الدور الواحد.`,
   '- evidenceRefs يقبل فقط معرّفات مقاطع ظهرت لك من نتيجة الأداة في هذا الدور.',
