@@ -287,6 +287,21 @@ test('Minimal: an initial evidence-gap response triggers one required source loo
   assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
 });
 
+test('Minimal: evidence that is prematurely declined is retried once as a safe answer or one question', async () => {
+  const { out, m } = await run({
+    text: 'هل يجوز لي الصلاة وأنا في حالة استحاضة مستمرة؟',
+    responses: [
+      tool('الاستحاضة والصلاة'),
+      insufficient('لا أعلم.'),
+      askUser('هل الدم مستمر بلا انقطاع طوال هذه الأيام؟'),
+    ],
+  });
+  assert.equal(m.captured.messages.length, 3, 'the model receives one bounded corrective retry');
+  assert.ok(m.captured.messages[2].includes('لا تعيدي INSUFFICIENT_EVIDENCE'), 'the retry requires a useful safe outcome');
+  assert.equal(out.trace.status, 'NEED_INFO');
+  assert.equal(out.readiness.missing[0].question.wording, 'هل الدم مستمر بلا انقطاع طوال هذه الأيام؟');
+});
+
 test('admission round 6: Minimal returns a safe educational evidence gap without echoing unmarked model prose', async () => {
   const { out } = await run({
     text: 'سؤال عام: ما معنى الطهر؟',

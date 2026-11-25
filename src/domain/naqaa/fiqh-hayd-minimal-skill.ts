@@ -23,7 +23,7 @@ import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admi
 import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MINIMAL_SKILL_ID = 'naqaa.fiqh-hayd-minimal';
-export const MINIMAL_SKILL_VERSION = 4; // v3 → v4: recover once when the model skips its required source lookup
+export const MINIMAL_SKILL_VERSION = 5; // v4 → v5: recover once when retrieved evidence is prematurely declined
 /** Provenance marker — emitted on EVERY terminal path. */
 export const MINIMAL_TRACE_MARKER = 'minimal_mind_v0';
 
@@ -495,6 +495,8 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
       let toolCalls = 0;
       /** Stage 4A: one same-turn retry after an unusable provider response (see parser branch). */
       let retriedEmpty = false;
+      /** One bounded retry when the model declines evidence it has already received. */
+      let retriedEvidenceGap = false;
       const queries: string[] = [];
       const returned: SkillKnowledgePassage[] = [];
       /** Per-turn evidence cache: identical normalised query reuses the last result. */
@@ -736,6 +738,17 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
             interaction += `\n\nلم تُجرِ بحثًا في المصدر المعتمد بعد. هذا البحث مطلوب قبل تقرير أن الدليل غير كافٍ.\n${rendered}\nأعيدي الآن ردًا نهائيًا بصيغة TERMINAL مستندًا فقط إلى المقاطع الظاهرة، أو اطلبي معلومة مؤثرة من المستخدمة.`;
             continue;
           }
+        }
+
+        // Once an approved passage is available, the safe useful outcome is either a
+        // source-grounded educational answer or one material clarification question.
+        // Give the model one explicit chance to choose one of those outcomes instead of
+        // exposing a generic evidence-gap message to the user. A second refusal remains
+        // fail-closed below; no ruling is created by this recovery path.
+        if (parsed.status === 'INSUFFICIENT_EVIDENCE' && returned.length > 0 && !retriedEvidenceGap && modelCalls < MAX_MODEL_CALLS) {
+          retriedEvidenceGap = true;
+          interaction += '\n\nتوجد الآن مقاطع معتمدة ظاهرة لك. لا تعيدي INSUFFICIENT_EVIDENCE في هذا الرد. إن كان السؤال تعليميًا، أرسلي TERMINAL ANSWER واستشهدي بمقطع ظاهر. وإن كانت معلومة مؤثرة ناقصة للحكم الشخصي، أرسلي TERMINAL ASK_USER بسؤال واحد فقط عن تلك المعلومة. لا تخترعي حكمًا ولا تطلبي بحثًا جديدًا.';
+          continue;
         }
 
         // INSUFFICIENT_EVIDENCE
