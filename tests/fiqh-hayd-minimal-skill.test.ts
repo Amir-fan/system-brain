@@ -24,7 +24,7 @@ const passage = (chunkId: string, sourceId = APPROVED_ID): SkillKnowledgePassage
   chunkId, documentId: 'doc-1', sourceId, sourceTitle: APPROVED_SOURCE_TITLES[0], chunkIndex: 1, text: 'نص فقهي معتمد يوضح الشرط.', score: 0.5,
 });
 
-function knowledge(opts: { unapprovedHit?: boolean } = {}) {
+function knowledge(opts: { unapprovedHit?: boolean; noHits?: boolean } = {}) {
   const calls = { resolves: 0, searches: 0, sourceIds: [] as unknown[], queries: [] as string[] };
   return {
     calls,
@@ -32,7 +32,7 @@ function knowledge(opts: { unapprovedHit?: boolean } = {}) {
       calls.searches += 1;
       calls.queries.push(input.query);
       calls.sourceIds.push(input.sourceIds);
-      const hits = [passage(CHUNK_A)];
+      const hits = opts.noHits ? [] : [passage(CHUNK_A)];
       if (opts.unapprovedHit) hits.push(passage('chunk-foreign', 'src-not-approved'));
       return hits;
     },
@@ -62,7 +62,7 @@ async function run(opts: {
   text: string;
   responses: string[];
   recentTurns?: Array<{ role: string; text: string }>;
-  knowledgeOpts?: { unapprovedHit?: boolean };
+  knowledgeOpts?: { unapprovedHit?: boolean; noHits?: boolean };
   context?: Record<string, unknown>;
   factMeta?: Record<string, { certainty: string; provenance?: string }>;
 }) {
@@ -179,11 +179,22 @@ test('Minimal/F: the model can ask the user without any Knowledge call', async (
 
 // G — an ANSWER requires evidence obtained through the tool
 test('Minimal/G: an ANSWER without tool evidence fails closed', async () => {
-  const { out, k } = await run({ text: 'هل هذا حيض؟', responses: [answer('هذا حيض بلا بحث.', ['chunk-invented']), answer('هذا حيض بلا بحث.', ['chunk-invented'])] });
+  const { out, k } = await run({ text: 'هل هذا حيض؟', responses: [answer('هذا حيض بلا بحث.', []), answer('هذا حيض بلا بحث.', [])], knowledgeOpts: { noHits: true } });
   assert.equal(k.calls.searches, 1, 'one required retrieval is attempted before the answer is rejected');
   assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
   assert.ok(out.trace.notes.includes('answer_without_tool_evidence'));
   assert.equal(out.answer.evidenceIds, undefined);
+});
+
+test('Minimal/G: a persistently uncited answer falls back to an approved source excerpt', async () => {
+  const { out } = await run({
+    text: 'هل هذا حيض؟',
+    responses: [answer('هذا حيض بلا بحث.', []), answer('هذا حيض بلا بحث.', [])],
+  });
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.ok(out.trace.notes.includes('uncited_answer_returned_as_source_excerpt'));
+  assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
+  assert.ok(out.answer.text.startsWith('بحسب المصدر المعتمد:'));
 });
 
 test('Minimal/G: an initial uncited answer is recovered with one approved-source lookup', async () => {

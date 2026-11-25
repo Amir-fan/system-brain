@@ -23,7 +23,7 @@ import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admi
 import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MINIMAL_SKILL_ID = 'naqaa.fiqh-hayd-minimal';
-export const MINIMAL_SKILL_VERSION = 7; // v6 → v7: recover an uncited answer with one required source lookup
+export const MINIMAL_SKILL_VERSION = 8; // v7 → v8: return a sourced excerpt after a persistently uncited answer
 /** Provenance marker — emitted on EVERY terminal path. */
 export const MINIMAL_TRACE_MARKER = 'minimal_mind_v0';
 
@@ -496,6 +496,8 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
       let retriedEmpty = false;
       /** One bounded retry when the model declines evidence it has already received. */
       let retriedEvidenceGap = false;
+      /** True only when execution retrieved evidence to repair an initially uncited answer. */
+      let recoveredUncitedAnswer = false;
       const queries: string[] = [];
       const returned: SkillKnowledgePassage[] = [];
       /** Per-turn evidence cache: identical normalised query reuses the last result. */
@@ -663,13 +665,42 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
             // The model sometimes writes a plausible answer before calling the required
             // Knowledge tool. Retrieve once using the current question and let it emit a
             // cited answer (or one clarification question) in the same bounded turn.
-            if (toolCalls === 0 && modelCalls < MAX_MODEL_CALLS) {
+            if ((parsed.evidenceRefs?.length ?? 0) === 0 && toolCalls === 0 && modelCalls < MAX_MODEL_CALLS) {
               const query = bounded(normalizeQuery(text), MAX_QUESTION_CHARS);
               if (query) {
                 const { rendered } = await askTool(query);
+                recoveredUncitedAnswer = true;
                 interaction += `\n\nردك السابق لا يحمل مرجعًا صالحًا من المصدر المعتمد.\n${rendered}\nأعيدي الآن ردًا نهائيًا بصيغة TERMINAL: ANSWER مع evidenceRefs من المعرفات الظاهرة فقط، أو ASK_USER بسؤال واحد إذا كانت معلومة مؤثرة ناقصة. لا تخترعي حكمًا ولا تعيدي جوابًا بلا مرجع.`;
                 continue;
               }
+            }
+            // The model has had one citation-recovery attempt but still omitted a valid
+            // reference. Do not invent a ruling or present a generic failure when a
+            // query-matched approved passage is already available: return that passage
+            // transparently as an educational source excerpt.
+            const sourceExcerpt = returned.find((passage) => normalizeQuery(passage.text));
+            if (recoveredUncitedAnswer && sourceExcerpt) {
+              const excerpt = bounded(sourceExcerpt.text, 900);
+              return {
+                status: 'completed',
+                answer: {
+                  text: `بحسب المصدر المعتمد:\n${excerpt}`,
+                  sourceTitle: sourceExcerpt.sourceTitle,
+                  evidenceIds: [sourceExcerpt.chunkId],
+                  structured: { summary: 'هذا ما ورد في المصدر المعتمد.' },
+                },
+                trace: {
+                  ...modelName,
+                  status: 'ANSWER',
+                  acceptedEvidenceRefs: [sourceExcerpt.chunkId],
+                  retrievedEvidenceIds: [...returnedIds],
+                  evidence: returned.map((p) => ({ chunkId: p.chunkId, sourceId: p.sourceId })),
+                  approvedSourceIds: approvedIds,
+                  sourceSupport: 'SUPPORTED',
+                  workload: WORKLOAD,
+                  notes: notes(['uncited_answer_returned_as_source_excerpt', `queries=${queries.join(' | ')}`]).slice(0, 8),
+                },
+              };
             }
             return gap('answer_without_tool_evidence', 'الدليل المتاح غير كافٍ للحكم الآن.', {
               ...modelName,
