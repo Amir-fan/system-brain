@@ -563,6 +563,34 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
       // 3. ONE intelligence with bounded tool loop.
       for (;;) {
         if (modelCalls >= MAX_MODEL_CALLS) {
+          // The model can keep requesting the tool after the execution boundary has
+          // already recovered an initial missed lookup. The bound must still stop the
+          // loop, but the retrieved approved passage is safer and more useful than
+          // replacing it with a generic evidence-gap message.
+          const sourceExcerpt = recoveredInitialEvidenceGap
+            ? returned.find((passage) => normalizeQuery(passage.text))
+            : undefined;
+          if (sourceExcerpt) {
+            return {
+              status: 'completed',
+              answer: {
+                text: `بحسب المصدر المعتمد:\n${bounded(sourceExcerpt.text, 900)}`,
+                sourceTitle: sourceExcerpt.sourceTitle,
+                evidenceIds: [sourceExcerpt.chunkId],
+                structured: { summary: 'هذا ما ورد في المصدر المعتمد.' },
+              },
+              trace: {
+                status: 'ANSWER',
+                acceptedEvidenceRefs: [sourceExcerpt.chunkId],
+                retrievedEvidenceIds: [...returned.map((p) => p.chunkId)],
+                evidence: returned.map((p) => ({ chunkId: p.chunkId, sourceId: p.sourceId })),
+                approvedSourceIds: approvedIds,
+                sourceSupport: 'SUPPORTED',
+                workload: WORKLOAD,
+                notes: notes(['model_call_bound_returned_as_source_excerpt', `queries=${queries.join(' | ')}`]).slice(0, 8),
+              },
+            };
+          }
           return gap('model_call_bound_reached', 'الدليل المتاح غير كافٍ للحكم الآن.', {
             retrievedEvidenceIds: [...returned.map((p) => p.chunkId)],
             notes: [`queries=${queries.join(' | ')}`],

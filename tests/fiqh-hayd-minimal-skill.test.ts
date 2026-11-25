@@ -322,6 +322,17 @@ test('Minimal: a source retrieved after an initial evidence gap is returned when
   assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
 });
 
+test('Minimal: an initial evidence-gap recovery remains useful when the model reaches its call bound', async () => {
+  const { out, k } = await run({
+    text: 'هل يجوز لي الصلاة وأنا في حالة استحاضة مستمرة؟',
+    responses: [insufficient('لا أعلم.'), tool('q1'), tool('q2'), tool('q3')],
+  });
+  assert.equal(k.calls.searches, MAX_TOOL_CALLS, 'the recovery does not exceed the tool bound');
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.ok(out.trace.notes.includes('model_call_bound_returned_as_source_excerpt'));
+  assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
+});
+
 test('Minimal: evidence that is prematurely declined is retried once as a safe answer or one question', async () => {
   const { out, m } = await run({
     text: 'هل يجوز لي الصلاة وأنا في حالة استحاضة مستمرة؟',
