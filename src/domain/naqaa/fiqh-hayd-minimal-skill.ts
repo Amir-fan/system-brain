@@ -23,7 +23,7 @@ import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admi
 import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MINIMAL_SKILL_ID = 'naqaa.fiqh-hayd-minimal';
-export const MINIMAL_SKILL_VERSION = 3; // v2 → v3: single terminal envelope, workload-scoped budget, dedup
+export const MINIMAL_SKILL_VERSION = 4; // v3 → v4: recover once when the model skips its required source lookup
 /** Provenance marker — emitted on EVERY terminal path. */
 export const MINIMAL_TRACE_MARKER = 'minimal_mind_v0';
 
@@ -722,6 +722,20 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
               notes: notes([`queries=${queries.join(' | ')}`]).slice(0, 8),
             },
           };
+        }
+
+        // A model can occasionally terminate with an evidence gap before it has made the
+        // required source lookup. Recover once at the execution boundary: retrieve using
+        // the user's current question, show the result to the same model, and let it make
+        // a grounded decision. This keeps the existing provider/model setup intact and
+        // still preserves an explicit evidence-gap result after a real lookup.
+        if (parsed.status === 'INSUFFICIENT_EVIDENCE' && toolCalls === 0 && modelCalls < MAX_MODEL_CALLS) {
+          const query = bounded(normalizeQuery(text), MAX_QUESTION_CHARS);
+          if (query) {
+            const { rendered } = await askTool(query);
+            interaction += `\n\nلم تُجرِ بحثًا في المصدر المعتمد بعد. هذا البحث مطلوب قبل تقرير أن الدليل غير كافٍ.\n${rendered}\nأعيدي الآن ردًا نهائيًا بصيغة TERMINAL مستندًا فقط إلى المقاطع الظاهرة، أو اطلبي معلومة مؤثرة من المستخدمة.`;
+            continue;
+          }
         }
 
         // INSUFFICIENT_EVIDENCE

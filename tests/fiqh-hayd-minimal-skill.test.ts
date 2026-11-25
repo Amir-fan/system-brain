@@ -271,6 +271,22 @@ test('Minimal: the model may declare the evidence insufficient', async () => {
   assert.equal(typeof out.answer.text, 'string');
 });
 
+test('Minimal: an initial evidence-gap response triggers one required source lookup before completion', async () => {
+  const { out, k, m } = await run({
+    text: 'متى تكون الصفرة حيضًا؟',
+    responses: [
+      insufficient('لا أعلم.'),
+      answer('إذا ثبت الطهر فالصفرة بعده ليست حيضًا.', [CHUNK_A]),
+    ],
+  });
+  assert.equal(k.calls.searches, 1, 'the execution boundary performs the missed required lookup');
+  assert.equal(k.calls.queries[0], 'متى تكون الصفرة حيضًا؟');
+  assert.equal(m.captured.messages.length, 2, 'the model receives the retrieved source in the same turn');
+  assert.ok(m.captured.messages[1].includes(`[${CHUNK_A}]`), 'the recovered source passage is visible to the model');
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
+});
+
 test('admission round 6: Minimal returns a safe educational evidence gap without echoing unmarked model prose', async () => {
   const { out } = await run({
     text: 'سؤال عام: ما معنى الطهر؟',
