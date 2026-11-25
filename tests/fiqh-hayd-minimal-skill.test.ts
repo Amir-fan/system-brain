@@ -179,11 +179,25 @@ test('Minimal/F: the model can ask the user without any Knowledge call', async (
 
 // G — an ANSWER requires evidence obtained through the tool
 test('Minimal/G: an ANSWER without tool evidence fails closed', async () => {
-  const { out, k } = await run({ text: 'هل هذا حيض؟', responses: [answer('هذا حيض بلا بحث.', [CHUNK_A])] });
-  assert.equal(k.calls.searches, 0);
+  const { out, k } = await run({ text: 'هل هذا حيض؟', responses: [answer('هذا حيض بلا بحث.', ['chunk-invented']), answer('هذا حيض بلا بحث.', ['chunk-invented'])] });
+  assert.equal(k.calls.searches, 1, 'one required retrieval is attempted before the answer is rejected');
   assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
   assert.ok(out.trace.notes.includes('answer_without_tool_evidence'));
   assert.equal(out.answer.evidenceIds, undefined);
+});
+
+test('Minimal/G: an initial uncited answer is recovered with one approved-source lookup', async () => {
+  const { out, k, m } = await run({
+    text: 'هل يجوز لي الصلاة وأنا في حالة استحاضة مستمرة؟',
+    responses: [
+      answer('يجوز لك الصلاة.', []),
+      answer('تصلين مع الاستحاضة بعد معرفة حالتك وفق المصدر المعتمد.', [CHUNK_A]),
+    ],
+  });
+  assert.equal(k.calls.searches, 1);
+  assert.ok(m.captured.messages[1].includes('لا يحمل مرجعًا صالحًا'), 'the model receives the citation-recovery instruction');
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
 });
 
 // H — fabricated / unretrieved citation ids are rejected

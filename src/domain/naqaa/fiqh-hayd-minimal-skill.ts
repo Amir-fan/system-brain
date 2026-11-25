@@ -23,7 +23,7 @@ import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admi
 import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MINIMAL_SKILL_ID = 'naqaa.fiqh-hayd-minimal';
-export const MINIMAL_SKILL_VERSION = 6; // v5 → v6: require an answer or one clarification from the model
+export const MINIMAL_SKILL_VERSION = 7; // v6 → v7: recover an uncited answer with one required source lookup
 /** Provenance marker — emitted on EVERY terminal path. */
 export const MINIMAL_TRACE_MARKER = 'minimal_mind_v0';
 
@@ -660,6 +660,17 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
           const returnedIds = new Set(returned.map((p) => p.chunkId));
           const accepted = (parsed.evidenceRefs ?? []).filter((id) => returnedIds.has(id)).slice(0, 6);
           if (accepted.length === 0) {
+            // The model sometimes writes a plausible answer before calling the required
+            // Knowledge tool. Retrieve once using the current question and let it emit a
+            // cited answer (or one clarification question) in the same bounded turn.
+            if (toolCalls === 0 && modelCalls < MAX_MODEL_CALLS) {
+              const query = bounded(normalizeQuery(text), MAX_QUESTION_CHARS);
+              if (query) {
+                const { rendered } = await askTool(query);
+                interaction += `\n\nردك السابق لا يحمل مرجعًا صالحًا من المصدر المعتمد.\n${rendered}\nأعيدي الآن ردًا نهائيًا بصيغة TERMINAL: ANSWER مع evidenceRefs من المعرفات الظاهرة فقط، أو ASK_USER بسؤال واحد إذا كانت معلومة مؤثرة ناقصة. لا تخترعي حكمًا ولا تعيدي جوابًا بلا مرجع.`;
+                continue;
+              }
+            }
             return gap('answer_without_tool_evidence', 'الدليل المتاح غير كافٍ للحكم الآن.', {
               ...modelName,
               retrievedEvidenceIds: [...returnedIds],
