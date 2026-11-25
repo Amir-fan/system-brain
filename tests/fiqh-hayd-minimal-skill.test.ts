@@ -312,6 +312,16 @@ test('Minimal: an initial evidence-gap response triggers one required source loo
   assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
 });
 
+test('Minimal: a source retrieved after an initial evidence gap is returned when the model declines it again', async () => {
+  const { out } = await run({
+    text: 'هل يجوز لي الصلاة وأنا في حالة استحاضة مستمرة؟',
+    responses: [insufficient('لا أعلم.'), insufficient('لا أعلم.'), insufficient('لا أعلم.')],
+  });
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.ok(out.trace.notes.includes('initial_evidence_gap_returned_as_source_excerpt'));
+  assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
+});
+
 test('Minimal: evidence that is prematurely declined is retried once as a safe answer or one question', async () => {
   const { out, m } = await run({
     text: 'هل يجوز لي الصلاة وأنا في حالة استحاضة مستمرة؟',

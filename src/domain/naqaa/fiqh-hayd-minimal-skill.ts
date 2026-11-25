@@ -498,6 +498,8 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
       let retriedEvidenceGap = false;
       /** True only when execution retrieved evidence to repair an initially uncited answer. */
       let recoveredUncitedAnswer = false;
+      /** True only when execution retrieved evidence after an initial premature evidence gap. */
+      let recoveredInitialEvidenceGap = false;
       const queries: string[] = [];
       const returned: SkillKnowledgePassage[] = [];
       /** Per-turn evidence cache: identical normalised query reuses the last result. */
@@ -776,6 +778,7 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
           const query = bounded(normalizeQuery(text), MAX_QUESTION_CHARS);
           if (query) {
             const { rendered } = await askTool(query);
+            recoveredInitialEvidenceGap = true;
             interaction += `\n\nلم تُجرِ بحثًا في المصدر المعتمد بعد. هذا البحث مطلوب قبل تقرير أن الدليل غير كافٍ.\n${rendered}\nأعيدي الآن ردًا نهائيًا بصيغة TERMINAL مستندًا فقط إلى المقاطع الظاهرة، أو اطلبي معلومة مؤثرة من المستخدمة.`;
             continue;
           }
@@ -790,6 +793,36 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
           retriedEvidenceGap = true;
           interaction += '\n\nتوجد الآن مقاطع معتمدة ظاهرة لك. لا تعيدي INSUFFICIENT_EVIDENCE في هذا الرد. إن كان السؤال تعليميًا، أرسلي TERMINAL ANSWER واستشهدي بمقطع ظاهر. وإن كانت معلومة مؤثرة ناقصة للحكم الشخصي، أرسلي TERMINAL ASK_USER بسؤال واحد فقط عن تلك المعلومة. لا تخترعي حكمًا ولا تطلبي بحثًا جديدًا.';
           continue;
+        }
+
+        // A source was retrieved only because the model prematurely declined to search,
+        // then declined that source again. Show the matched source transparently rather
+        // than fabricate a ruling or return a generic failure. This never applies to a
+        // model-initiated search, whose ordinary fail-closed gap remains below.
+        const sourceExcerpt = recoveredInitialEvidenceGap
+          ? returned.find((passage) => normalizeQuery(passage.text))
+          : undefined;
+        if (sourceExcerpt) {
+          return {
+            status: 'completed',
+            answer: {
+              text: `بحسب المصدر المعتمد:\n${bounded(sourceExcerpt.text, 900)}`,
+              sourceTitle: sourceExcerpt.sourceTitle,
+              evidenceIds: [sourceExcerpt.chunkId],
+              structured: { summary: 'هذا ما ورد في المصدر المعتمد.' },
+            },
+            trace: {
+              ...modelName,
+              status: 'ANSWER',
+              acceptedEvidenceRefs: [sourceExcerpt.chunkId],
+              retrievedEvidenceIds: [...returned.map((p) => p.chunkId)],
+              evidence: returned.map((p) => ({ chunkId: p.chunkId, sourceId: p.sourceId })),
+              approvedSourceIds: approvedIds,
+              sourceSupport: 'SUPPORTED',
+              workload: WORKLOAD,
+              notes: notes(['initial_evidence_gap_returned_as_source_excerpt', `queries=${queries.join(' | ')}`]).slice(0, 8),
+            },
+          };
         }
 
         // INSUFFICIENT_EVIDENCE
