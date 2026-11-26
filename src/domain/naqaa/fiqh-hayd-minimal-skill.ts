@@ -23,7 +23,7 @@ import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admi
 import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MINIMAL_SKILL_ID = 'naqaa.fiqh-hayd-minimal';
-export const MINIMAL_SKILL_VERSION = 9; // v8 → v9: return retrieved approved evidence when the model reaches its call bound
+export const MINIMAL_SKILL_VERSION = 10; // v9 → v10: preserve retrieved approved evidence when the model omits citations
 /** Provenance marker — emitted on EVERY terminal path. */
 export const MINIMAL_TRACE_MARKER = 'minimal_mind_v0';
 
@@ -726,8 +726,15 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
             // reference. Do not invent a ruling or present a generic failure when a
             // query-matched approved passage is already available: return that passage
             // transparently as an educational source excerpt.
-            const sourceExcerpt = returned.find((passage) => normalizeQuery(passage.text));
-            if (recoveredUncitedAnswer && sourceExcerpt) {
+            const sourceExcerpt = !parsed.label
+              ? returned.find((passage) => normalizeQuery(passage.text))
+              : undefined;
+            // An educational answer can still be useful when the model searched the
+            // approved source but omitted citations entirely. Return the retrieved
+            // passage itself rather than trust the uncited generation or hide available
+            // evidence behind a generic failure. Non-matching citation IDs and personal
+            // classifications remain fail-closed.
+            if (sourceExcerpt && (recoveredUncitedAnswer || (toolCalls > 0 && (parsed.evidenceRefs?.length ?? 0) === 0))) {
               const excerpt = bounded(sourceExcerpt.text, 900);
               return {
                 status: 'completed',
@@ -746,7 +753,12 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
                   approvedSourceIds: approvedIds,
                   sourceSupport: 'SUPPORTED',
                   workload: WORKLOAD,
-                  notes: notes(['uncited_answer_returned_as_source_excerpt', `queries=${queries.join(' | ')}`]).slice(0, 8),
+                  notes: notes([
+                    recoveredUncitedAnswer
+                      ? 'uncited_answer_returned_as_source_excerpt'
+                      : 'post_search_uncited_answer_returned_as_source_excerpt',
+                    `queries=${queries.join(' | ')}`,
+                  ]).slice(0, 8),
                 },
               };
             }

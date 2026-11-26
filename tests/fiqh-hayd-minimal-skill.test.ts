@@ -197,6 +197,18 @@ test('Minimal/G: a persistently uncited answer falls back to an approved source 
   assert.ok(out.answer.text.startsWith('بحسب المصدر المعتمد:'));
 });
 
+test('Minimal/G: an uncited answer after an approved search returns the retrieved approved excerpt', async () => {
+  const { out, k } = await run({
+    text: 'هل هذا حيض؟',
+    responses: [tool('الاستحاضة'), answer('حكم غير موثق.', [])],
+  });
+  assert.equal(k.calls.searches, 1);
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.ok(out.trace.notes.includes('post_search_uncited_answer_returned_as_source_excerpt'));
+  assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
+  assert.ok(out.answer.text.startsWith('بحسب المصدر المعتمد:'));
+});
+
 test('Minimal/G: an initial uncited answer is recovered with one approved-source lookup', async () => {
   const { out, k, m } = await run({
     text: 'هل يجوز لي الصلاة وأنا في حالة استحاضة مستمرة؟',
