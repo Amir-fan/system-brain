@@ -11,7 +11,7 @@ const passage = (sourceId = APPROVED_SOURCE_ID): SkillKnowledgePassage => ({
 });
 
 function context(opts: { response?: string; passages?: SkillKnowledgePassage[] } = {}) {
-  const seen: { query?: string; sourceIds?: string[]; message?: string; instructions?: string } = {};
+  const seen: { query?: string; sourceIds?: string[]; topK?: number; message?: string; instructions?: string; maxOutputTokens?: number } = {};
   return {
     seen,
     value: {
@@ -22,17 +22,19 @@ function context(opts: { response?: string; passages?: SkillKnowledgePassage[] }
       },
       knowledge: {
         async resolveSources() { return [{ id: APPROVED_SOURCE_ID, title: APPROVED_SOURCE_TITLES[0] }]; },
-        async search(input: { query: string; sourceIds?: string[] }) {
+        async search(input: { query: string; sourceIds?: string[]; topK?: number }) {
           seen.query = input.query;
           seen.sourceIds = input.sourceIds;
+          seen.topK = input.topK;
           return opts.passages ?? [passage()];
         },
         async adjacent() { return []; },
       },
       model: {
-        async generateText(input: { instructions?: string; message?: string }) {
+        async generateText(input: { instructions?: string; message?: string; maxOutputTokens?: number }) {
           seen.instructions = input.instructions;
           seen.message = input.message;
+          seen.maxOutputTokens = input.maxOutputTokens;
           return { text: opts.response ?? 'هو فترة انقطاع الدم بين حيضة وأخرى.' };
         },
       },
@@ -46,12 +48,15 @@ test('conversational RAG sends only approved-source evidence to one natural-lang
 
   assert.equal(createFiqhHaydRagSkill().id, FIQH_HAYD_RAG_SKILL_ID);
   assert.deepEqual(seen.sourceIds, [APPROVED_SOURCE_ID]);
+  assert.equal(seen.topK, 2);
   assert.match(seen.query ?? '', /ما معنى الطهر/);
   assert.match(seen.message ?? '', /عندي سؤال عن الطهر/);
   assert.match(seen.message ?? '', /أقل الطهر/);
   assert.match(seen.instructions ?? '', /فقط الحقائق الموجودة/);
   assert.match(seen.instructions ?? '', /المذهب الشافعي/);
   assert.match(seen.instructions ?? '', /سؤالًا واحدًا فقط/);
+  assert.match(seen.instructions ?? '', /كم يومًا استمر الانقطاع قبل عودة الدم/);
+  assert.equal(seen.maxOutputTokens, 500);
   assert.equal(result.answer.text, 'هو فترة انقطاع الدم بين حيضة وأخرى.');
   assert.deepEqual(result.answer.evidenceIds, ['chunk-1']);
   assert.equal(result.trace.sourceSupport, 'SUPPORTED');

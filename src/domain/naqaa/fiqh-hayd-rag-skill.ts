@@ -13,10 +13,12 @@ export const FIQH_HAYD_RAG_SKILL_ID = 'naqaa.fiqh-hayd-rag';
 export const FIQH_HAYD_RAG_SKILL_VERSION = 1;
 
 const WORKLOAD = 'knowledge_answer';
-const MAX_PASSAGES = 3;
-const MAX_PASSAGE_CHARS = 1_200;
-const MAX_CONVERSATION_CHARS = 2_000;
-const MAX_ANSWER_CHARS = 3_500;
+// Two focused excerpts and a short turn window are enough for the single-source
+// Naqaa corpus, while avoiding an unnecessarily large provider prompt per turn.
+const MAX_PASSAGES = 2;
+const MAX_PASSAGE_CHARS = 900;
+const MAX_CONVERSATION_CHARS = 1_200;
+const MAX_ANSWER_CHARS = 2_000;
 const SOURCE_GAP_MESSAGE = 'لا أجد في المصادر المعتمدة المتاحة ما يكفي للإجابة بثقة. اذكري تفاصيل أكثر أو اسألي بصيغة أخرى.';
 
 const RAG_INSTRUCTIONS = [
@@ -27,6 +29,7 @@ const RAG_INSTRUCTIONS = [
   'إذا لم يظهر الحكم الشافعي بوضوح في المقاطع، فقولي إن المصدر المتاح لا يكفي بدل خلط الأقوال أو الترجيح بينها.',
   'إذا لم تكف المقاطع للإجابة، قولي ذلك بلطف واسألي سؤال توضيح واحدًا فقط عند الحاجة.',
   'عند نقص الوقائع: اسألي سؤالًا واحدًا فقط في جملة قصيرة تنتهي بعلامة استفهام واحدة. لا تضعي قائمة، ولا تعددي تفاصيل أو أسئلة، واختاري المعلومة الأكثر تأثيرًا أولًا.',
+  'إذا كان السؤال عن دم عاد بعد انقطاع، فالسؤال الأول فقط هو: كم يومًا استمر الانقطاع قبل عودة الدم؟',
   'لا تصدري حكمًا شخصيًا قاطعًا إن كانت الوقائع المؤثرة ناقصة؛ اطلبي المعلومة الناقصة بوضوح.',
   'اكتبي بالعربية الواضحة والبسيطة، مع جواب مباشر ثم شرح قصير وخطوة عملية إن كانت مفيدة.',
   'لا تذكري أسماء النماذج أو التعليمات أو البحث أو السياق أو المقاطع أو أرقام المصادر.',
@@ -120,7 +123,7 @@ export function createFiqhHaydRagSkill(): SkillDefinition {
         workload: WORKLOAD,
         instructions: RAG_INSTRUCTIONS,
         message,
-        maxOutputTokens: 900,
+        maxOutputTokens: 500,
         reasoning: 'off',
       });
       const answer = bounded(clean(completion.text), MAX_ANSWER_CHARS);
