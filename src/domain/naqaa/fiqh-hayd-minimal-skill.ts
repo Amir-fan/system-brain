@@ -626,15 +626,6 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         });
         const parsed = parseModelResponse(out.text);
         if (!parsed) {
-          // Safe diagnostics for provider-format failures: no user text or model output
-          // is recorded, only the shape needed to distinguish schema drift from empties.
-          console.warn('[naqaa-minimal-format]', JSON.stringify({
-            chars: out.text.length,
-            startsWithJsonObject: out.text.trimStart().startsWith('{'),
-            hasActionField: /"action"\s*:/.test(out.text),
-            hasStatusField: /"status"\s*:/.test(out.text),
-            ...(out.model ? { model: out.model } : {}),
-          }));
           // Stage 4A: the conversation context is IDENTICAL on every call of this loop
           // (the transcript + current turn live in `interaction`, rebuilt per turn), so a
           // Same-turn recovery after unusable output loses no context. It applies once
