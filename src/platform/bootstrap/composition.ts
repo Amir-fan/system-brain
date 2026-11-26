@@ -55,6 +55,7 @@ import { createFiqhHaydSkill } from '../../domain/naqaa/fiqh-hayd-skill.ts';
 // control skill. Additive only — it is selected explicitly by skillId, never by default.
 import { createFiqhHaydMindSkill } from '../../domain/naqaa/fiqh-hayd-mind-skill.ts';
 import { createFiqhHaydMinimalSkill } from '../../domain/naqaa/fiqh-hayd-minimal-skill.ts';
+import { createFiqhHaydRagSkill } from '../../domain/naqaa/fiqh-hayd-rag-skill.ts';
 import { RetrievalService } from '../../core/retrieval/retrieval.service.ts';
 import { KnowledgeAnswerService } from '../../core/knowledge/knowledge-answer.service.ts';
 import { EmbeddingService } from '../../core/embedding/embedding.service.ts';
@@ -231,6 +232,7 @@ export async function composeHttpHandler(opts: BootstrapEnv): Promise<HttpApiHan
     readiness: readinessService,
     ...(process.env.KIP_MINIMAL_RESPONSE_MODE ? { responseMode: process.env.KIP_MINIMAL_RESPONSE_MODE as 'natural' | 'flexible' | 'required' } : {}),
   }));
+  skillRegistry.register(createFiqhHaydRagSkill());
   const skillsRuntime = new SkillsRuntime({
     persistence,
     registry: skillRegistry,
