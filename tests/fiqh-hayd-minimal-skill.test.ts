@@ -186,27 +186,26 @@ test('Minimal/G: an ANSWER without tool evidence fails closed', async () => {
   assert.equal(out.answer.evidenceIds, undefined);
 });
 
-test('Minimal/G: a persistently uncited answer falls back to an approved source excerpt', async () => {
-  const { out } = await run({
+test('Minimal/G: an uncited answer is re-emitted as a normal cited answer', async () => {
+  const { out, m } = await run({
     text: 'هل هذا حيض؟',
-    responses: [answer('هذا حيض بلا بحث.', []), answer('هذا حيض بلا بحث.', [])],
+    responses: [answer('هذا حيض بلا بحث.', []), answer('هذا حيض بلا بحث.', []), answer('الجواب الموثق.', [CHUNK_A])],
   });
   assert.equal(out.trace.status, 'ANSWER');
-  assert.ok(out.trace.notes.includes('uncited_answer_returned_as_source_excerpt'));
+  assert.equal(out.answer.text, 'الجواب الموثق.');
   assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
-  assert.ok(out.answer.text.startsWith('بحسب المصدر المعتمد:'));
+  assert.ok(m.captured.messages[2].includes('لا يحتوي evidenceRefs'), 'the re-emit explains the missing citation field');
 });
 
-test('Minimal/G: an uncited answer after an approved search returns the retrieved approved excerpt', async () => {
+test('Minimal/G: an uncited answer after an approved search is re-emitted with a valid citation', async () => {
   const { out, k } = await run({
     text: 'هل هذا حيض؟',
-    responses: [tool('الاستحاضة'), answer('حكم غير موثق.', [])],
+    responses: [tool('الاستحاضة'), answer('حكم غير موثق.', []), answer('جواب موثق.', [CHUNK_A])],
   });
   assert.equal(k.calls.searches, 1);
   assert.equal(out.trace.status, 'ANSWER');
-  assert.ok(out.trace.notes.includes('post_search_uncited_answer_returned_as_source_excerpt'));
   assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
-  assert.ok(out.answer.text.startsWith('بحسب المصدر المعتمد:'));
+  assert.equal(out.answer.text, 'جواب موثق.');
 });
 
 test('Minimal/G: an initial uncited answer is recovered with one approved-source lookup', async () => {
@@ -368,10 +367,10 @@ test('Minimal: evidence that is prematurely declined is retried once as a safe a
   assert.equal(out.readiness.missing[0].question.wording, 'هل الدم مستمر بلا انقطاع طوال هذه الأيام؟');
 });
 
-test('Minimal: the structured model contract permits only a cited answer or one clarification question', async () => {
+test('Minimal: the structured model contract requires citations for answers', async () => {
   const { mCapture } = await runWith(reqSkill(), { text: 'سؤال', responses: [askUser('ما مدة الدم؟')] });
-  const format = mCapture.perCall[0].responseFormat as { schema?: { properties?: { status?: { enum?: unknown } } } };
-  assert.deepEqual(format.schema?.properties?.status?.enum, ['ANSWER', 'ASK_USER']);
+  const format = mCapture.perCall[0].responseFormat as { schema?: { oneOf?: Array<{ required?: unknown }> } };
+  assert.ok(format.schema?.oneOf?.some((branch) => JSON.stringify(branch.required) === JSON.stringify(['action', 'status', 'message', 'evidenceRefs'])));
 });
 
 test('admission round 6: Minimal returns a safe educational evidence gap without echoing unmarked model prose', async () => {

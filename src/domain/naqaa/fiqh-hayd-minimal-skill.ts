@@ -23,7 +23,7 @@ import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admi
 import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MINIMAL_SKILL_ID = 'naqaa.fiqh-hayd-minimal';
-export const MINIMAL_SKILL_VERSION = 10; // v9 → v10: preserve retrieved approved evidence when the model omits citations
+export const MINIMAL_SKILL_VERSION = 11; // v10 → v11: require cited answers and never display raw source fragments
 /** Provenance marker — emitted on EVERY terminal path. */
 export const MINIMAL_TRACE_MARKER = 'minimal_mind_v0';
 
@@ -89,7 +89,7 @@ const MINIMAL_RESPONSE_SCHEMA = {
     answerType: { type: 'string', enum: ['number', 'duration', 'date', 'time', 'yes_no', 'single_choice', 'multiple_choice', 'free_text'] },
     /** Short, clear answer choices for the question (used INSTEAD of free text when the answer can be safely enumerated). */
     options: { type: 'array', items: { type: 'string' }, maxItems: 6 },
-    evidenceRefs: { type: 'array', items: { type: 'string' } },
+    evidenceRefs: { type: 'array', items: { type: 'string' }, minItems: 1 },
     materialFactKeys: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 60 }, minItems: 1, maxItems: 24 },
     // RX1 semantic parts — ALL optional. The LLM fills only what genuinely helps the
     // ordinary user; KIP stores semantics, never colors/design.
@@ -119,7 +119,22 @@ const MINIMAL_RESPONSE_SCHEMA = {
     // The LLM classifies its own ANSWER in the same call — never derived from prose later.
     label: { type: 'string', enum: ['hayd', 'istihada', 'nifas'] },
   },
-  anyOf: [{ required: ['action'] }, { required: ['status'] }],
+  // An ANSWER has a concrete, citation-required output shape. The parser still
+  // validates responses defensively if a provider falls back to weaker JSON mode.
+  oneOf: [
+    {
+      properties: { action: { const: 'USE_TOOL' }, tool: { const: 'search_knowledge' } },
+      required: ['action', 'tool', 'query'],
+    },
+    {
+      properties: { action: { const: 'TERMINAL' }, status: { const: 'ANSWER' } },
+      required: ['action', 'status', 'message', 'evidenceRefs'],
+    },
+    {
+      properties: { action: { const: 'TERMINAL' }, status: { const: 'ASK_USER' } },
+      required: ['action', 'status', 'question', 'factKey', 'answerType'],
+    },
+  ],
   additionalProperties: false,
 } as const;
 const MINIMAL_RESPONSE_FORMAT = { name: 'minimal_response', strict: true, schema: MINIMAL_RESPONSE_SCHEMA } as const;
@@ -219,7 +234,7 @@ const MINIMAL_INSTRUCTION = [
   '  - لطلب تأكيد حقيقة مادية (سؤال جوابه نعم/لا): {"action":"TERMINAL","status":"ASK_USER","question":"السؤال","yesNo":true,"factKey":"onset","answerType":"yes_no"}. نعم ولا و«غير متأكدة» تظهر تلقائيًا.',
   '  - لا تكتب أي نص خارج الـ JSON، ولا تستخدم أكواد JSON Schema أو Markdown fences.',
   `- يبقى لك ${MAX_TOOL_CALLS} عمليات بحث بحد أقصى في الدور الواحد.`,
-  '- evidenceRefs يقبل فقط معرّفات مقاطع ظهرت لك من نتيجة الأداة في هذا الدور.',
+  '- evidenceRefs إلزامي مع كل ANSWER، ويقبل فقط معرّفات مقاطع ظهرت لك من نتيجة الأداة في هذا الدور.',
 ].join('\n');
 
 interface MinimalTimelineItem { label: string; duration?: string }
@@ -500,6 +515,8 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
       let recoveredUncitedAnswer = false;
       /** True only when execution retrieved evidence after an initial premature evidence gap. */
       let recoveredInitialEvidenceGap = false;
+      /** One bounded re-emit after an answer omits required evidence references. */
+      let retriedMissingEvidenceRefs = false;
       const queries: string[] = [];
       const returned: SkillKnowledgePassage[] = [];
       /** Per-turn evidence cache: identical normalised query reuses the last result. */
@@ -722,45 +739,21 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
                 continue;
               }
             }
-            // The model has had one citation-recovery attempt but still omitted a valid
-            // reference. Do not invent a ruling or present a generic failure when a
-            // query-matched approved passage is already available: return that passage
-            // transparently as an educational source excerpt.
-            const sourceExcerpt = !parsed.label
-              ? returned.find((passage) => normalizeQuery(passage.text))
-              : undefined;
-            // An educational answer can still be useful when the model searched the
-            // approved source but omitted citations entirely. Return the retrieved
-            // passage itself rather than trust the uncited generation or hide available
-            // evidence behind a generic failure. Non-matching citation IDs and personal
-            // classifications remain fail-closed.
-            if (sourceExcerpt && (recoveredUncitedAnswer || (toolCalls > 0 && (parsed.evidenceRefs?.length ?? 0) === 0))) {
-              const excerpt = bounded(sourceExcerpt.text, 900);
-              return {
-                status: 'completed',
-                answer: {
-                  text: `بحسب المصدر المعتمد:\n${excerpt}`,
-                  sourceTitle: sourceExcerpt.sourceTitle,
-                  evidenceIds: [sourceExcerpt.chunkId],
-                  structured: { summary: 'هذا ما ورد في المصدر المعتمد.' },
-                },
-                trace: {
-                  ...modelName,
-                  status: 'ANSWER',
-                  acceptedEvidenceRefs: [sourceExcerpt.chunkId],
-                  retrievedEvidenceIds: [...returnedIds],
-                  evidence: returned.map((p) => ({ chunkId: p.chunkId, sourceId: p.sourceId })),
-                  approvedSourceIds: approvedIds,
-                  sourceSupport: 'SUPPORTED',
-                  workload: WORKLOAD,
-                  notes: notes([
-                    recoveredUncitedAnswer
-                      ? 'uncited_answer_returned_as_source_excerpt'
-                      : 'post_search_uncited_answer_returned_as_source_excerpt',
-                    `queries=${queries.join(' | ')}`,
-                  ]).slice(0, 8),
-                },
-              };
+            // Never display a raw source fragment as a user-facing answer. When
+            // approved passages exist but the model omitted evidenceRefs, give it one
+            // bounded chance to emit a normal cited answer. Invented reference IDs and
+            // personal classifications remain fail-closed.
+            if (
+              !parsed.label
+              && (parsed.evidenceRefs?.length ?? 0) === 0
+              && returned.length > 0
+              && !retriedMissingEvidenceRefs
+              && modelCalls < MAX_MODEL_CALLS
+            ) {
+              retriedMissingEvidenceRefs = true;
+              const allowedIds = returned.map((passage) => passage.chunkId).join(', ');
+              interaction += `\n\nردك السابق رُفض لأنه لا يحتوي evidenceRefs. أعدي الآن جوابًا عربيًا بسيطًا، وأضيفي evidenceRefs إلزاميًا من هذه المعرفات فقط: [${allowedIds}]. لا تعرضي نص المصدر الخام، ولا تطلبي بحثًا جديدًا.`;
+              continue;
             }
             return gap('answer_without_tool_evidence', 'الدليل المتاح غير كافٍ للحكم الآن.', {
               ...modelName,
