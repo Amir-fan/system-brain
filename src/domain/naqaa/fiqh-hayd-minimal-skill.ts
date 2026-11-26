@@ -578,6 +578,32 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         };
       };
 
+      const recoverReturningBleedingQuestion = (model: unknown) => {
+        const clarification = returningBleedingClarification(text);
+        if (!clarification) return undefined;
+        const readiness = deps.readiness.evaluate({
+          requirements: [{
+            key: clarification.key,
+            description: clarification.question,
+            material: true,
+            question: { key: clarification.key, wording: clarification.question },
+            interaction: clarification.interaction,
+          }],
+          known: [],
+        });
+        return {
+          status: 'completed' as const,
+          readiness,
+          trace: {
+            ...(str(model) ? { model: str(model) } : {}),
+            status: 'NEED_INFO',
+            requirementKeys: [clarification.key],
+            workload: WORKLOAD,
+            notes: notes(['incomplete_model_output_recovered_as_safe_question']),
+          },
+        };
+      };
+
       // 1. Approved sources (KIP boundary).
       const approved = await ctx.knowledge!.resolveSources([...APPROVED_SOURCE_TITLES]);
       if (approved.length === 0) return gap('approved_sources_missing', 'المصادر المعتمدة غير متاحة الآن.');
@@ -676,30 +702,8 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
             interaction += '\n\nالرد السابق لم يكن JSON صالحًا. أرسلي الآن ردًا واحدًا فقط بصيغة JSON المطلوبة، دون أي نص خارجه.';
             continue;
           }
-          const clarification = returningBleedingClarification(text);
-          if (clarification) {
-            const readiness = deps.readiness.evaluate({
-              requirements: [{
-                key: clarification.key,
-                description: clarification.question,
-                material: true,
-                question: { key: clarification.key, wording: clarification.question },
-                interaction: clarification.interaction,
-              }],
-              known: [],
-            });
-            return {
-              status: 'completed',
-              readiness,
-              trace: {
-                ...(str(out.model) ? { model: str(out.model) } : {}),
-                status: 'NEED_INFO',
-                requirementKeys: [clarification.key],
-                workload: WORKLOAD,
-                notes: notes(['unreadable_model_output_recovered_as_safe_question']),
-              },
-            };
-          }
+          const recoveredQuestion = recoverReturningBleedingQuestion(out.model);
+          if (recoveredQuestion) return recoveredQuestion;
           return gap('unreadable_model_output', 'تعذّر ترتيب الجواب الآن. حاولي مرة أخرى.', {
             ...(str(out.model) ? { model: str(out.model) } : {}),
             notes: [`calls=${modelCalls}`, `tools=${toolCalls}`, `queries=${queries.join(' | ')}`],
@@ -724,6 +728,8 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
 
         if (parsed.status === 'ASK_USER') {
           if (!parsed.question) {
+            const recoveredQuestion = recoverReturningBleedingQuestion(out.model);
+            if (recoveredQuestion) return recoveredQuestion;
             return gap('terminal_missing_question', 'تعذّر ترتيب الجواب الآن. حاولي مرة أخرى.', { ...modelName });
           }
           if (!parsed.factKey) {
@@ -845,6 +851,8 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
               interaction += `\n\nردك السابق صالح كحكم لكنه ينقصه الحقل الإلزامي summary (الخلاصة المباشرة للمستخدمة). أعد إرسال الرد نفسه الآن بصيغة TERMINAL واملأ حقل summary. الحقول الأخرى اختيارية كما هي.`;
               continue;
             }
+            const recoveredQuestion = recoverReturningBleedingQuestion(out.model);
+            if (recoveredQuestion) return recoveredQuestion;
             return gap('required_summary_missing', 'تعذّر ترتيب الجواب الآن. حاولي مرة أخرى.', { ...modelName });
           }
           const first = returned.find((p) => p.chunkId === accepted[0]);

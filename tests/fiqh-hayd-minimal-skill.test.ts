@@ -366,7 +366,7 @@ test('Minimal/4A: repeated malformed return-bleeding output becomes a safe durat
   assert.equal(out.readiness.missing[0].key, 'purity_duration');
   assert.equal(out.readiness.missing[0].question.wording, 'كم يومًا استمر الانقطاع قبل عودة الدم؟');
   assert.equal(out.answer, undefined, 'a recovery question must not fabricate a ruling');
-  assert.ok(out.trace.notes.includes('unreadable_model_output_recovered_as_safe_question'));
+  assert.ok(out.trace.notes.includes('incomplete_model_output_recovered_as_safe_question'));
 });
 
 test('Minimal: the model may declare the evidence insufficient', async () => {
@@ -644,6 +644,19 @@ test('RX2/D: required mode fails closed when summary never arrives (within the m
   const noSummary = JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: 'الجواب.', evidenceRefs: [CHUNK_A] });
   const { out } = await runWith(reqSkill(), { text: 'سؤال', responses: [tool('حكم الصفرة'), noSummary, noSummary, noSummary, noSummary] });
   assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
+});
+
+test('RX2/E: required mode recovers a return-bleeding turn as a duration question when summary stays missing', async () => {
+  const noSummary = JSON.stringify({
+    action: 'TERMINAL', status: 'ANSWER', message: 'لا يمكن ترتيب الحكم دون تفصيل.', evidenceRefs: [CHUNK_A],
+  });
+  const { out } = await runWith(reqSkill(), {
+    text: 'عاد لي الدم بعد أن انقطع، ما الحكم؟',
+    responses: [tool('انقطاع الدم وعودته'), noSummary, noSummary],
+  });
+  assert.equal(out.readiness.status, 'NEEDS_INFORMATION');
+  assert.equal(out.readiness.missing[0].key, 'purity_duration');
+  assert.equal(out.answer, undefined, 'the recovery remains a question, not a ruling');
 });
 
 // STAGE2 — the Mind reads the policy-gated known-facts block (session case + personal-memory
