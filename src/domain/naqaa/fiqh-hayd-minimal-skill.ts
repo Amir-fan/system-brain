@@ -23,7 +23,7 @@ import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admi
 import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MINIMAL_SKILL_ID = 'naqaa.fiqh-hayd-minimal';
-export const MINIMAL_SKILL_VERSION = 11; // v10 → v11: require cited answers and never display raw source fragments
+export const MINIMAL_SKILL_VERSION = 12; // v11 → v12: one-search fast path and malformed-output recovery
 /** Provenance marker — emitted on EVERY terminal path. */
 export const MINIMAL_TRACE_MARKER = 'minimal_mind_v0';
 
@@ -33,9 +33,9 @@ const WORKLOAD = 'knowledge_answer';
 // The Skill asks for `reasoning: 'off'` (see below) so reasoning is suppressed; this is a
 // safety budget, not a steady-state one.
 const MAX_OUTPUT_TOKENS = 2048;
-/** EXECUTION bound: hard ceiling on Knowledge searches per turn (was 4; lowered because the
- *  structured envelope reduces duplicate-emit pressure). */
-export const MAX_TOOL_CALLS = 2;
+/** EXECUTION bound: one search returns a ranked set of approved passages. A second search
+ * usually adds latency without improving a phone-sized answer. */
+export const MAX_TOOL_CALLS = 1;
 /** EXECUTION bound: hard ceiling on model calls per turn. */
 export const MAX_MODEL_CALLS = MAX_TOOL_CALLS + 2;
 /** Retrieval detail (KIP-owned). */
@@ -628,12 +628,12 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         if (!parsed) {
           // Stage 4A: the conversation context is IDENTICAL on every call of this loop
           // (the transcript + current turn live in `interaction`, rebuilt per turn), so a
-          // same-turn retry after a successful completion with unusable text loses no context.
-          // One bounded retry of the SAME turn only; the loop bound (MAX_MODEL_CALLS)
-          // still applies. Only when the turn has made no model progress beyond this call
-          // and issued no tool call yet — a later failure stays fail-closed.
-          if (modelCalls < MAX_MODEL_CALLS && toolCalls === 0 && !retriedEmpty) {
+          // Same-turn recovery after unusable output loses no context. It applies once
+          // whether the malformed response came before or after the approved lookup.
+          // The execution bound still limits the total model calls.
+          if (modelCalls < MAX_MODEL_CALLS && !retriedEmpty) {
             retriedEmpty = true;
+            interaction += '\n\nالرد السابق لم يكن JSON صالحًا. أرسلي الآن ردًا واحدًا فقط بصيغة JSON المطلوبة، دون أي نص خارجه.';
             continue;
           }
           return gap('unreadable_model_output', 'تعذّر ترتيب الجواب الآن. حاولي مرة أخرى.', {

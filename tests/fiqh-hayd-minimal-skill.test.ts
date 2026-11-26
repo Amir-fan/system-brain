@@ -248,8 +248,8 @@ test('Minimal/H: citation ids that never came from the tool are rejected', async
 test('Minimal/I: the Knowledge tool call maximum is enforced', async () => {
   const { k, m, out } = await run({
     text: 'ما الحكم؟',
-    // MAX_TOOL_CALLS searches, then a boundary-hit request, then the answer (within the model-call bound).
-    responses: [tool('q1'), tool('q2'), tool('q3'), answer('الجواب.', [CHUNK_A])],
+    // One search, then a boundary-hit request, then the answer (within the model-call bound).
+    responses: [tool('q1'), tool('q2'), answer('الجواب.', [CHUNK_A])],
   });
   assert.equal(k.calls.searches, MAX_TOOL_CALLS, `exactly ${MAX_TOOL_CALLS} searches may run`);
   const boundedPrompt = m.captured.messages[MAX_TOOL_CALLS + 1];
@@ -297,6 +297,17 @@ test('Minimal: unreadable model output fails closed', async () => {
   assert.ok(out.trace.notes.includes('unreadable_model_output'));
   assert.equal(out.answer.evidenceIds, undefined);
   assert.ok(out.trace.notes.includes('minimal_mind_v0'), 'the marker survives the failure path too');
+});
+
+test('Minimal: malformed output after a source lookup is retried once as a normal question', async () => {
+  const { out, k, m } = await run({
+    text: 'رأيت جفافًا ثم عاد الدم، ما الحكم؟',
+    responses: [tool('انقطاع الدم وعودته'), 'غير منسق', askUser('كم يوم استمر الدم بعد أن عاد؟')],
+  });
+  assert.equal(k.calls.searches, 1);
+  assert.equal(m.captured.messages.length, 3, 'one recovery call is allowed after a malformed post-lookup response');
+  assert.equal(out.readiness.status, 'NEEDS_INFORMATION');
+  assert.equal(out.readiness.missing[0].question.wording, 'كم يوم استمر الدم بعد أن عاد؟');
 });
 
 // Stage 4A — one same-turn retry after an unusable provider response (the transient
