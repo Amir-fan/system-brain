@@ -626,6 +626,21 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         });
         const parsed = parseModelResponse(out.text);
         if (!parsed) {
+          const trimmedOutput = out.text.trim();
+          let root = 'invalid';
+          try {
+            const value: unknown = JSON.parse(trimmedOutput);
+            root = Array.isArray(value) ? 'array' : value !== null && typeof value === 'object' ? 'object' : typeof value;
+          } catch { /* Safe shape-only diagnostic below. */ }
+          console.warn('[naqaa-minimal-format]', JSON.stringify({
+            root,
+            chars: out.text.length,
+            startsObject: trimmedOutput.startsWith('{'),
+            startsArray: trimmedOutput.startsWith('['),
+            hasAction: /"action"\s*:/.test(out.text),
+            hasStatus: /"status"\s*:/.test(out.text),
+            ...(out.model ? { model: out.model } : {}),
+          }));
           // Stage 4A: the conversation context is IDENTICAL on every call of this loop
           // (the transcript + current turn live in `interaction`, rebuilt per turn), so a
           // Same-turn recovery after unusable output loses no context. It applies once
