@@ -316,14 +316,6 @@ function parseModelResponse(text: string): MinimalResponse | null {
   }
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
-  // Temporary production diagnostic: providers occasionally vary the JSON field
-  // names despite the response schema. Log only the object shape (never message
-  // content, user input, or source text) so the compatibility parser can be fixed
-  // from evidence. Remove once the live shape is confirmed.
-  console.info('[naqaa-minimal-response-shape]', JSON.stringify({
-    keys: Object.keys(o).sort().slice(0, 24),
-    types: Object.fromEntries(Object.entries(o).map(([key, value]) => [key, Array.isArray(value) ? 'array' : typeof value])),
-  }));
   const action = str(o.action).toUpperCase();
   const declaredStatus = str(o.status).toUpperCase().replace(/[\s-]/g, '_');
   // Gemini can occasionally omit only `status` while still returning the full
@@ -731,6 +723,10 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         }
 
         if (parsed.status === 'ANSWER') {
+          // Gemini sometimes puts the complete user-facing response in `summary`
+          // and omits `message`. The client-facing answer must still contain that
+          // text whether the model supplied a citation or we attach one below.
+          const displayText = parsed.message ?? parsed.summary ?? '';
           const returnedIds = new Set(returned.map((p) => p.chunkId));
           const accepted = (parsed.evidenceRefs ?? []).filter((id) => returnedIds.has(id)).slice(0, 6);
           if (accepted.length === 0) {
@@ -752,7 +748,6 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
             // attach the retrieved passage ourselves. This avoids a raw source fragment
             // and an extra model round-trip. Personal rulings and invented IDs still
             // fail closed.
-            const displayText = parsed.message ?? parsed.summary;
             const sourceExcerpt = !parsed.label && (parsed.evidenceRefs?.length ?? 0) === 0
               ? returned.find((passage) => {
                   const answerText = normalizeQuery(displayText ?? '');
@@ -823,7 +818,7 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
           return {
             status: 'completed',
             answer: {
-              text: parsed.message ?? '',
+              text: displayText,
               ...(first?.sourceTitle ? { sourceTitle: first.sourceTitle } : {}),
               evidenceIds: accepted,
               // Stage 4C.6: the structural ruling classification rides the SAME answer

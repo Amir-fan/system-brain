@@ -235,6 +235,17 @@ test('Minimal/G: an uncited educational summary is used when the provider omits 
   assert.equal(out.answer.text, 'أكثر مدة النفاس ستون يومًا عند المصدر المعتمد.');
 });
 
+test('Minimal/G: a cited educational summary remains visible when message is omitted', async () => {
+  const { out, k } = await run({
+    text: 'ما مدة النفاس؟',
+    responses: [tool('أكثر النفاس'), summaryAnswer('أكثر مدة النفاس ستون يومًا عند المصدر المعتمد.', [CHUNK_A])],
+  });
+  assert.equal(k.calls.searches, 1);
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
+  assert.equal(out.answer.text, 'أكثر مدة النفاس ستون يومًا عند المصدر المعتمد.');
+});
+
 test('Minimal/G: an initial uncited answer is recovered with one approved-source lookup', async () => {
   const { out, k, m } = await run({
     text: 'هل يجوز لي الصلاة وأنا في حالة استحاضة مستمرة؟',
