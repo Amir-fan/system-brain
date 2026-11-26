@@ -235,14 +235,22 @@ test('Minimal/I: the Knowledge tool call maximum is enforced', async () => {
   assert.ok(out.trace.notes.includes(`tool_calls=${MAX_TOOL_CALLS}`));
 });
 
-// I2 — a model that keeps requesting the tool cannot loop forever
-test('Minimal/I2: a runaway tool loop is stopped by the model-call bound', async () => {
-  const { out, k } = await run({ text: 'ما الحكم؟', responses: [tool('q1'), tool('q2'), tool('q3')] });
-  assert.equal(k.calls.searches, MAX_TOOL_CALLS, 'searches stay bounded');
-  assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
-  assert.ok(out.trace.notes.includes('model_call_bound_reached'));
-  assert.ok(out.trace.notes.includes(`model_calls=${MAX_MODEL_CALLS}`));
-  assert.equal(out.answer.evidenceIds, undefined, 'no ruling is fabricated');
+// I2 — a model that keeps requesting the tool cannot loop forever. When it has
+// already retrieved an approved passage, return that exact passage rather than
+// inventing a ruling or exposing a generic failure.
+test('Minimal/I2: a runaway tool loop returns an approved source excerpt or fails closed', async () => {
+  const empty = await run({ text: 'ما الحكم؟', responses: [tool('q1'), tool('q2'), tool('q3')], knowledgeOpts: { noHits: true } });
+  assert.equal(empty.k.calls.searches, MAX_TOOL_CALLS, 'searches stay bounded without evidence');
+  assert.equal(empty.out.trace.status, 'INSUFFICIENT_EVIDENCE');
+  assert.ok(empty.out.trace.notes.includes('model_call_bound_reached'));
+  assert.equal(empty.out.answer.evidenceIds, undefined, 'no ruling is fabricated without evidence');
+
+  const sourced = await run({ text: 'ما الحكم؟', responses: [tool('q1'), tool('q2'), tool('q3')] });
+  assert.equal(sourced.k.calls.searches, MAX_TOOL_CALLS, 'searches stay bounded with evidence');
+  assert.equal(sourced.out.trace.status, 'ANSWER');
+  assert.ok(sourced.out.trace.notes.includes('model_call_bound_returned_as_source_excerpt'));
+  assert.deepEqual(sourced.out.answer.evidenceIds, [CHUNK_A]);
+  assert.match(sourced.out.answer.text, /^بحسب المصدر المعتمد:/, 'the fallback is an attributed excerpt, not a fabricated ruling');
 });
 
 // J — the control Skill is untouched and selection stays explicit by skillId

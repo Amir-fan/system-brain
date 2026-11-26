@@ -23,7 +23,7 @@ import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admi
 import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MINIMAL_SKILL_ID = 'naqaa.fiqh-hayd-minimal';
-export const MINIMAL_SKILL_VERSION = 8; // v7 → v8: return a sourced excerpt after a persistently uncited answer
+export const MINIMAL_SKILL_VERSION = 9; // v8 → v9: return retrieved approved evidence when the model reaches its call bound
 /** Provenance marker — emitted on EVERY terminal path. */
 export const MINIMAL_TRACE_MARKER = 'minimal_mind_v0';
 
@@ -563,13 +563,10 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
       // 3. ONE intelligence with bounded tool loop.
       for (;;) {
         if (modelCalls >= MAX_MODEL_CALLS) {
-          // The model can keep requesting the tool after the execution boundary has
-          // already recovered an initial missed lookup. The bound must still stop the
-          // loop, but the retrieved approved passage is safer and more useful than
-          // replacing it with a generic evidence-gap message.
-          const sourceExcerpt = recoveredInitialEvidenceGap
-            ? returned.find((passage) => normalizeQuery(passage.text))
-            : undefined;
+          // The model can keep requesting the tool after it has received approved
+          // evidence. The bound still stops the loop, but returning that exact passage
+          // is safer and more useful than exposing a generic evidence-gap message.
+          const sourceExcerpt = returned.find((passage) => normalizeQuery(passage.text));
           if (sourceExcerpt) {
             return {
               status: 'completed',
