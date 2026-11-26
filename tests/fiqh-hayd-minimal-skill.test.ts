@@ -356,6 +356,19 @@ test('Minimal/4A: a second consecutive unusable response still fails closed (bou
   assert.ok(m.captured.messages.length <= MAX_MODEL_CALLS, 'never exceeds the model-call bound');
 });
 
+test('Minimal/4A: repeated malformed return-bleeding output becomes a safe duration question, never a ruling', async () => {
+  const { out, m } = await run({
+    text: 'عاد لي الدم بعد أن انقطع، ما الحكم؟',
+    responses: ['غير منسق', 'غير منسق'],
+  });
+  assert.equal(m.captured.messages.length, 2, 'uses only the existing one same-turn recovery');
+  assert.equal(out.readiness.status, 'NEEDS_INFORMATION');
+  assert.equal(out.readiness.missing[0].key, 'purity_duration');
+  assert.equal(out.readiness.missing[0].question.wording, 'كم يومًا استمر الانقطاع قبل عودة الدم؟');
+  assert.equal(out.answer, undefined, 'a recovery question must not fabricate a ruling');
+  assert.ok(out.trace.notes.includes('unreadable_model_output_recovered_as_safe_question'));
+});
+
 test('Minimal: the model may declare the evidence insufficient', async () => {
   const { out } = await run({ text: 'ما الحكم؟', responses: [tool('حكم الصفرة'), insufficient('النصوص المعروضة لا تحسم الحالة.')] });
   assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');

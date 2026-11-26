@@ -23,7 +23,7 @@ import { isConfirmedMaterialFact } from '../../core/readiness/material-fact-admi
 import { APPROVED_SOURCE_TITLES, FIQH_EVIDENCE_GAP_MESSAGE, FIQH_FACT_KEY_PATTERN, isFiqhDecisionMaterialFactKey } from './fiqh-hayd-contracts.ts';
 
 export const MINIMAL_SKILL_ID = 'naqaa.fiqh-hayd-minimal';
-export const MINIMAL_SKILL_VERSION = 12; // v11 → v12: one-search fast path and malformed-output recovery
+export const MINIMAL_SKILL_VERSION = 13; // v12 → v13: safe clarification recovery for repeated malformed return-bleeding turns
 /** Provenance marker — emitted on EVERY terminal path. */
 export const MINIMAL_TRACE_MARKER = 'minimal_mind_v0';
 
@@ -274,6 +274,25 @@ const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 const bounded = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
 const boundedTail = (s: string, n: number): string => (s.length > n ? `…${s.slice(-n)}` : s);
 const normalizeQuery = (q: string): string => q.replace(/\s+/g, ' ').trim();
+
+/**
+ * A malformed model response must never become a fiqh ruling. For the one
+ * high-signal pattern below, however, it is safe and useful to preserve the
+ * conversation by asking for the single fact that the wording clearly lacks.
+ */
+function returningBleedingClarification(text: string) {
+  const normalized = normalizeQuery(text);
+  const mentionsBleeding = /دم|نزف/.test(normalized);
+  const mentionsReturn = /عاد|رجع|رجعت/.test(normalized);
+  const mentionsStop = /انقطع|انقطعت|توقف|توقّف|وقف/.test(normalized);
+  if (!mentionsBleeding || !mentionsReturn || !mentionsStop) return undefined;
+
+  return {
+    key: 'purity_duration',
+    question: 'كم يومًا استمر الانقطاع قبل عودة الدم؟',
+    interaction: { type: 'duration' as const },
+  };
+}
 
 /**
  * Parser is the source of truth. The structured schema guides the model; the parser
@@ -656,6 +675,30 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
             retriedEmpty = true;
             interaction += '\n\nالرد السابق لم يكن JSON صالحًا. أرسلي الآن ردًا واحدًا فقط بصيغة JSON المطلوبة، دون أي نص خارجه.';
             continue;
+          }
+          const clarification = returningBleedingClarification(text);
+          if (clarification) {
+            const readiness = deps.readiness.evaluate({
+              requirements: [{
+                key: clarification.key,
+                description: clarification.question,
+                material: true,
+                question: { key: clarification.key, wording: clarification.question },
+                interaction: clarification.interaction,
+              }],
+              known: [],
+            });
+            return {
+              status: 'completed',
+              readiness,
+              trace: {
+                ...(str(out.model) ? { model: str(out.model) } : {}),
+                status: 'NEED_INFO',
+                requirementKeys: [clarification.key],
+                workload: WORKLOAD,
+                notes: notes(['unreadable_model_output_recovered_as_safe_question']),
+              },
+            };
           }
           return gap('unreadable_model_output', 'تعذّر ترتيب الجواب الآن. حاولي مرة أخرى.', {
             ...(str(out.model) ? { model: str(out.model) } : {}),
