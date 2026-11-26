@@ -560,13 +560,29 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         return entry;
       };
 
+      // A final source lookup is allowed only after the bounded model loop has
+      // stopped without usable evidence. It is not another model-requested tool
+      // call, and it returns an attributed passage rather than a generated ruling.
+      let attemptedTerminalSourceLookup = false;
+      const terminalSourceExcerpt = async (): Promise<SkillKnowledgePassage | undefined> => {
+        const existing = returned.find((passage) => normalizeQuery(passage.text));
+        if (existing || attemptedTerminalSourceLookup) return existing;
+        attemptedTerminalSourceLookup = true;
+        const query = bounded(normalizeQuery(text), MAX_QUESTION_CHARS);
+        if (!query) return undefined;
+        const hits = await ctx.knowledge!.search({ query, topK: TOOL_TOP_K, sourceIds: approvedIds });
+        const sourceExcerpt = hits.find((passage) => passage.sourceId && approvedIds.includes(passage.sourceId) && normalizeQuery(passage.text));
+        if (sourceExcerpt && !returned.some((passage) => passage.chunkId === sourceExcerpt.chunkId)) returned.push(sourceExcerpt);
+        return sourceExcerpt;
+      };
+
       // 3. ONE intelligence with bounded tool loop.
       for (;;) {
         if (modelCalls >= MAX_MODEL_CALLS) {
           // The model can keep requesting the tool after it has received approved
           // evidence. The bound still stops the loop, but returning that exact passage
           // is safer and more useful than exposing a generic evidence-gap message.
-          const sourceExcerpt = returned.find((passage) => normalizeQuery(passage.text));
+          const sourceExcerpt = await terminalSourceExcerpt();
           if (sourceExcerpt) {
             return {
               status: 'completed',
@@ -584,7 +600,12 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
                 approvedSourceIds: approvedIds,
                 sourceSupport: 'SUPPORTED',
                 workload: WORKLOAD,
-                notes: notes(['model_call_bound_returned_as_source_excerpt', `queries=${queries.join(' | ')}`]).slice(0, 8),
+                notes: notes([
+                  attemptedTerminalSourceLookup
+                    ? 'model_call_bound_terminal_source_lookup'
+                    : 'model_call_bound_returned_as_source_excerpt',
+                  `queries=${queries.join(' | ')}`,
+                ]).slice(0, 8),
               },
             };
           }

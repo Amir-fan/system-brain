@@ -240,7 +240,7 @@ test('Minimal/I: the Knowledge tool call maximum is enforced', async () => {
 // inventing a ruling or exposing a generic failure.
 test('Minimal/I2: a runaway tool loop returns an approved source excerpt or fails closed', async () => {
   const empty = await run({ text: 'ما الحكم؟', responses: [tool('q1'), tool('q2'), tool('q3')], knowledgeOpts: { noHits: true } });
-  assert.equal(empty.k.calls.searches, MAX_TOOL_CALLS, 'searches stay bounded without evidence');
+  assert.equal(empty.k.calls.searches, MAX_TOOL_CALLS + 1, 'one terminal lookup is allowed after bounded tool calls');
   assert.equal(empty.out.trace.status, 'INSUFFICIENT_EVIDENCE');
   assert.ok(empty.out.trace.notes.includes('model_call_bound_reached'));
   assert.equal(empty.out.answer.evidenceIds, undefined, 'no ruling is fabricated without evidence');
