@@ -316,7 +316,19 @@ function parseModelResponse(text: string): MinimalResponse | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
   const action = str(o.action).toUpperCase();
-  const status = str(o.status).toUpperCase().replace(/[\s-]/g, '_');
+  const declaredStatus = str(o.status).toUpperCase().replace(/[\s-]/g, '_');
+  // Gemini can occasionally omit only `status` while still returning the full
+  // TERMINAL question or answer shape. Recover that unambiguous omission here;
+  // ambiguous or incomplete objects still fail closed below.
+  const status = declaredStatus || (
+    action === 'TERMINAL'
+      ? (str(o.question) && isFactKey(o.factKey) && isInteractionType(o.answerType)
+        ? 'ASK_USER'
+        : (str(o.message) || str(o.summary))
+          ? 'ANSWER'
+          : '')
+      : ''
+  );
   const hasLabel = Object.hasOwn(o, 'label');
   const hasMaterialFactKeys = Object.hasOwn(o, 'materialFactKeys');
   if ((hasLabel || hasMaterialFactKeys)
@@ -626,21 +638,6 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
         });
         const parsed = parseModelResponse(out.text);
         if (!parsed) {
-          const trimmedOutput = out.text.trim();
-          let root = 'invalid';
-          try {
-            const value: unknown = JSON.parse(trimmedOutput);
-            root = Array.isArray(value) ? 'array' : value !== null && typeof value === 'object' ? 'object' : typeof value;
-          } catch { /* Safe shape-only diagnostic below. */ }
-          console.warn('[naqaa-minimal-format]', JSON.stringify({
-            root,
-            chars: out.text.length,
-            startsObject: trimmedOutput.startsWith('{'),
-            startsArray: trimmedOutput.startsWith('['),
-            hasAction: /"action"\s*:/.test(out.text),
-            hasStatus: /"status"\s*:/.test(out.text),
-            ...(out.model ? { model: out.model } : {}),
-          }));
           // Stage 4A: the conversation context is IDENTICAL on every call of this loop
           // (the transcript + current turn live in `interaction`, rebuilt per turn), so a
           // Same-turn recovery after unusable output loses no context. It applies once
