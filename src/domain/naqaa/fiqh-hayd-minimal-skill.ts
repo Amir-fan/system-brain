@@ -515,8 +515,6 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
       let recoveredUncitedAnswer = false;
       /** True only when execution retrieved evidence after an initial premature evidence gap. */
       let recoveredInitialEvidenceGap = false;
-      /** One bounded re-emit after an answer omits required evidence references. */
-      let retriedMissingEvidenceRefs = false;
       const queries: string[] = [];
       const returned: SkillKnowledgePassage[] = [];
       /** Per-turn evidence cache: identical normalised query reuses the last result. */
@@ -597,34 +595,14 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
       for (;;) {
         if (modelCalls >= MAX_MODEL_CALLS) {
           // The model can keep requesting the tool after it has received approved
-          // evidence. The bound still stops the loop, but returning that exact passage
-          // is safer and more useful than exposing a generic evidence-gap message.
+          // evidence. The bound still stops the loop. An unformed model response must
+          // remain an evidence gap rather than exposing raw source text as an answer.
           const sourceExcerpt = await terminalSourceExcerpt();
           if (sourceExcerpt) {
-            return {
-              status: 'completed',
-              answer: {
-                text: `بحسب المصدر المعتمد:\n${bounded(sourceExcerpt.text, 900)}`,
-                sourceTitle: sourceExcerpt.sourceTitle,
-                evidenceIds: [sourceExcerpt.chunkId],
-                structured: { summary: 'هذا ما ورد في المصدر المعتمد.' },
-              },
-              trace: {
-                status: 'ANSWER',
-                acceptedEvidenceRefs: [sourceExcerpt.chunkId],
-                retrievedEvidenceIds: [...returned.map((p) => p.chunkId)],
-                evidence: returned.map((p) => ({ chunkId: p.chunkId, sourceId: p.sourceId })),
-                approvedSourceIds: approvedIds,
-                sourceSupport: 'SUPPORTED',
-                workload: WORKLOAD,
-                notes: notes([
-                  attemptedTerminalSourceLookup
-                    ? 'model_call_bound_terminal_source_lookup'
-                    : 'model_call_bound_returned_as_source_excerpt',
-                  `queries=${queries.join(' | ')}`,
-                ]).slice(0, 8),
-              },
-            };
+            return gap('model_call_bound_with_retrieved_evidence', 'تعذر عليّ صياغة جواب موثق الآن. أعيدي المحاولة بعد لحظة.', {
+              retrievedEvidenceIds: [...returned.map((p) => p.chunkId)],
+              notes: [`queries=${queries.join(' | ')}`],
+            });
           }
           return gap('model_call_bound_reached', 'الدليل المتاح غير كافٍ للحكم الآن.', {
             retrievedEvidenceIds: [...returned.map((p) => p.chunkId)],
@@ -739,26 +717,50 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
                 continue;
               }
             }
-            // Never display a raw source fragment as a user-facing answer. When
-            // approved passages exist but the model omitted evidenceRefs, give it one
-            // bounded chance to emit a normal cited answer. Invented reference IDs and
-            // personal classifications remain fail-closed.
-            if (
-              !parsed.label
-              && (parsed.evidenceRefs?.length ?? 0) === 0
-              && returned.length > 0
-              && !retriedMissingEvidenceRefs
-              && modelCalls < MAX_MODEL_CALLS
-            ) {
-              retriedMissingEvidenceRefs = true;
-              const allowedIds = returned.map((passage) => passage.chunkId).join(', ');
-              interaction += `\n\nردك السابق رُفض لأنه لا يحتوي evidenceRefs. أعدي الآن جوابًا عربيًا بسيطًا، وأضيفي evidenceRefs إلزاميًا من هذه المعرفات فقط: [${allowedIds}]. لا تعرضي نص المصدر الخام، ولا تطلبي بحثًا جديدًا.`;
-              continue;
+            // Some providers omit only the evidenceRefs field despite receiving the
+            // strict contract. For an educational (unlabelled) response that followed
+            // an approved lookup, retain the model's normal user-facing explanation and
+            // attach the retrieved passage ourselves. This avoids a raw source fragment
+            // and an extra model round-trip. Personal rulings and invented IDs still
+            // fail closed.
+            const displayText = parsed.message ?? parsed.summary;
+            const sourceExcerpt = !parsed.label && (parsed.evidenceRefs?.length ?? 0) === 0
+              ? returned.find((passage) => {
+                  const answerText = normalizeQuery(displayText ?? '');
+                  const sourceText = normalizeQuery(passage.text);
+                  return answerText.length >= 24
+                    && !answerText.startsWith('بحسب المصدر المعتمد')
+                    && !(sourceText.length >= 40 && (answerText.includes(sourceText) || sourceText.includes(answerText)));
+                })
+              : undefined;
+            if (sourceExcerpt) {
+              return {
+                status: 'completed',
+                answer: {
+                  text: displayText ?? '',
+                  sourceTitle: sourceExcerpt.sourceTitle,
+                  evidenceIds: [sourceExcerpt.chunkId],
+                  ...(parsed.summary ? { structured: { summary: parsed.summary } } : {}),
+                },
+                trace: {
+                  ...modelName,
+                  status: 'ANSWER',
+                  acceptedEvidenceRefs: [sourceExcerpt.chunkId],
+                  retrievedEvidenceIds: [...returnedIds],
+                  evidence: returned.map((passage) => ({ chunkId: passage.chunkId, sourceId: passage.sourceId })),
+                  approvedSourceIds: approvedIds,
+                  sourceSupport: 'SUPPORTED',
+                  workload: WORKLOAD,
+                  notes: notes(['educational_answer_attached_to_retrieved_evidence', `queries=${queries.join(' | ')}`]).slice(0, 8),
+                },
+              };
             }
             return gap('answer_without_tool_evidence', 'الدليل المتاح غير كافٍ للحكم الآن.', {
               ...modelName,
               retrievedEvidenceIds: [...returnedIds],
-              notes: [`queries=${queries.join(' | ')}`],
+              notes: [
+                `queries=${queries.join(' | ')}`,
+              ],
             });
           }
           if (parsed.label && (!parsed.materialFactKeys?.length || !parsed.materialFactKeys.every((key) =>
@@ -854,26 +856,11 @@ export function createFiqhHaydMinimalSkill(deps: MinimalDeps): SkillDefinition {
           ? returned.find((passage) => normalizeQuery(passage.text))
           : undefined;
         if (sourceExcerpt) {
-          return {
-            status: 'completed',
-            answer: {
-              text: `بحسب المصدر المعتمد:\n${bounded(sourceExcerpt.text, 900)}`,
-              sourceTitle: sourceExcerpt.sourceTitle,
-              evidenceIds: [sourceExcerpt.chunkId],
-              structured: { summary: 'هذا ما ورد في المصدر المعتمد.' },
-            },
-            trace: {
-              ...modelName,
-              status: 'ANSWER',
-              acceptedEvidenceRefs: [sourceExcerpt.chunkId],
-              retrievedEvidenceIds: [...returned.map((p) => p.chunkId)],
-              evidence: returned.map((p) => ({ chunkId: p.chunkId, sourceId: p.sourceId })),
-              approvedSourceIds: approvedIds,
-              sourceSupport: 'SUPPORTED',
-              workload: WORKLOAD,
-              notes: notes(['initial_evidence_gap_returned_as_source_excerpt', `queries=${queries.join(' | ')}`]).slice(0, 8),
-            },
-          };
+          return gap('initial_evidence_gap_with_unusable_model_output', 'تعذر عليّ صياغة جواب موثق الآن. أعيدي المحاولة بعد لحظة.', {
+            ...modelName,
+            retrievedEvidenceIds: [...returned.map((p) => p.chunkId)],
+            notes: [`queries=${queries.join(' | ')}`],
+          });
         }
 
         // INSUFFICIENT_EVIDENCE

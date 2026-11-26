@@ -80,6 +80,7 @@ async function run(opts: {
 const tool = (query: string) => JSON.stringify({ action: 'USE_TOOL', tool: 'search_knowledge', query });
 const askUser = (question: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question, factKey: 'requested_fact', answerType: 'free_text' });
 const answer = (text: string, refs: string[]) => JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: text, evidenceRefs: refs });
+const summaryAnswer = (summary: string, refs: string[]) => JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', summary, evidenceRefs: refs });
 const insufficient = (text: string) => JSON.stringify({ action: 'TERMINAL', status: 'INSUFFICIENT_EVIDENCE', message: text });
 const askTool = (q: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question: q, factKey: 'requested_fact', answerType: 'free_text' });
 
@@ -186,26 +187,37 @@ test('Minimal/G: an ANSWER without tool evidence fails closed', async () => {
   assert.equal(out.answer.evidenceIds, undefined);
 });
 
-test('Minimal/G: an uncited answer is re-emitted as a normal cited answer', async () => {
-  const { out, m } = await run({
+test('Minimal/G: an uncited educational answer keeps its normal text and attaches retrieved evidence', async () => {
+  const { out } = await run({
     text: 'هل هذا حيض؟',
-    responses: [answer('هذا حيض بلا بحث.', []), answer('هذا حيض بلا بحث.', []), answer('الجواب الموثق.', [CHUNK_A])],
+    responses: [answer('هذا حيض بلا بحث.', []), answer('هذا شرح مبسط يوضح الحكم في هذه الحالة.', [])],
   });
   assert.equal(out.trace.status, 'ANSWER');
-  assert.equal(out.answer.text, 'الجواب الموثق.');
+  assert.equal(out.answer.text, 'هذا شرح مبسط يوضح الحكم في هذه الحالة.');
   assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
-  assert.ok(m.captured.messages[2].includes('لا يحتوي evidenceRefs'), 'the re-emit explains the missing citation field');
+  assert.ok(out.trace.notes.includes('educational_answer_attached_to_retrieved_evidence'));
 });
 
-test('Minimal/G: an uncited answer after an approved search is re-emitted with a valid citation', async () => {
+test('Minimal/G: an uncited answer after an approved search keeps its normal text and attached evidence', async () => {
   const { out, k } = await run({
     text: 'هل هذا حيض؟',
-    responses: [tool('الاستحاضة'), answer('حكم غير موثق.', []), answer('جواب موثق.', [CHUNK_A])],
+    responses: [tool('الاستحاضة'), answer('هذا شرح مبسط يوضح الحكم في هذه الحالة.', [])],
   });
   assert.equal(k.calls.searches, 1);
   assert.equal(out.trace.status, 'ANSWER');
   assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
-  assert.equal(out.answer.text, 'جواب موثق.');
+  assert.equal(out.answer.text, 'هذا شرح مبسط يوضح الحكم في هذه الحالة.');
+});
+
+test('Minimal/G: an uncited educational summary is used when the provider omits message', async () => {
+  const { out, k } = await run({
+    text: 'ما مدة النفاس؟',
+    responses: [tool('أكثر النفاس'), summaryAnswer('أكثر مدة النفاس ستون يومًا عند المصدر المعتمد.', [])],
+  });
+  assert.equal(k.calls.searches, 1);
+  assert.equal(out.trace.status, 'ANSWER');
+  assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
+  assert.equal(out.answer.text, 'أكثر مدة النفاس ستون يومًا عند المصدر المعتمد.');
 });
 
 test('Minimal/G: an initial uncited answer is recovered with one approved-source lookup', async () => {
@@ -246,10 +258,10 @@ test('Minimal/I: the Knowledge tool call maximum is enforced', async () => {
   assert.ok(out.trace.notes.includes(`tool_calls=${MAX_TOOL_CALLS}`));
 });
 
-// I2 — a model that keeps requesting the tool cannot loop forever. When it has
-// already retrieved an approved passage, return that exact passage rather than
-// inventing a ruling or exposing a generic failure.
-test('Minimal/I2: a runaway tool loop returns an approved source excerpt or fails closed', async () => {
+// I2 — a model that keeps requesting the tool cannot loop forever. Even with an
+// approved passage, an unformed model response must fail closed instead of exposing
+// raw source text as if it were a user-facing answer.
+test('Minimal/I2: a runaway tool loop fails closed without exposing a source excerpt', async () => {
   const empty = await run({ text: 'ما الحكم؟', responses: [tool('q1'), tool('q2'), tool('q3')], knowledgeOpts: { noHits: true } });
   assert.equal(empty.k.calls.searches, MAX_TOOL_CALLS + 1, 'one terminal lookup is allowed after bounded tool calls');
   assert.equal(empty.out.trace.status, 'INSUFFICIENT_EVIDENCE');
@@ -258,10 +270,10 @@ test('Minimal/I2: a runaway tool loop returns an approved source excerpt or fail
 
   const sourced = await run({ text: 'ما الحكم؟', responses: [tool('q1'), tool('q2'), tool('q3')] });
   assert.equal(sourced.k.calls.searches, MAX_TOOL_CALLS, 'searches stay bounded with evidence');
-  assert.equal(sourced.out.trace.status, 'ANSWER');
-  assert.ok(sourced.out.trace.notes.includes('model_call_bound_returned_as_source_excerpt'));
-  assert.deepEqual(sourced.out.answer.evidenceIds, [CHUNK_A]);
-  assert.match(sourced.out.answer.text, /^بحسب المصدر المعتمد:/, 'the fallback is an attributed excerpt, not a fabricated ruling');
+  assert.equal(sourced.out.trace.status, 'INSUFFICIENT_EVIDENCE');
+  assert.ok(sourced.out.trace.notes.includes('model_call_bound_with_retrieved_evidence'));
+  assert.equal(sourced.out.answer.evidenceIds, undefined);
+  assert.doesNotMatch(sourced.out.answer.text, /بحسب المصدر المعتمد/, 'raw source text is never used as an answer');
 });
 
 // J — the control Skill is untouched and selection stays explicit by skillId
@@ -331,25 +343,25 @@ test('Minimal: an initial evidence-gap response triggers one required source loo
   assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
 });
 
-test('Minimal: a source retrieved after an initial evidence gap is returned when the model declines it again', async () => {
+test('Minimal: a source retrieved after an initial evidence gap fails closed when the model declines it again', async () => {
   const { out } = await run({
     text: 'هل يجوز لي الصلاة وأنا في حالة استحاضة مستمرة؟',
     responses: [insufficient('لا أعلم.'), insufficient('لا أعلم.'), insufficient('لا أعلم.')],
   });
-  assert.equal(out.trace.status, 'ANSWER');
-  assert.ok(out.trace.notes.includes('initial_evidence_gap_returned_as_source_excerpt'));
-  assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
+  assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
+  assert.ok(out.trace.notes.includes('initial_evidence_gap_with_unusable_model_output'));
+  assert.equal(out.answer.evidenceIds, undefined);
 });
 
-test('Minimal: an initial evidence-gap recovery remains useful when the model reaches its call bound', async () => {
+test('Minimal: an initial evidence-gap recovery remains bounded when the model reaches its call bound', async () => {
   const { out, k } = await run({
     text: 'هل يجوز لي الصلاة وأنا في حالة استحاضة مستمرة؟',
     responses: [insufficient('لا أعلم.'), tool('q1'), tool('q2'), tool('q3')],
   });
   assert.equal(k.calls.searches, MAX_TOOL_CALLS, 'the recovery does not exceed the tool bound');
-  assert.equal(out.trace.status, 'ANSWER');
-  assert.ok(out.trace.notes.includes('model_call_bound_returned_as_source_excerpt'));
-  assert.deepEqual(out.answer.evidenceIds, [CHUNK_A]);
+  assert.equal(out.trace.status, 'INSUFFICIENT_EVIDENCE');
+  assert.ok(out.trace.notes.includes('model_call_bound_with_retrieved_evidence'));
+  assert.equal(out.answer.evidenceIds, undefined);
 });
 
 test('Minimal: evidence that is prematurely declined is retried once as a safe answer or one question', async () => {
