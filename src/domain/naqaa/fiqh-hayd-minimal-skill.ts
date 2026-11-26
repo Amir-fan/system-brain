@@ -316,6 +316,14 @@ function parseModelResponse(text: string): MinimalResponse | null {
   }
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
+  // Temporary production diagnostic: providers occasionally vary the JSON field
+  // names despite the response schema. Log only the object shape (never message
+  // content, user input, or source text) so the compatibility parser can be fixed
+  // from evidence. Remove once the live shape is confirmed.
+  console.info('[naqaa-minimal-response-shape]', JSON.stringify({
+    keys: Object.keys(o).sort().slice(0, 24),
+    types: Object.fromEntries(Object.entries(o).map(([key, value]) => [key, Array.isArray(value) ? 'array' : typeof value])),
+  }));
   const action = str(o.action).toUpperCase();
   const declaredStatus = str(o.status).toUpperCase().replace(/[\s-]/g, '_');
   // Gemini can occasionally omit only `status` while still returning the full
