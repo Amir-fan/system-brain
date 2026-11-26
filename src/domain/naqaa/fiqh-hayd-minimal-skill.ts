@@ -46,6 +46,7 @@ const MAX_QUESTION_CHARS = 300;
 /** Stage 4C.6: the ONLY structural ruling classifications the client can consume. */
 const LABELS = ['hayd', 'istihada', 'nifas'] as const;
 const LEGACY_QUESTION_KEY = 'minimal_followup';
+const RECOVERED_QUESTION_KEY = 'assistant_follow_up';
 const FACT_KEY_PATTERN = new RegExp(FIQH_FACT_KEY_PATTERN);
 const isFactKey = (value: unknown): value is string => typeof value === 'string'
   && value.length <= 60 && FACT_KEY_PATTERN.test(value)
@@ -322,7 +323,7 @@ function parseModelResponse(text: string): MinimalResponse | null {
   // ambiguous or incomplete objects still fail closed below.
   const status = declaredStatus || (
     action === 'TERMINAL'
-      ? (str(o.question) && isFactKey(o.factKey) && isInteractionType(o.answerType)
+      ? (str(o.question)
         ? 'ASK_USER'
         : (str(o.message) || str(o.summary))
           ? 'ANSWER'
@@ -355,6 +356,14 @@ function parseModelResponse(text: string): MinimalResponse | null {
   const refs = Array.isArray(o.evidenceRefs)
     ? o.evidenceRefs.map((x) => str(x)).filter(Boolean).slice(0, 6)
     : undefined;
+  const question = str(o.question);
+  // A question is safe to recover as an interaction even when Gemini omits the
+  // auxiliary contract fields. This never creates a ruling: it only asks the
+  // user for more information, and the next turn still goes through the normal
+  // source-grounded decision path.
+  const recoveredQuestionContract = action === 'TERMINAL'
+    && status === 'ASK_USER'
+    && Boolean(question);
   // RX1 visual: accept only a well-formed semantic timeline; anything else is dropped
   // (never a parse failure — the visual is a presentation hint, not a verdict).
   let visual: MinimalVisual | undefined;
@@ -376,10 +385,10 @@ function parseModelResponse(text: string): MinimalResponse | null {
     action: 'TERMINAL',
     status: status as MinimalResponse['status'],
     ...(str(o.message) ? { message: bounded(str(o.message), 1600) } : {}),
-    ...(str(o.question) ? { question: bounded(str(o.question), MAX_QUESTION_CHARS) } : {}),
+    ...(question ? { question: bounded(question, MAX_QUESTION_CHARS) } : {}),
     ...(o.yesNo === true ? { yesNo: true } : {}),
-    ...(isFactKey(o.factKey) ? { factKey: o.factKey } : {}),
-    ...(isInteractionType(o.answerType) ? { answerType: o.answerType } : {}),
+    ...(isFactKey(o.factKey) ? { factKey: o.factKey } : recoveredQuestionContract ? { factKey: RECOVERED_QUESTION_KEY } : {}),
+    ...(isInteractionType(o.answerType) ? { answerType: o.answerType } : recoveredQuestionContract ? { answerType: 'free_text' } : {}),
     ...(Array.isArray(o.options) ? { options: o.options.map((x) => str(x)).filter(Boolean).slice(0, 6) } : {}),
     ...(refs && refs.length > 0 ? { evidenceRefs: refs } : {}),
     ...(materialFactKeys ? { materialFactKeys } : {}),

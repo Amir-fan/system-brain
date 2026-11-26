@@ -80,6 +80,7 @@ async function run(opts: {
 const tool = (query: string) => JSON.stringify({ action: 'USE_TOOL', tool: 'search_knowledge', query });
 const askUser = (question: string) => JSON.stringify({ action: 'TERMINAL', status: 'ASK_USER', question, factKey: 'requested_fact', answerType: 'free_text' });
 const askUserWithoutStatus = (question: string) => JSON.stringify({ action: 'TERMINAL', question, factKey: 'requested_fact', answerType: 'free_text' });
+const questionOnly = (question: string) => JSON.stringify({ action: 'TERMINAL', question });
 const answer = (text: string, refs: string[]) => JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', message: text, evidenceRefs: refs });
 const summaryAnswer = (summary: string, refs: string[]) => JSON.stringify({ action: 'TERMINAL', status: 'ANSWER', summary, evidenceRefs: refs });
 const insufficient = (text: string) => JSON.stringify({ action: 'TERMINAL', status: 'INSUFFICIENT_EVIDENCE', message: text });
@@ -182,6 +183,13 @@ test('Minimal/F: the model can ask the user without any Knowledge call', async (
 test('Minimal/F: an otherwise complete terminal question may omit only status', async () => {
   const { out } = await run({ text: 'نزل مني شيء غريب', responses: [askUserWithoutStatus('ما الذي نزل بالضبط؟')] });
   assert.equal(out.readiness.status, 'NEEDS_INFORMATION');
+  assert.equal(out.readiness.missing[0].question.wording, 'ما الذي نزل بالضبط؟');
+});
+
+test('Minimal/F: an incomplete terminal question is recovered as a free-text clarification', async () => {
+  const { out } = await run({ text: 'نزل مني شيء غريب', responses: [questionOnly('ما الذي نزل بالضبط؟')] });
+  assert.equal(out.readiness.status, 'NEEDS_INFORMATION');
+  assert.equal(out.readiness.missing[0].key, 'assistant_follow_up');
   assert.equal(out.readiness.missing[0].question.wording, 'ما الذي نزل بالضبط؟');
 });
 
