@@ -55,7 +55,9 @@ test('conversational RAG sends only approved-source evidence to one natural-lang
   assert.match(seen.instructions ?? '', /فقط الحقائق الموجودة/);
   assert.match(seen.instructions ?? '', /المذهب الشافعي/);
   assert.match(seen.instructions ?? '', /سؤالًا واحدًا فقط/);
+  assert.match(seen.instructions ?? '', /لا تعيدي التحية أو التعريف بنفسك/);
   assert.match(seen.instructions ?? '', /كم يومًا استمر الانقطاع قبل عودة الدم/);
+  assert.match(seen.message ?? '', /هذه متابعة داخل محادثة قائمة/);
   assert.equal(seen.maxOutputTokens, 2_048);
   assert.equal(result.answer.text, 'هو فترة انقطاع الدم بين حيضة وأخرى.');
   assert.deepEqual(result.answer.evidenceIds, ['chunk-1']);
