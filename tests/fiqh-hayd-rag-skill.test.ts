@@ -56,7 +56,7 @@ test('conversational RAG sends only approved-source evidence to one natural-lang
   assert.match(seen.instructions ?? '', /المذهب الشافعي/);
   assert.match(seen.instructions ?? '', /سؤالًا واحدًا فقط/);
   assert.match(seen.instructions ?? '', /كم يومًا استمر الانقطاع قبل عودة الدم/);
-  assert.equal(seen.maxOutputTokens, 900);
+  assert.equal(seen.maxOutputTokens, 2_048);
   assert.equal(result.answer.text, 'هو فترة انقطاع الدم بين حيضة وأخرى.');
   assert.deepEqual(result.answer.evidenceIds, ['chunk-1']);
   assert.equal(result.trace.sourceSupport, 'SUPPORTED');
