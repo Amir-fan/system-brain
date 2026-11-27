@@ -55,6 +55,7 @@ test('conversational RAG sends only approved-source evidence to one natural-lang
   assert.match(seen.instructions ?? '', /فقط الحقائق الموجودة/);
   assert.match(seen.instructions ?? '', /المذهب الشافعي/);
   assert.match(seen.instructions ?? '', /سؤالًا واحدًا فقط/);
+  assert.match(seen.instructions ?? '', /لا تسألي عن معلومة صرّحت بها المستخدمة سابقًا/);
   assert.match(seen.instructions ?? '', /لا تعيدي التحية أو التعريف بنفسك/);
   assert.match(seen.instructions ?? '', /كم يومًا استمر الانقطاع قبل عودة الدم/);
   assert.match(seen.message ?? '', /هذه متابعة داخل محادثة قائمة/);
@@ -72,9 +73,15 @@ test('conversational RAG excludes a retrieval hit outside the approved source se
   assert.equal(result.answer.evidenceIds, undefined);
 });
 
-test('conversational RAG expands natural wording for blood returning after dryness into approved-source terms', async () => {
+test('conversational RAG expands natural wording for blood returning after dryness into approved-source terms across follow-up turns', async () => {
   const { value, seen } = context();
-  value.input = { text: 'رأيت جفافًا تامًا ثم عاد الدم بعد يومين، ما الحكم؟' };
+  value.input = {
+    text: '3',
+    recentTurns: [
+      { role: 'user', text: 'رأيت جفافًا تامًا ثم عاد الدم بعد يومين، ما الحكم؟' },
+      { role: 'assistant', text: 'كم مدة نزول الدم قبل أن ينقطع؟' },
+    ],
+  };
 
   await createFiqhHaydRagSkill().execute(value);
 
