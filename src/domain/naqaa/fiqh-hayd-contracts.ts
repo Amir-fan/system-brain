@@ -22,7 +22,10 @@ export const FIQH_HAYD_SKILL_VERSION = 1;
  * BY IDENTITY (resolved within the project), so an unrelated project source can
  * never ground a ruling — even when it shares the same retrieval role.
  */
-export const APPROVED_SOURCE_TITLES = ['الحيض الالوكة'] as const;
+export const APPROVED_SOURCE_TITLES = [
+  'الحيض الالوكة',
+  'المذاهب مارك داون',
+] as const;
 export const FIQH_EVIDENCE_GAP_MESSAGE = 'الدليل المتاح غير كافٍ للإجابة.';
 export const FIQH_FACT_KEY_PATTERN = '^[a-zA-Z][a-zA-Z0-9_]*$';
 

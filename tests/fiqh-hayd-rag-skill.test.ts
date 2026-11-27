@@ -65,6 +65,19 @@ test('conversational RAG sends only approved-source evidence to one natural-lang
   assert.equal(result.trace.sourceSupport, 'SUPPORTED');
 });
 
+test('conversational RAG resolves every client-approved fiqh source before retrieval', async () => {
+  const { value } = context();
+  let requestedTitles: string[] = [];
+  value.knowledge!.resolveSources = async (titles) => {
+    requestedTitles = titles;
+    return [{ id: APPROVED_SOURCE_ID, title: APPROVED_SOURCE_TITLES[0] }];
+  };
+
+  await createFiqhHaydRagSkill().execute(value);
+
+  assert.deepEqual(requestedTitles, [...APPROVED_SOURCE_TITLES]);
+});
+
 test('conversational RAG excludes a retrieval hit outside the approved source set', async () => {
   const { value } = context({ passages: [passage('unapproved-source')] });
   const result = await createFiqhHaydRagSkill().execute(value) as Record<string, any>;
