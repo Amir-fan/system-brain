@@ -123,7 +123,10 @@ export function createFiqhHaydRagSkill(): SkillDefinition {
         workload: WORKLOAD,
         instructions: RAG_INSTRUCTIONS,
         message,
-        maxOutputTokens: 500,
+        // Some approved-source answers need more than a terse response. A smaller
+        // provider budget can end with `length`, which is intentionally rejected
+        // by the gateway instead of showing a partial ruling to the user.
+        maxOutputTokens: 900,
         reasoning: 'off',
       });
       const answer = bounded(clean(completion.text), MAX_ANSWER_CHARS);
