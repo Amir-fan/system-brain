@@ -74,6 +74,12 @@ function retrievalQueryFor(text: string, conversation: string): string {
   return bounded(query.filter(Boolean).join(' '), 1_400);
 }
 
+function returningBloodAnchor(text: string, conversation: string): string | undefined {
+  const queryContext = [text, conversation].filter(Boolean).join(' ');
+  const refersToReturningBlood = /(?:جفاف|نقاء|انقطاع).{0,80}(?:عاد|رجع).{0,80}(?:دم|الدم)|(?:دم|الدم).{0,80}(?:عاد|رجع).{0,80}(?:جفاف|نقاء|انقطاع)/u.test(queryContext);
+  return refersToReturningBlood ? 'انقطاع الدم وعودته النقاء الحيض المتقطع' : undefined;
+}
+
 export function createFiqhHaydRagSkill(): SkillDefinition {
   return {
     id: FIQH_HAYD_RAG_SKILL_ID,
@@ -118,9 +124,16 @@ export function createFiqhHaydRagSkill(): SkillDefinition {
         : 'هذه أول رسالة في المحادثة. ابدئي بالجواب مباشرة، ولا تعرّفي بنفسك.';
       const retrievalQuery = retrievalQueryFor(text, conversation);
       const approvedIds = approved.map(source => source.id);
-      const retrieved = await ctx.knowledge!.search({ query: retrievalQuery, topK: MAX_PASSAGES, sourceIds: approvedIds });
-      const passages = retrieved
+      const anchor = returningBloodAnchor(text, conversation);
+      const [retrieved, anchored] = await Promise.all([
+        ctx.knowledge!.search({ query: retrievalQuery, topK: MAX_PASSAGES, sourceIds: approvedIds }),
+        anchor
+          ? ctx.knowledge!.search({ query: anchor, topK: MAX_PASSAGES, sourceIds: approvedIds })
+          : Promise.resolve([] as SkillKnowledgePassage[]),
+      ]);
+      const passages = [...anchored, ...retrieved]
         .filter(passage => approvedIds.includes(passage.sourceId) && clean(passage.text))
+        .filter((passage, index, all) => all.findIndex(candidate => candidate.chunkId === passage.chunkId) === index)
         .slice(0, MAX_PASSAGES);
 
       if (passages.length === 0) {
