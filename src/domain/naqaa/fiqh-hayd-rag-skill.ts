@@ -61,6 +61,16 @@ function renderEvidence(passages: SkillKnowledgePassage[]): string {
   ].join('\n')).join('\n\n');
 }
 
+function retrievalQueryFor(text: string, conversation: string): string {
+  const query = [text, conversation];
+  // The approved source uses "نقاء" and "انقطاع" while people naturally say
+  // "جفاف" and "رجع الدم". Add only equivalent retrieval terms; the model still
+  // answers solely from retrieved approved passages.
+  const refersToReturningBlood = /(?:جفاف|نقاء|انقطاع).{0,80}(?:عاد|رجع).{0,80}(?:دم|الدم)|(?:دم|الدم).{0,80}(?:عاد|رجع).{0,80}(?:جفاف|نقاء|انقطاع)/u.test(text);
+  if (refersToReturningBlood) query.push('انقطاع الدم وعودته النقاء الحيض المتقطع');
+  return bounded(query.filter(Boolean).join(' '), 1_400);
+}
+
 export function createFiqhHaydRagSkill(): SkillDefinition {
   return {
     id: FIQH_HAYD_RAG_SKILL_ID,
@@ -103,7 +113,7 @@ export function createFiqhHaydRagSkill(): SkillDefinition {
       const turnInstruction = conversation
         ? 'هذه متابعة داخل محادثة قائمة. استعملي ما سبق، ولا تبدئي بتحية أو تعريف جديد؛ ابدئي بالجواب المتصل بآخر رسالة.'
         : 'هذه أول رسالة في المحادثة. ابدئي بالجواب مباشرة، ولا تعرّفي بنفسك.';
-      const retrievalQuery = bounded([text, conversation].filter(Boolean).join(' '), 1_400);
+      const retrievalQuery = retrievalQueryFor(text, conversation);
       const approvedIds = approved.map(source => source.id);
       const retrieved = await ctx.knowledge!.search({ query: retrievalQuery, topK: MAX_PASSAGES, sourceIds: approvedIds });
       const passages = retrieved

@@ -71,3 +71,12 @@ test('conversational RAG excludes a retrieval hit outside the approved source se
   assert.equal(result.trace.status, 'SOURCE_GAP');
   assert.equal(result.answer.evidenceIds, undefined);
 });
+
+test('conversational RAG expands natural wording for blood returning after dryness into approved-source terms', async () => {
+  const { value, seen } = context();
+  value.input = { text: 'رأيت جفافًا تامًا ثم عاد الدم بعد يومين، ما الحكم؟' };
+
+  await createFiqhHaydRagSkill().execute(value);
+
+  assert.match(seen.query ?? '', /انقطاع الدم وعودته النقاء الحيض المتقطع/);
+});
